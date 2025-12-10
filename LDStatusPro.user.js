@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LDStatus Pro
 // @namespace    http://tampermonkey.net/
-// @version      2.4
+// @version      2.5
 // @description  在 Linux.do 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计
 // @author       JackLiii
 // @match        https://linux.do/*
@@ -35,10 +35,22 @@
             todayData: 'ldsp_today_data',
             userAvatar: 'ldsp_user_avatar',
             readingTime: 'ldsp_reading_time',
-            todayReadingStart: 'ldsp_today_reading_start'
+            todayReadingStart: 'ldsp_today_reading_start',
+            currentUser: 'ldsp_current_user',
+            // 新增：用户数据映射表
+            userDataMap: 'ldsp_user_data_map'
         },
+        // 需要按用户隔离的存储键
+        USER_SPECIFIC_KEYS: [
+            'history', 'milestones', 'lastVisit', 'todayData',
+            'userAvatar', 'readingTime', 'todayReadingStart'
+        ],
         REFRESH_INTERVAL: 300000,
         MAX_HISTORY_DAYS: 90,
+        // 阅读时间追踪配置
+        READING_TRACK_INTERVAL: 10000,  // 每10秒检测一次活跃状态
+        READING_IDLE_THRESHOLD: 60000,  // 60秒无操作视为不活跃
+        READING_SAVE_INTERVAL: 30000,   // 每30秒保存一次数据
         MILESTONES: {
             '浏览话题': [100, 500, 1000, 2000, 5000],
             '已读帖子': [500, 1000, 5000, 10000, 20000],
@@ -60,8 +72,107 @@
 
     // ==================== 工具函数 ====================
     const Utils = {
-        get: (key, def = null) => GM_getValue(CONFIG.STORAGE_KEYS[key], def),
-        set: (key, val) => GM_setValue(CONFIG.STORAGE_KEYS[key], val),
+        // 当前用户名（延迟初始化）
+        _currentUser: null,
+
+        // 获取当前用户名
+        getCurrentUser() {
+            if (this._currentUser) return this._currentUser;
+
+            // 尝试从页面获取用户名
+            const userLink = document.querySelector('.current-user a[href^="/u/"]');
+            if (userLink) {
+                const match = userLink.getAttribute('href').match(/\/u\/([^/]+)/);
+                if (match) {
+                    this._currentUser = match[1];
+                    GM_setValue(CONFIG.STORAGE_KEYS.currentUser, this._currentUser);
+                    return this._currentUser;
+                }
+            }
+
+            // 尝试从存储获取
+            this._currentUser = GM_getValue(CONFIG.STORAGE_KEYS.currentUser, null);
+            return this._currentUser;
+        },
+
+        // 设置当前用户
+        setCurrentUser(username) {
+            this._currentUser = username;
+            GM_setValue(CONFIG.STORAGE_KEYS.currentUser, username);
+        },
+
+        // 获取用户特定的存储键
+        getUserKey(key) {
+            const user = this.getCurrentUser();
+            if (user && CONFIG.USER_SPECIFIC_KEYS.includes(key)) {
+                return `${CONFIG.STORAGE_KEYS[key]}_${user}`;
+            }
+            return CONFIG.STORAGE_KEYS[key];
+        },
+
+        // 获取存储值（支持用户隔离）
+        get(key, def = null) {
+            const storageKey = this.getUserKey(key);
+            return GM_getValue(storageKey, def);
+        },
+
+        // 设置存储值（支持用户隔离）
+        set(key, val) {
+            const storageKey = this.getUserKey(key);
+            GM_setValue(storageKey, val);
+        },
+
+        // 迁移旧数据到新格式
+        migrateOldData(username) {
+            const oldKeys = CONFIG.USER_SPECIFIC_KEYS;
+            const migrationFlag = `ldsp_migrated_${username}`;
+
+            // 检查是否已迁移
+            if (GM_getValue(migrationFlag, false)) return;
+
+            oldKeys.forEach(key => {
+                const oldKey = CONFIG.STORAGE_KEYS[key];
+                const newKey = `${oldKey}_${username}`;
+                const oldData = GM_getValue(oldKey, null);
+
+                // 如果旧数据存在且新数据不存在，则迁移
+                if (oldData !== null && GM_getValue(newKey, null) === null) {
+                    GM_setValue(newKey, oldData);
+                    console.log(`[LDStatus Pro] 迁移数据: ${oldKey} -> ${newKey}`);
+                }
+            });
+
+            // 迁移阅读时间数据格式
+            this.migrateReadingTimeData(username);
+
+            // 标记已迁移
+            GM_setValue(migrationFlag, true);
+        },
+
+        // 迁移阅读时间数据格式
+        migrateReadingTimeData(username) {
+            const readingKey = `${CONFIG.STORAGE_KEYS.readingTime}_${username}`;
+            const oldData = GM_getValue(readingKey, null);
+
+            if (oldData && typeof oldData === 'object') {
+                // 检查是否是旧格式（只有 date 和 minutes）
+                if (oldData.date && oldData.minutes !== undefined && !oldData.dailyData) {
+                    // 转换为新格式
+                    const newData = {
+                        version: 2,
+                        dailyData: {
+                            [oldData.date]: {
+                                totalMinutes: oldData.minutes || 0,
+                                lastActive: oldData.lastActive || Date.now(),
+                                sessions: []
+                            }
+                        }
+                    };
+                    GM_setValue(readingKey, newData);
+                    console.log(`[LDStatus Pro] 迁移阅读时间数据格式: ${readingKey}`);
+                }
+            }
+        },
 
         compareVersion(v1, v2) {
             const p1 = v1.split('.').map(Number);
@@ -128,10 +239,8 @@
             const today = new Date().toDateString();
             const idx = history.findIndex(h => new Date(h.ts).toDateString() === today);
             const record = { ts: now, data, readingTime };
-
             if (idx >= 0) history[idx] = record;
             else history.push(record);
-
             Utils.set('history', history);
             return history;
         },
@@ -155,7 +264,6 @@
         setTodayData(data, readingTime = 0, isStart = false) {
             const today = Utils.getTodayKey();
             const existing = Utils.getTodayData();
-
             if (isStart || !existing) {
                 Utils.set('todayData', {
                     date: today,
@@ -203,6 +311,295 @@
         }
     };
 
+    // ==================== 阅读时间追踪器 ====================
+    class ReadingTimeTracker {
+        constructor() {
+            this.isActive = true;
+            this.lastActivityTime = Date.now();
+            this.sessionStartTime = Date.now();
+            this.accumulatedTime = 0;  // 本次会话累计的秒数
+            this.trackingInterval = null;
+            this.saveInterval = null;
+            this.initialized = false;
+        }
+
+        // 初始化追踪器（需要用户名）
+        init(username) {
+            if (this.initialized) return;
+
+            // 迁移旧数据
+            Utils.migrateOldData(username);
+
+            this.bindActivityListeners();
+            this.startTracking();
+            this.startAutoSave();
+            this.handleVisibilityChange();
+            this.initialized = true;
+
+            console.log(`[LDStatus Pro] 阅读时间追踪器已启动 (用户: ${username})`);
+        }
+
+        // 绑定用户活动监听器
+        bindActivityListeners() {
+            const activityEvents = ['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart', 'click'];
+
+            const throttledActivity = this.throttle(() => {
+                this.recordActivity();
+            }, 1000);
+
+            activityEvents.forEach(event => {
+                document.addEventListener(event, throttledActivity, { passive: true });
+            });
+        }
+
+        // 节流函数
+        throttle(func, limit) {
+            let inThrottle;
+            return function(...args) {
+                if (!inThrottle) {
+                    func.apply(this, args);
+                    inThrottle = true;
+                    setTimeout(() => inThrottle = false, limit);
+                }
+            };
+        }
+
+        // 记录活动
+        recordActivity() {
+            const now = Date.now();
+            const timeSinceLastActivity = now - this.lastActivityTime;
+
+            // 如果之前是不活跃状态，现在变为活跃
+            if (!this.isActive) {
+                this.isActive = true;
+                this.sessionStartTime = now;
+                console.log('[LDStatus Pro] 用户活跃，继续计时');
+            }
+
+            this.lastActivityTime = now;
+        }
+
+        // 开始追踪
+        startTracking() {
+            this.trackingInterval = setInterval(() => {
+                this.checkAndAccumulate();
+            }, CONFIG.READING_TRACK_INTERVAL);
+        }
+
+        // 开始自动保存
+        startAutoSave() {
+            this.saveInterval = setInterval(() => {
+                this.saveReadingTime();
+            }, CONFIG.READING_SAVE_INTERVAL);
+        }
+
+        // 检查并累计时间
+        checkAndAccumulate() {
+            const now = Date.now();
+            const timeSinceLastActivity = now - this.lastActivityTime;
+
+            if (this.isActive) {
+                if (timeSinceLastActivity > CONFIG.READING_IDLE_THRESHOLD) {
+                    // 用户变为不活跃
+                    this.isActive = false;
+                    // 累计活跃时间
+                    const activeTime = (this.lastActivityTime - this.sessionStartTime) / 1000;
+                    if (activeTime > 0) {
+                        this.accumulatedTime += activeTime;
+                    }
+                    console.log(`[LDStatus Pro] 用户不活跃，已累计 ${Math.round(this.accumulatedTime)} 秒`);
+                } else {
+                    // 用户仍然活跃，累计时间
+                    const activeTime = (now - this.sessionStartTime) / 1000;
+                    // 不直接累加到 accumulatedTime，而是在保存时计算
+                }
+            }
+        }
+
+        // 处理页面可见性变化
+        handleVisibilityChange() {
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) {
+                    // 页面隐藏，保存当前时间
+                    this.saveReadingTime();
+                    this.isActive = false;
+                    console.log('[LDStatus Pro] 页面隐藏，暂停计时');
+                } else {
+                    // 页面恢复可见
+                    this.lastActivityTime = Date.now();
+                    this.sessionStartTime = Date.now();
+                    this.isActive = true;
+                    console.log('[LDStatus Pro] 页面可见，恢复计时');
+                }
+            });
+
+            // 页面卸载前保存
+            window.addEventListener('beforeunload', () => {
+                this.saveReadingTime();
+            });
+        }
+
+        // 获取当前会话的活跃时间（秒）
+        getCurrentSessionTime() {
+            if (!this.isActive) {
+                return this.accumulatedTime;
+            }
+            const now = Date.now();
+            const currentActiveTime = (now - this.sessionStartTime) / 1000;
+            return this.accumulatedTime + currentActiveTime;
+        }
+
+        // 保存阅读时间
+        saveReadingTime() {
+            const user = Utils.getCurrentUser();
+            if (!user) return;
+
+            const todayKey = Utils.getTodayKey();
+            const sessionSeconds = this.getCurrentSessionTime();
+            const sessionMinutes = sessionSeconds / 60;
+
+            // 获取存储的数据
+            let stored = Utils.get('readingTime', null);
+
+            // 确保数据格式正确
+            if (!stored || typeof stored !== 'object' || !stored.dailyData) {
+                stored = {
+                    version: 2,
+                    dailyData: {}
+                };
+            }
+
+            // 获取今日数据
+            let todayData = stored.dailyData[todayKey];
+            if (!todayData) {
+                todayData = {
+                    totalMinutes: 0,
+                    lastActive: Date.now(),
+                    sessions: []
+                };
+            }
+
+            // 更新今日数据
+            // 计算新增的时间（从上次保存到现在）
+            const previousSessionMinutes = todayData.currentSessionMinutes || 0;
+            const newMinutes = sessionMinutes - previousSessionMinutes;
+
+            if (newMinutes > 0) {
+                todayData.totalMinutes += newMinutes;
+                todayData.lastActive = Date.now();
+                todayData.currentSessionMinutes = sessionMinutes;
+
+                stored.dailyData[todayKey] = todayData;
+
+                // 清理超过90天的数据
+                this.cleanOldData(stored);
+
+                Utils.set('readingTime', stored);
+            }
+        }
+
+        // 清理旧数据
+        cleanOldData(stored) {
+            const cutoffDate = new Date();
+            cutoffDate.setDate(cutoffDate.getDate() - CONFIG.MAX_HISTORY_DAYS);
+            const cutoffKey = cutoffDate.toDateString();
+
+            Object.keys(stored.dailyData).forEach(dateKey => {
+                const date = new Date(dateKey);
+                if (date < cutoffDate) {
+                    delete stored.dailyData[dateKey];
+                }
+            });
+        }
+
+        // 获取今日阅读时间（分钟）
+        getTodayReadingTime() {
+            const user = Utils.getCurrentUser();
+            if (!user) return 0;
+
+            const todayKey = Utils.getTodayKey();
+            const stored = Utils.get('readingTime', null);
+
+            if (!stored || !stored.dailyData || !stored.dailyData[todayKey]) {
+                // 返回当前会话时间
+                return this.getCurrentSessionTime() / 60;
+            }
+
+            // 返回存储的时间 + 当前会话中未保存的时间
+            const storedMinutes = stored.dailyData[todayKey].totalMinutes || 0;
+            const currentSessionMinutes = stored.dailyData[todayKey].currentSessionMinutes || 0;
+            const unsavedMinutes = (this.getCurrentSessionTime() / 60) - currentSessionMinutes;
+
+            return storedMinutes + Math.max(0, unsavedMinutes);
+        }
+
+        // 获取指定日期的阅读时间
+        getReadingTimeForDate(dateKey) {
+            const stored = Utils.get('readingTime', null);
+            if (!stored || !stored.dailyData || !stored.dailyData[dateKey]) {
+                return 0;
+            }
+            return stored.dailyData[dateKey].totalMinutes || 0;
+        }
+
+        // 获取最近N天的阅读时间数据
+        getReadingTimeHistory(days = 7) {
+            const result = [];
+            const now = new Date();
+
+            for (let i = days - 1; i >= 0; i--) {
+                const date = new Date(now);
+                date.setDate(date.getDate() - i);
+                const dateKey = date.toDateString();
+
+                result.push({
+                    date: dateKey,
+                    label: Utils.formatDate(date.getTime(), 'short'),
+                    dayName: ['日', '一', '二', '三', '四', '五', '六'][date.getDay()],
+                    minutes: i === 0 ? this.getTodayReadingTime() : this.getReadingTimeForDate(dateKey),
+                    isToday: i === 0
+                });
+            }
+
+            return result;
+        }
+
+        // 获取总阅读时间
+        getTotalReadingTime() {
+            const stored = Utils.get('readingTime', null);
+            if (!stored || !stored.dailyData) {
+                return this.getTodayReadingTime();
+            }
+
+            let total = 0;
+            const todayKey = Utils.getTodayKey();
+
+            Object.keys(stored.dailyData).forEach(dateKey => {
+                if (dateKey === todayKey) {
+                    total += this.getTodayReadingTime();
+                } else {
+                    total += stored.dailyData[dateKey].totalMinutes || 0;
+                }
+            });
+
+            return total;
+        }
+
+        // 停止追踪
+        stop() {
+            if (this.trackingInterval) {
+                clearInterval(this.trackingInterval);
+            }
+            if (this.saveInterval) {
+                clearInterval(this.saveInterval);
+            }
+            this.saveReadingTime();
+        }
+    }
+
+    // 创建全局阅读时间追踪器实例
+    const readingTracker = new ReadingTimeTracker();
+
     // ==================== 通知管理 ====================
     const Notifier = {
         check(requirements) {
@@ -221,7 +618,6 @@
                         });
                     }
                 }
-
                 const k = `req_${req.name}`;
                 if (req.isSuccess && !achieved[k]) {
                     newMilestones.push({ name: req.name, type: 'req' });
@@ -247,16 +643,16 @@
             if (typeof GM_notification !== 'undefined') {
                 GM_notification({ title: '🎉 达成里程碑！', text: msg, timeout: 5000 });
             }
-
             this.showToast(milestones);
         },
 
         showToast(milestones) {
             const toast = document.createElement('div');
             toast.className = 'ldsp-toast';
-            toast.innerHTML = `<span>🎉</span><span>${milestones.length === 1 ? milestones[0].name + ' 达成！' : `达成 ${milestones.length} 个里程碑！`}</span>`;
+            toast.innerHTML = `🎉${milestones.length === 1
+                ? milestones[0].name + ' 达成！'
+                : `达成 ${milestones.length} 个里程碑！`}`;
             document.getElementById('ldsp-panel')?.appendChild(toast);
-
             requestAnimationFrame(() => toast.classList.add('show'));
             setTimeout(() => {
                 toast.classList.remove('show');
@@ -273,34 +669,26 @@
             --bg-card-hover: #252542;
             --bg-elevated: #16213e;
             --bg-input: #0f0f1a;
-
             --text-primary: #eaeaea;
             --text-secondary: #a0a0b0;
             --text-muted: #6a6a7a;
-
             --accent-primary: #7c3aed;
             --accent-primary-hover: #8b5cf6;
             --accent-secondary: #06b6d4;
             --accent-gradient: linear-gradient(135deg, #7c3aed 0%, #06b6d4 100%);
-
             --success: #10b981;
             --success-bg: rgba(16, 185, 129, 0.15);
             --success-border: rgba(16, 185, 129, 0.3);
-
             --danger: #ef4444;
             --danger-bg: rgba(239, 68, 68, 0.15);
             --danger-border: rgba(239, 68, 68, 0.3);
-
             --warning: #f59e0b;
             --info: #3b82f6;
-
             --border-subtle: rgba(255, 255, 255, 0.06);
             --border-default: rgba(255, 255, 255, 0.1);
-
             --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.3);
             --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.4);
             --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.5);
-
             --radius-sm: 6px;
             --radius-md: 10px;
             --radius-lg: 14px;
@@ -327,27 +715,21 @@
             --bg-card-hover: #f1f5f9;
             --bg-elevated: #ffffff;
             --bg-input: #f1f5f9;
-
             --text-primary: #1e293b;
             --text-secondary: #64748b;
             --text-muted: #94a3b8;
-
             --accent-primary: #6366f1;
             --accent-primary-hover: #4f46e5;
             --accent-secondary: #0ea5e9;
             --accent-gradient: linear-gradient(135deg, #6366f1 0%, #0ea5e9 100%);
-
             --success: #059669;
             --success-bg: rgba(5, 150, 105, 0.1);
             --success-border: rgba(5, 150, 105, 0.2);
-
             --danger: #dc2626;
             --danger-bg: rgba(220, 38, 38, 0.1);
             --danger-border: rgba(220, 38, 38, 0.2);
-
             --border-subtle: rgba(0, 0, 0, 0.04);
             --border-default: rgba(0, 0, 0, 0.08);
-
             --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.06);
             --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.1);
             --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.12);
@@ -371,7 +753,9 @@
 
         #ldsp-panel.collapsed .ldsp-header-info,
         #ldsp-panel.collapsed .ldsp-header-btns > button:not(.ldsp-btn-toggle),
-        #ldsp-panel.collapsed .ldsp-body { display: none !important; }
+        #ldsp-panel.collapsed .ldsp-body {
+            display: none !important;
+        }
 
         #ldsp-panel.collapsed .ldsp-btn-toggle {
             width: 44px;
@@ -652,14 +1036,23 @@
             scrollbar-color: var(--border-default) transparent;
         }
 
-        .ldsp-content::-webkit-scrollbar { width: 5px; }
+        .ldsp-content::-webkit-scrollbar {
+            width: 5px;
+        }
+
         .ldsp-content::-webkit-scrollbar-thumb {
             background: var(--border-default);
             border-radius: 3px;
         }
 
-        .ldsp-panel-section { display: none; padding: 10px; }
-        .ldsp-panel-section.active { display: block; }
+        .ldsp-panel-section {
+            display: none;
+            padding: 10px;
+        }
+
+        .ldsp-panel-section.active {
+            display: block;
+        }
 
         /* 进度环 */
         .ldsp-progress-ring {
@@ -677,7 +1070,9 @@
             height: 80px;
         }
 
-        .ldsp-ring-wrap svg { transform: rotate(-90deg); }
+        .ldsp-ring-wrap svg {
+            transform: rotate(-90deg);
+        }
 
         .ldsp-ring-bg {
             fill: none;
@@ -733,7 +1128,9 @@
             transform: translateX(3px);
         }
 
-        .ldsp-item:last-child { margin-bottom: 0; }
+        .ldsp-item:last-child {
+            margin-bottom: 0;
+        }
 
         .ldsp-item.success {
             border-left-color: var(--success);
@@ -760,8 +1157,13 @@
             text-overflow: ellipsis;
         }
 
-        .ldsp-item.success .ldsp-item-name { color: var(--success); }
-        .ldsp-item.fail .ldsp-item-name { color: var(--text-secondary); }
+        .ldsp-item.success .ldsp-item-name {
+            color: var(--success);
+        }
+
+        .ldsp-item.fail .ldsp-item-name {
+            color: var(--text-secondary);
+        }
 
         .ldsp-item-values {
             display: flex;
@@ -772,12 +1174,27 @@
             margin-left: 8px;
         }
 
-        .ldsp-item-current { color: var(--text-primary); }
-        .ldsp-item.success .ldsp-item-current { color: var(--success); }
-        .ldsp-item.fail .ldsp-item-current { color: var(--danger); }
+        .ldsp-item-current {
+            color: var(--text-primary);
+        }
 
-        .ldsp-item-sep { color: var(--text-muted); font-weight: 400; }
-        .ldsp-item-required { color: var(--text-muted); font-weight: 500; }
+        .ldsp-item.success .ldsp-item-current {
+            color: var(--success);
+        }
+
+        .ldsp-item.fail .ldsp-item-current {
+            color: var(--danger);
+        }
+
+        .ldsp-item-sep {
+            color: var(--text-muted);
+            font-weight: 400;
+        }
+
+        .ldsp-item-required {
+            color: var(--text-muted);
+            font-weight: 500;
+        }
 
         .ldsp-item-change {
             font-size: 10px;
@@ -807,7 +1224,9 @@
             -ms-overflow-style: none;
         }
 
-        .ldsp-subtabs::-webkit-scrollbar { display: none; }
+        .ldsp-subtabs::-webkit-scrollbar {
+            display: none;
+        }
 
         .ldsp-subtab {
             padding: 6px 12px;
@@ -843,7 +1262,9 @@
             margin-bottom: 10px;
         }
 
-        .ldsp-chart:last-child { margin-bottom: 0; }
+        .ldsp-chart:last-child {
+            margin-bottom: 0;
+        }
 
         .ldsp-chart-title {
             font-size: 12px;
@@ -884,7 +1305,9 @@
             margin-bottom: 10px;
         }
 
-        .ldsp-spark-row:last-child { margin-bottom: 0; }
+        .ldsp-spark-row:last-child {
+            margin-bottom: 0;
+        }
 
         .ldsp-spark-label {
             width: 60px;
@@ -914,7 +1337,10 @@
             position: relative;
         }
 
-        .ldsp-spark-bar:last-child { opacity: 1; }
+        .ldsp-spark-bar:last-child {
+            opacity: 1;
+        }
+
         .ldsp-spark-bar:hover {
             opacity: 1;
             transform: scaleY(1.1);
@@ -938,14 +1364,8 @@
             box-shadow: var(--shadow-sm);
         }
 
-        .ldsp-spark-bar:hover::after { opacity: 1; }
-
-        .ldsp-spark-val {
-            width: 40px;
-            font-size: 11px;
-            font-weight: 700;
-            text-align: right;
-            color: var(--text-primary);
+        .ldsp-spark-bar:hover::after {
+            opacity: 1;
         }
 
         /* 阅读时间特殊样式 */
@@ -966,7 +1386,9 @@
             border-bottom: 1px solid var(--border-subtle);
         }
 
-        .ldsp-change-row:last-child { border-bottom: none; }
+        .ldsp-change-row:last-child {
+            border-bottom: none;
+        }
 
         .ldsp-change-name {
             font-size: 11px;
@@ -1044,7 +1466,10 @@
             color: var(--text-muted);
         }
 
-        .ldsp-empty-icon { font-size: 36px; margin-bottom: 10px; }
+        .ldsp-empty-icon {
+            font-size: 36px;
+            margin-bottom: 10px;
+        }
 
         .ldsp-empty-text {
             font-size: 12px;
@@ -1061,7 +1486,9 @@
             margin: 0 auto 10px;
         }
 
-        @keyframes ldsp-spin { to { transform: rotate(360deg); } }
+        @keyframes ldsp-spin {
+            to { transform: rotate(360deg); }
+        }
 
         /* Toast */
         .ldsp-toast {
@@ -1245,6 +1672,37 @@
             font-size: 9px;
             color: var(--text-muted);
         }
+
+        /* 追踪状态指示器 */
+        .ldsp-tracking-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            background: var(--bg-card);
+            border-radius: var(--radius-sm);
+            margin-bottom: 10px;
+            font-size: 10px;
+            color: var(--text-muted);
+        }
+
+        .ldsp-tracking-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--success);
+            animation: ldsp-pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes ldsp-pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(0.9); }
+        }
+
+        .ldsp-tracking-indicator.paused .ldsp-tracking-dot {
+            background: var(--warning);
+            animation: none;
+        }
     `;
 
     // ==================== 面板类 ====================
@@ -1253,13 +1711,17 @@
             this.prevReqs = [];
             this.currentTrendTab = Utils.get('trendTab', 'today');
             this.userAvatar = Utils.get('userAvatar', null);
-            this.currentReadingTime = 0; // 当前阅读时间（分钟）
+            this.currentReadingTime = 0;  // 当前阅读时间（分钟）
+            this.currentUsername = null;
+            this.readingUpdateInterval = null;
+
             this.injectStyles();
             this.createPanel();
             this.bindEvents();
             this.restore();
             this.fetchAvatar();
             this.fetch();
+
             setInterval(() => this.fetch(), CONFIG.REFRESH_INTERVAL);
         }
 
@@ -1273,14 +1735,6 @@
             this.el = document.createElement('div');
             this.el.id = 'ldsp-panel';
             this.el.innerHTML = `
-                <svg width="0" height="0" style="position:absolute">
-                    <defs>
-                        <linearGradient id="ldsp-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                            <stop offset="0%" style="stop-color:#7c3aed"/>
-                            <stop offset="100%" style="stop-color:#06b6d4"/>
-                        </linearGradient>
-                    </defs>
-                </svg>
                 <div class="ldsp-header">
                     <div class="ldsp-header-info">
                         <span class="ldsp-title">📊 LD Pro</span>
@@ -1288,9 +1742,9 @@
                     </div>
                     <div class="ldsp-header-btns">
                         <button class="ldsp-btn-update" title="检查更新">🔍</button>
-                        <button class="ldsp-btn-refresh" title="刷新">🔄</button>
-                        <button class="ldsp-btn-theme" title="主题">🌓</button>
-                        <button class="ldsp-btn-toggle" title="收起">◀</button>
+                        <button class="ldsp-btn-refresh" title="刷新数据">🔄</button>
+                        <button class="ldsp-btn-theme" title="切换主题">🌓</button>
+                        <button class="ldsp-btn-toggle" title="折叠">◀</button>
                     </div>
                 </div>
                 <div class="ldsp-body">
@@ -1300,7 +1754,7 @@
                             <div class="ldsp-user-name">加载中...</div>
                             <div class="ldsp-user-meta">
                                 <span class="ldsp-user-level">Lv ?</span>
-                                <span class="ldsp-user-status"></span>
+                                <span class="ldsp-user-status">--</span>
                             </div>
                         </div>
                         <div class="ldsp-reading-card">
@@ -1309,21 +1763,24 @@
                             <span class="ldsp-reading-label">今日阅读</span>
                         </div>
                     </div>
-                    <div class="ldsp-status fail">
+
+                    <div class="ldsp-status">
                         <span>⏳</span><span>获取数据中...</span>
                     </div>
+
                     <div class="ldsp-tabs">
                         <button class="ldsp-tab active" data-tab="reqs">📋 要求</button>
                         <button class="ldsp-tab" data-tab="trends">📈 趋势</button>
                     </div>
+
                     <div class="ldsp-content">
-                        <div class="ldsp-panel-section active" id="ldsp-reqs">
+                        <div id="ldsp-reqs" class="ldsp-panel-section active">
                             <div class="ldsp-loading">
                                 <div class="ldsp-spinner"></div>
                                 <div>加载中...</div>
                             </div>
                         </div>
-                        <div class="ldsp-panel-section" id="ldsp-trends">
+                        <div id="ldsp-trends" class="ldsp-panel-section">
                             <div class="ldsp-empty">
                                 <div class="ldsp-empty-icon">📊</div>
                                 <div class="ldsp-empty-text">暂无历史数据</div>
@@ -1438,7 +1895,6 @@
                 this.updateAvatar(avatarEl.src);
                 return;
             }
-
             if (this.userAvatar) {
                 this.renderAvatar(this.userAvatar);
             }
@@ -1501,6 +1957,17 @@
             }
         }
 
+        // 启动阅读时间实时更新
+        startReadingTimeUpdate() {
+            if (this.readingUpdateInterval) return;
+
+            // 每10秒更新一次阅读时间显示
+            this.readingUpdateInterval = setInterval(() => {
+                this.currentReadingTime = readingTracker.getTodayReadingTime();
+                this.updateReadingCard(this.currentReadingTime);
+            }, 10000);
+        }
+
         fetch() {
             this.$.reqs.innerHTML = `<div class="ldsp-loading"><div class="ldsp-spinner"></div><div>加载中...</div></div>`;
 
@@ -1531,34 +1998,27 @@
             const heading = section.querySelector('h2').textContent;
             const [, username, level] = heading.match(/(.*) - 信任级别 (\d+)/) || ['', '未知', '?'];
 
+            // 设置当前用户并初始化阅读追踪器
+            if (username && username !== '未知') {
+                Utils.setCurrentUser(username);
+                this.currentUsername = username;
+
+                // 初始化阅读时间追踪器
+                readingTracker.init(username);
+
+                // 启动阅读时间实时更新
+                this.startReadingTimeUpdate();
+            }
+
             // 尝试获取头像
             const avatarEl = doc.querySelector('img[src*="avatar"]');
             if (avatarEl) {
                 this.updateAvatar(avatarEl.src);
             }
 
-            // 解析阅读时间
-            let readingTime = 0;
-            const timeRows = doc.querySelectorAll('table tr');
-            for (const row of timeRows) {
-                const cells = row.querySelectorAll('td');
-                if (cells.length >= 2) {
-                    const label = cells[0].textContent.trim();
-                    if (label.includes('阅读时间') || label.includes('已阅读时间')) {
-                        const timeText = cells[1].textContent.trim();
-                        readingTime = this.parseReadingTime(timeText);
-                        break;
-                    }
-                }
-            }
-
-            // 如果没有从页面获取到阅读时间，使用本地计算
-            if (readingTime === 0) {
-                readingTime = this.calculateLocalReadingTime();
-            }
-
-            this.currentReadingTime = readingTime;
-            this.updateReadingCard(readingTime);
+            // 获取本地追踪的阅读时间
+            this.currentReadingTime = readingTracker.getTodayReadingTime();
+            this.updateReadingCard(this.currentReadingTime);
 
             const rows = section.querySelectorAll('table tr');
             const requirements = [];
@@ -1578,28 +2038,31 @@
                 const change = prev ? currentValue - prev.currentValue : 0;
 
                 requirements.push({
-                    name, currentValue, requiredValue, isSuccess, change,
+                    name,
+                    currentValue,
+                    requiredValue,
+                    isSuccess,
+                    change,
                     isReverse: /被举报|发起举报|禁言|封禁/.test(name)
                 });
             }
 
             // 重新排序需求列表
             const reorderedReqs = Utils.reorderRequirements(requirements);
-
             const isOK = !section.querySelector('p.text-red-500');
 
             Notifier.check(reorderedReqs);
 
             const histData = {};
             reorderedReqs.forEach(r => histData[r.name] = r.currentValue);
-            const history = Utils.addHistory(histData, readingTime);
+            const history = Utils.addHistory(histData, this.currentReadingTime);
 
             // 更新今日数据
             const todayData = Utils.getTodayData();
             if (!todayData) {
-                Utils.setTodayData(histData, readingTime, true);
+                Utils.setTodayData(histData, this.currentReadingTime, true);
             } else {
-                Utils.setTodayData(histData, readingTime, false);
+                Utils.setTodayData(histData, this.currentReadingTime, false);
             }
 
             // 获取上次访问数据用于对比
@@ -1607,53 +2070,12 @@
 
             this.renderUser(username, level, isOK, reorderedReqs);
             this.renderReqs(reorderedReqs);
-            this.renderTrends(history, reorderedReqs, lastVisit, readingTime);
+            this.renderTrends(history, reorderedReqs, lastVisit, this.currentReadingTime);
 
             // 更新上次访问数据
-            Utils.setLastVisitData(histData, readingTime);
+            Utils.setLastVisitData(histData, this.currentReadingTime);
 
             this.prevReqs = reorderedReqs;
-        }
-
-        parseReadingTime(timeText) {
-            // 解析如 "1小时30分钟" 或 "45分钟" 或 "2h 30m" 等格式
-            let totalMinutes = 0;
-
-            // 匹配小时
-            const hourMatch = timeText.match(/(\d+)\s*[小时hH]/);
-            if (hourMatch) {
-                totalMinutes += parseInt(hourMatch[1]) * 60;
-            }
-
-            // 匹配分钟
-            const minMatch = timeText.match(/(\d+)\s*[分钟mM]/);
-            if (minMatch) {
-                totalMinutes += parseInt(minMatch[1]);
-            }
-
-            // 如果只有数字，假设是分钟
-            if (totalMinutes === 0) {
-                const numMatch = timeText.match(/(\d+)/);
-                if (numMatch) {
-                    totalMinutes = parseInt(numMatch[1]);
-                }
-            }
-
-            return totalMinutes;
-        }
-
-        calculateLocalReadingTime() {
-            // 本地计算今日阅读时间（基于页面活跃时间）
-            const todayKey = Utils.getTodayKey();
-            const stored = Utils.get('readingTime', {});
-
-            if (stored.date !== todayKey) {
-                // 新的一天，重置
-                Utils.set('readingTime', { date: todayKey, minutes: 0, lastActive: Date.now() });
-                return 0;
-            }
-
-            return stored.minutes || 0;
         }
 
         renderUser(name, level, isOK, reqs) {
@@ -1674,6 +2096,12 @@
                 <div class="ldsp-progress-ring">
                     <div class="ldsp-ring-wrap">
                         <svg width="80" height="80">
+                            <defs>
+                                <linearGradient id="ldsp-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                    <stop offset="0%" style="stop-color:#7c3aed"/>
+                                    <stop offset="100%" style="stop-color:#06b6d4"/>
+                                </linearGradient>
+                            </defs>
                             <circle class="ldsp-ring-bg" cx="40" cy="40" r="32"/>
                             <circle class="ldsp-ring-fill" cx="40" cy="40" r="32"
                                 stroke-dasharray="${circumference}"
@@ -1695,17 +2123,16 @@
                     const cls = r.change > 0 ? 'up' : 'down';
                     changeHtml = `<span class="ldsp-item-change ${cls}">${r.change > 0 ? '+' : ''}${r.change}</span>`;
                 }
-
                 html += `
                     <div class="ldsp-item ${r.isSuccess ? 'success' : 'fail'}">
                         <span class="ldsp-item-icon">${icon}</span>
-                        <span class="ldsp-item-name" title="${r.name}">${name}</span>
+                        <span class="ldsp-item-name">${name}</span>
                         <div class="ldsp-item-values">
                             <span class="ldsp-item-current">${r.currentValue}</span>
                             <span class="ldsp-item-sep">/</span>
                             <span class="ldsp-item-required">${r.requiredValue}</span>
-                            ${changeHtml}
                         </div>
+                        ${changeHtml}
                     </div>
                 `;
             });
@@ -1716,10 +2143,10 @@
         renderTrends(history, reqs, lastVisit, currentReadingTime) {
             let html = `
                 <div class="ldsp-subtabs">
-                    <button class="ldsp-subtab ${this.currentTrendTab === 'last' ? 'active' : ''}" data-trend="last">📍 上次访问</button>
-                    <button class="ldsp-subtab ${this.currentTrendTab === 'today' ? 'active' : ''}" data-trend="today">☀️ 今日</button>
-                    <button class="ldsp-subtab ${this.currentTrendTab === '7d' ? 'active' : ''}" data-trend="7d">📅 7天</button>
-                    <button class="ldsp-subtab ${this.currentTrendTab === 'all' ? 'active' : ''}" data-trend="all">📊 全部</button>
+                    <div class="ldsp-subtab ${this.currentTrendTab === 'last' ? 'active' : ''}" data-trend="last">📍 上次访问</div>
+                    <div class="ldsp-subtab ${this.currentTrendTab === 'today' ? 'active' : ''}" data-trend="today">☀️ 今日</div>
+                    <div class="ldsp-subtab ${this.currentTrendTab === '7d' ? 'active' : ''}" data-trend="7d">📅 7天</div>
+                    <div class="ldsp-subtab ${this.currentTrendTab === 'all' ? 'active' : ''}" data-trend="all">📊 全部</div>
                 </div>
                 <div class="ldsp-trend-content"></div>
             `;
@@ -1760,7 +2187,7 @@
 
         renderLastVisitTrend(reqs, lastVisit) {
             if (!lastVisit) {
-                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">👋</div><div class="ldsp-empty-text">首次访问<br><small>下次访问时将显示变化</small></div></div>`;
+                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">👋</div><div class="ldsp-empty-text">首次访问<br>下次访问时将显示变化</div></div>`;
             }
 
             const timeDiff = Date.now() - lastVisit.ts;
@@ -1776,7 +2203,7 @@
                 if (readingDiff > 0) {
                     html += `
                         <div class="ldsp-reading-stats">
-                            <span class="ldsp-reading-stats-icon">📚</span>
+                            <div class="ldsp-reading-stats-icon">📚</div>
                             <div class="ldsp-reading-stats-info">
                                 <div class="ldsp-reading-stats-value">+${Utils.formatReadingTime(readingDiff)}</div>
                                 <div class="ldsp-reading-stats-label">阅读时间增加</div>
@@ -1821,33 +2248,42 @@
             const minutes = now.getMinutes();
 
             if (!todayData) {
-                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">☀️</div><div class="ldsp-empty-text">今日首次访问<br><small>数据将从现在开始统计</small></div></div>`;
+                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">☀️</div><div class="ldsp-empty-text">今日首次访问<br>数据将从现在开始统计</div></div>`;
             }
 
             const startTime = new Date(todayData.startTs);
             const startTimeStr = `${startTime.getHours()}:${String(startTime.getMinutes()).padStart(2, '0')}`;
             const currentTimeStr = `${hours}:${String(minutes).padStart(2, '0')}`;
 
-            let html = `<div class="ldsp-time-info">今日 <span>00:00</span> ~ <span>${currentTimeStr}</span> (首次记录于 ${startTimeStr})</div>`;
+            let html = `<div class="ldsp-time-info">今日 00:00 ~ ${currentTimeStr} (首次记录于 ${startTimeStr})</div>`;
+
+            // 追踪状态指示器
+            html += `
+                <div class="ldsp-tracking-indicator">
+                    <div class="ldsp-tracking-dot"></div>
+                    <span>阅读时间追踪中...</span>
+                </div>
+            `;
 
             // 今日阅读时间统计
-            const todayReadingTime = currentReadingTime - (todayData.startReadingTime || 0);
-            const level = Utils.getReadingLevel(todayReadingTime > 0 ? todayReadingTime : currentReadingTime);
+            const todayReadingTime = currentReadingTime;
+            const level = Utils.getReadingLevel(todayReadingTime);
 
             html += `
                 <div class="ldsp-reading-stats">
-                    <span class="ldsp-reading-stats-icon">${level.icon}</span>
+                    <div class="ldsp-reading-stats-icon">${level.icon}</div>
                     <div class="ldsp-reading-stats-info">
-                        <div class="ldsp-reading-stats-value">${Utils.formatReadingTime(todayReadingTime > 0 ? todayReadingTime : currentReadingTime)}</div>
+                        <div class="ldsp-reading-stats-value">${Utils.formatReadingTime(todayReadingTime)}</div>
                         <div class="ldsp-reading-stats-label">今日累计阅读</div>
                     </div>
-                    <span class="ldsp-reading-stats-badge" style="background:${level.bg};color:${level.color}">${level.label}</span>
+                    <div class="ldsp-reading-stats-badge" style="background: ${level.bg}; color: ${level.color};">${level.label}</div>
                 </div>
             `;
 
             // 阅读进度条（以3小时为满）
             const maxMinutes = 180;
-            const progressPct = Math.min((todayReadingTime > 0 ? todayReadingTime : currentReadingTime) / maxMinutes * 100, 100);
+            const progressPct = Math.min(todayReadingTime / maxMinutes * 100, 100);
+
             html += `
                 <div class="ldsp-reading-progress">
                     <div class="ldsp-reading-progress-header">
@@ -1855,7 +2291,7 @@
                         <span class="ldsp-reading-progress-value">${Math.round(progressPct)}%</span>
                     </div>
                     <div class="ldsp-reading-progress-bar">
-                        <div class="ldsp-reading-progress-fill" style="width:${progressPct}%;background:${level.color}"></div>
+                        <div class="ldsp-reading-progress-fill" style="width: ${progressPct}%; background: ${level.bg.replace('0.15', '1')};"></div>
                     </div>
                 </div>
             `;
@@ -1869,11 +2305,7 @@
                 const diff = r.currentValue - startVal;
                 if (diff !== 0) {
                     totalChanges++;
-                    changeList.push({
-                        name: Utils.simplifyName(r.name),
-                        diff,
-                        current: r.currentValue
-                    });
+                    changeList.push({ name: Utils.simplifyName(r.name), diff, current: r.currentValue });
                 }
             });
 
@@ -1919,11 +2351,11 @@
             const recent = history.filter(h => h.ts > d7ago);
 
             if (recent.length < 2) {
-                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">📅</div><div class="ldsp-empty-text">7天内数据不足<br><small>每天访问积累数据</small></div></div>`;
+                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">📅</div><div class="ldsp-empty-text">7天内数据不足<br>每天访问积累数据</div></div>`;
             }
 
             // 7天阅读时间趋势
-            let html = this.renderReadingWeekChart(recent);
+            let html = this.renderReadingWeekChart();
 
             const keys = ['浏览的话题', '已读帖子', '获赞', '送出赞', '回复'];
             const trends = [];
@@ -1931,14 +2363,9 @@
             keys.forEach(key => {
                 const req = reqs.find(r => r.name.includes(key));
                 if (!req) return;
-
                 const dailyData = this.aggregateByDay(recent, req.name, 7);
                 if (dailyData.values.some(v => v > 0)) {
-                    trends.push({
-                        label: key.replace('浏览的话题', '浏览话题'),
-                        ...dailyData,
-                        current: req.currentValue
-                    });
+                    trends.push({ label: key.replace('浏览的话题', '浏览话题'), ...dailyData, current: req.currentValue });
                 }
             });
 
@@ -1949,9 +2376,8 @@
                     const max = Math.max(...t.values, 1);
                     const bars = t.values.map((v, i) => {
                         const height = Math.max(v / max * 22, 3);
-                        return `<div class="ldsp-spark-bar" style="height:${height}px" data-value="${t.dates[i]}: ${v}" title="${v}"></div>`;
+                        return `<div class="ldsp-spark-bar" style="height:${height}px" data-value="${v}"></div>`;
                     }).join('');
-
                     html += `
                         <div class="ldsp-spark-row">
                             <span class="ldsp-spark-label">${t.label}</span>
@@ -1976,8 +2402,8 @@
             // 添加变化统计
             const oldest = recent[0];
             const newest = recent[recent.length - 1];
-            let changes = '';
 
+            let changes = '';
             reqs.forEach(r => {
                 const oldVal = oldest.data[r.name] || 0;
                 const newVal = newest.data[r.name] || 0;
@@ -2001,40 +2427,24 @@
             return html;
         }
 
-        renderReadingWeekChart(history) {
-            // 获取最近7天的阅读时间数据
-            const days = [];
-            const now = new Date();
-
-            for (let i = 6; i >= 0; i--) {
-                const date = new Date(now);
-                date.setDate(date.getDate() - i);
-                const dateStr = date.toDateString();
-                const dayRecord = history.find(h => new Date(h.ts).toDateString() === dateStr);
-
-                days.push({
-                    label: Utils.formatDate(date.getTime(), 'short'),
-                    dayName: ['日', '一', '二', '三', '四', '五', '六'][date.getDay()],
-                    readingTime: dayRecord?.readingTime || 0,
-                    isToday: i === 0
-                });
-            }
-
-            const maxTime = Math.max(...days.map(d => d.readingTime), 60);
+        renderReadingWeekChart() {
+            // 使用阅读追踪器获取7天数据
+            const days = readingTracker.getReadingTimeHistory(7);
+            const maxTime = Math.max(...days.map(d => d.minutes), 60);
 
             let barsHtml = days.map(d => {
-                const height = Math.max(d.readingTime / maxTime * 50, 4);
-                const timeStr = Utils.formatReadingTime(d.readingTime);
+                const height = Math.max(d.minutes / maxTime * 50, 4);
+                const timeStr = Utils.formatReadingTime(d.minutes);
                 const opacity = d.isToday ? '1' : '0.7';
                 return `
                     <div class="ldsp-reading-day">
-                        <div class="ldsp-reading-day-bar" style="height:${height}px;opacity:${opacity}" data-time="${timeStr}"></div>
+                        <div class="ldsp-reading-day-bar" style="height:${height}px; opacity:${opacity}" data-time="${timeStr}"></div>
                         <span class="ldsp-reading-day-label">${d.dayName}</span>
                     </div>
                 `;
             }).join('');
 
-            const totalWeekTime = days.reduce((sum, d) => sum + d.readingTime, 0);
+            const totalWeekTime = days.reduce((sum, d) => sum + d.minutes, 0);
             const avgTime = Math.round(totalWeekTime / 7);
 
             return `
@@ -2043,14 +2453,16 @@
                         ⏱️ 7天阅读时间
                         <span class="ldsp-chart-subtitle">共 ${Utils.formatReadingTime(totalWeekTime)} · 日均 ${Utils.formatReadingTime(avgTime)}</span>
                     </div>
-                    <div class="ldsp-reading-week">${barsHtml}</div>
+                    <div class="ldsp-reading-week">
+                        ${barsHtml}
+                    </div>
                 </div>
             `;
         }
 
         renderAllTrend(history, reqs) {
             if (history.length < 2) {
-                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">📊</div><div class="ldsp-empty-text">数据不足<br><small>持续访问积累数据</small></div></div>`;
+                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">📊</div><div class="ldsp-empty-text">数据不足<br>持续访问积累数据</div></div>`;
             }
 
             const oldest = history[0];
@@ -2062,19 +2474,19 @@
             let html = `<div class="ldsp-time-info">共记录 <span>${totalDays}</span> 天数据，显示最近 <span>${displayDays}</span> 天</div>`;
 
             // 总阅读时间统计
-            const totalReadingTime = history.reduce((sum, h) => sum + (h.readingTime || 0), 0);
-            const avgReadingTime = Math.round(totalReadingTime / history.length);
+            const totalReadingTime = readingTracker.getTotalReadingTime();
+            const avgReadingTime = Math.round(totalReadingTime / Math.max(totalDays, 1));
 
             if (totalReadingTime > 0) {
                 const level = Utils.getReadingLevel(avgReadingTime);
                 html += `
                     <div class="ldsp-reading-stats">
-                        <span class="ldsp-reading-stats-icon">📚</span>
+                        <div class="ldsp-reading-stats-icon">📚</div>
                         <div class="ldsp-reading-stats-info">
                             <div class="ldsp-reading-stats-value">${Utils.formatReadingTime(totalReadingTime)}</div>
                             <div class="ldsp-reading-stats-label">累计阅读时间 · 日均 ${Utils.formatReadingTime(avgReadingTime)}</div>
                         </div>
-                        <span class="ldsp-reading-stats-badge" style="background:${level.bg};color:${level.color}">${level.label}</span>
+                        <div class="ldsp-reading-stats-badge" style="background: ${level.bg}; color: ${level.color};">${level.label}</div>
                     </div>
                 `;
             }
@@ -2085,14 +2497,9 @@
             keys.forEach(key => {
                 const req = reqs.find(r => r.name.includes(key));
                 if (!req) return;
-
                 const dailyData = this.aggregateByDay(recentHistory, req.name, displayDays);
                 if (dailyData.values.some(v => v > 0)) {
-                    trends.push({
-                        label: key.replace('浏览的话题', '浏览话题'),
-                        ...dailyData,
-                        current: req.currentValue
-                    });
+                    trends.push({ label: key.replace('浏览的话题', '浏览话题'), ...dailyData, current: req.currentValue });
                 }
             });
 
@@ -2103,9 +2510,8 @@
                     const max = Math.max(...t.values, 1);
                     const bars = t.values.map((v, i) => {
                         const height = Math.max(v / max * 22, 3);
-                        return `<div class="ldsp-spark-bar" style="height:${height}px" data-value="${t.dates[i]}: ${v}" title="${v}"></div>`;
+                        return `<div class="ldsp-spark-bar" style="height:${height}px" data-value="${v}"></div>`;
                     }).join('');
-
                     html += `
                         <div class="ldsp-spark-row">
                             <span class="ldsp-spark-label">${t.label}</span>
@@ -2132,7 +2538,6 @@
 
             // 总变化
             let changes = '';
-
             reqs.forEach(r => {
                 const oldVal = oldest.data[r.name] || 0;
                 const newVal = newest.data[r.name] || 0;
@@ -2159,8 +2564,8 @@
         aggregateByDay(history, name, maxDays) {
             const values = [];
             const dates = [];
-
             const dayMap = new Map();
+
             history.forEach(h => {
                 const day = new Date(h.ts).toDateString();
                 dayMap.set(day, h.data[name] || 0);
@@ -2211,4 +2616,5 @@
     } else {
         new Panel();
     }
+
 })();
