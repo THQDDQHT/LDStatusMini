@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LDStatus Pro
 // @namespace    http://tampermonkey.net/
-// @version      2.8.0
+// @version      2.8.1
 // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计
 // @author       JackLiii
 // @license      MIT
@@ -216,6 +216,58 @@
                     GM_setValue(readingKey, newData);
                     console.log(`[LDStatus Pro] 迁移阅读时间数据格式: ${readingKey}`);
                 }
+            }
+
+            // 优化数据结构：从 v2 升级到 v3（添加月度和年度聚合缓存）
+            this.optimizeReadingTimeDataStructure(username);
+        },
+
+        // 优化阅读时间数据结构（v2 -> v3）
+        optimizeReadingTimeDataStructure(username) {
+            const readingKey = `${CONFIG.STORAGE_KEYS.readingTime}_${username}`;
+            const data = GM_getValue(readingKey, null);
+
+            if (data && data.version === 2) {
+                // 升级为 v3：添加月度和年度聚合数据
+                data.version = 3;
+                
+                // 初始化聚合缓存
+                data.monthlyCache = data.monthlyCache || {};  // 按月缓存：YYYY-MM -> totalMinutes
+                data.yearlyCache = data.yearlyCache || {};    // 按年缓存：YYYY -> totalMinutes
+                
+                // 如果有日度数据，计算聚合
+                if (data.dailyData && Object.keys(data.dailyData).length > 0) {
+                    Object.keys(data.dailyData).forEach(dateKey => {
+                        try {
+                            const date = new Date(dateKey);
+                            const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+                            const yearKey = `${date.getFullYear()}`;
+                            const minutes = data.dailyData[dateKey].totalMinutes || 0;
+                            
+                            // 累加到月度缓存
+                            if (!data.monthlyCache[monthKey]) {
+                                data.monthlyCache[monthKey] = 0;
+                            }
+                            data.monthlyCache[monthKey] += minutes;
+                            
+                            // 累加到年度缓存
+                            if (!data.yearlyCache[yearKey]) {
+                                data.yearlyCache[yearKey] = 0;
+                            }
+                            data.yearlyCache[yearKey] += minutes;
+                        } catch (e) {
+                            // 跳过无效的日期格式
+                        }
+                    });
+                }
+                
+                GM_setValue(readingKey, data);
+                console.log(`[LDStatus Pro] 优化阅读时间数据结构: ${readingKey} (v2 -> v3)`);
+            } else if (data && data.version === 3) {
+                // 已是最新版本，检查缓存完整性
+                if (!data.monthlyCache) data.monthlyCache = {};
+                if (!data.yearlyCache) data.yearlyCache = {};
+                GM_setValue(readingKey, data);
             }
         },
 
@@ -566,6 +618,9 @@
 
                 stored.dailyData[todayKey] = todayData;
 
+                // 更新缓存（月度/年度聚合）
+                this.updateReadingCache(stored, todayKey, timeToAddMinutes);
+
                 // 清理超过90天的数据
                 this.cleanOldData(stored);
 
@@ -590,6 +645,55 @@
                     delete stored.dailyData[dateKey];
                 }
             });
+
+            // 清理超期的缓存数据
+            this.cleanCacheData(stored, cutoffDate);
+        }
+
+        // 清理超期的缓存数据
+        cleanCacheData(stored, cutoffDate) {
+            // 清理月度缓存中超期的数据
+            if (stored.monthlyCache) {
+                Object.keys(stored.monthlyCache).forEach(monthKey => {
+                    try {
+                        // 将 YYYY-MM 转换为日期
+                        const [year, month] = monthKey.split('-');
+                        const date = new Date(parseInt(year), parseInt(month) - 1, 1);
+                        if (date < cutoffDate) {
+                            delete stored.monthlyCache[monthKey];
+                        }
+                    } catch (e) {
+                        // 跳过无效格式
+                    }
+                });
+            }
+        }
+
+        // 更新月度/年度缓存（在保存时调用）
+        updateReadingCache(stored, dateKey, minutesAdded) {
+            // 确保缓存存在
+            if (!stored.monthlyCache) stored.monthlyCache = {};
+            if (!stored.yearlyCache) stored.yearlyCache = {};
+
+            try {
+                const date = new Date(dateKey);
+                const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+                const yearKey = `${date.getFullYear()}`;
+
+                // 更新月度缓存
+                if (!stored.monthlyCache[monthKey]) {
+                    stored.monthlyCache[monthKey] = 0;
+                }
+                stored.monthlyCache[monthKey] += minutesAdded;
+
+                // 更新年度缓存
+                if (!stored.yearlyCache[yearKey]) {
+                    stored.yearlyCache[yearKey] = 0;
+                }
+                stored.yearlyCache[yearKey] += minutesAdded;
+            } catch (e) {
+                // 跳过无效的日期格式
+            }
         }
 
         // 获取今日阅读时间（分钟）
@@ -1332,12 +1436,27 @@
             gap: 6px;
             padding: 0 0 12px 0;
             overflow-x: auto;
-            scrollbar-width: none;
-            -ms-overflow-style: none;
+            overflow-y: hidden;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border-default) transparent;
+            -ms-overflow-style: auto;
         }
 
         .ldsp-subtabs::-webkit-scrollbar {
-            display: none;
+            height: 4px;
+        }
+
+        .ldsp-subtabs::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .ldsp-subtabs::-webkit-scrollbar-thumb {
+            background: var(--border-default);
+            border-radius: 2px;
+        }
+
+        .ldsp-subtabs::-webkit-scrollbar-thumb:hover {
+            background: var(--border-subtle);
         }
 
         .ldsp-subtab {
@@ -1352,6 +1471,7 @@
             transition: all 0.2s;
             white-space: nowrap;
             flex-shrink: 0;
+            min-width: fit-content;
         }
 
         .ldsp-subtab:hover {
@@ -1830,6 +1950,123 @@
 
         .ldsp-line-chart circle {
             opacity: 1;
+        }
+
+        /* 交互式图表样式 */
+        .ldsp-interactive-chart {
+            position: relative;
+            cursor: crosshair;
+        }
+
+        .ldsp-grid {
+            opacity: 0.3;
+        }
+
+        .ldsp-grid-line {
+            stroke: var(--text-muted);
+            stroke-width: 0.5;
+        }
+
+        .ldsp-chart-line {
+            stroke: var(--accent-primary);
+            stroke-width: 1.5;
+            fill: none;
+        }
+
+        .ldsp-chart-area {
+            fill: var(--accent-primary);
+            opacity: 0.1;
+        }
+
+        .ldsp-chart-point {
+            fill: var(--accent-primary);
+            stroke: #fff;
+            stroke-width: 1.5;
+            opacity: 0.6;
+            transition: all 0.2s;
+        }
+
+        .ldsp-chart-point:hover,
+        .ldsp-chart-point.active {
+            opacity: 1;
+            r: 3;
+        }
+
+        .ldsp-chart-hover-line {
+            stroke: var(--accent-primary);
+            stroke-width: 1;
+            opacity: 0;
+            stroke-dasharray: 2,2;
+            pointer-events: none;
+        }
+
+        .ldsp-chart-hover-line.active {
+            opacity: 0.5;
+        }
+
+        .ldsp-chart-tooltip {
+            position: absolute;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-default);
+            border-radius: 4px;
+            padding: 6px 10px;
+            font-size: 11px;
+            color: var(--text-primary);
+            pointer-events: none;
+            white-space: nowrap;
+            box-shadow: var(--shadow-sm);
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 100;
+        }
+
+        .ldsp-chart-tooltip.active {
+            opacity: 1;
+        }
+
+        .ldsp-month-labels,
+        .ldsp-year-labels {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0 0 68px;
+            margin-right: 40px;
+            font-size: 9px;
+            color: var(--text-muted);
+        }
+
+        .ldsp-month-label,
+        .ldsp-year-label {
+            text-align: center;
+        }
+
+        /* 读数时间特殊样式 */
+        .ldsp-reading-minutes {
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--accent-primary);
+        }
+
+        .ldsp-reading-stat {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .ldsp-reading-stat:last-child {
+            border-bottom: none;
+        }
+
+        .ldsp-reading-label {
+            font-size: 10px;
+            color: var(--text-secondary);
+        }
+
+        .ldsp-reading-value {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--accent-primary);
         }
     `;
 
@@ -2598,11 +2835,11 @@
                 return `<div class="ldsp-empty"><div class="ldsp-empty-icon">📈</div><div class="ldsp-empty-text">本年数据不足<br>请持续使用积累数据</div></div>`;
             }
 
-            // 本年阅读时间趋势（折线图）
+            // 本年阅读时间趋势（按月统计的折线图）
             let html = this.renderReadingYearChart();
 
-            // 按周聚合数据（显示增量）
-            const weeklyAggregates = this.aggregateWeeklyIncrements(recent, reqs);
+            // 按月聚合数据（显示月度增量）
+            const monthlyAggregates = this.aggregateMonthlyIncrements(recent, reqs);
 
             const keys = ['浏览话题', '已读帖子', '获赞', '送出赞', '回复'];
             const trends = [];
@@ -2610,20 +2847,21 @@
             keys.forEach(key => {
                 const req = reqs.find(r => r.name.includes(key === '浏览话题' ? '浏览的话题' : key));
                 if (!req) return;
-                const trendData = this.calculateWeeklyTrend(weeklyAggregates, req.name);
+                const trendData = this.calculateMonthlyTrend(monthlyAggregates, req.name);
                 if (trendData.values.some(v => v > 0)) {
                     trends.push({ label: key, ...trendData, current: req.currentValue });
                 }
             });
 
             if (trends.length > 0) {
-                html += `<div class="ldsp-chart"><div class="ldsp-chart-title">📈 本年周度增量<span class="ldsp-chart-subtitle">显示每周新增</span></div>`;
+                html += `<div class="ldsp-chart"><div class="ldsp-chart-title">📊 本年月度增量<span class="ldsp-chart-subtitle">显示每月新增</span></div>`;
 
                 trends.forEach(t => {
                     const max = Math.max(...t.values, 1);
                     const bars = t.values.map((v, i) => {
                         const height = Math.max(v / max * 18, 2);
-                        return `<div class="ldsp-spark-bar" style="height:${height}px" data-value="${v}" title="第${i+1}周: ${v}增加"></div>`;
+                        const monthLabel = (i + 1) + '月';
+                        return `<div class="ldsp-spark-bar" style="height:${height}px" data-value="${v}" title="${monthLabel}: ${v}增加"></div>`;
                     }).join('');
                     html += `
                         <div class="ldsp-spark-row">
@@ -2638,6 +2876,69 @@
             }
 
             return html;
+        }
+
+        // 按月聚合增量数据
+        aggregateMonthlyIncrements(history, reqs) {
+            const monthMap = new Map();
+
+            // 按月组织数据
+            const historyByMonth = new Map();
+            history.forEach(h => {
+                const date = new Date(h.ts);
+                const monthKey = new Date(date.getFullYear(), date.getMonth(), 1).toDateString();
+                
+                if (!historyByMonth.has(monthKey)) {
+                    historyByMonth.set(monthKey, []);
+                }
+                historyByMonth.get(monthKey).push(h);
+            });
+
+            // 按时间顺序处理
+            const sortedMonths = Array.from(historyByMonth.keys()).sort((a, b) => 
+                new Date(a).getTime() - new Date(b).getTime()
+            );
+
+            let prevData = null;
+            sortedMonths.forEach(month => {
+                const monthRecords = historyByMonth.get(month);
+                const latestRecord = monthRecords[monthRecords.length - 1];
+                
+                if (!monthMap.has(month)) {
+                    monthMap.set(month, {});
+                }
+
+                // 计算这个月的增量
+                const monthData = monthMap.get(month);
+                reqs.forEach(req => {
+                    const currentVal = latestRecord.data[req.name] || 0;
+                    const prevVal = prevData ? (prevData[req.name] || 0) : 0;
+                    monthData[req.name] = currentVal - prevVal;
+                });
+
+                prevData = { ...latestRecord.data };
+            });
+
+            return monthMap;
+        }
+
+        // 计算月度趋势（显示增量）
+        calculateMonthlyTrend(monthlyAggregates, name) {
+            const values = [];
+            const dates = [];
+
+            const sortedMonths = Array.from(monthlyAggregates.keys()).sort((a, b) => 
+                new Date(a).getTime() - new Date(b).getTime()
+            );
+
+            sortedMonths.forEach((month, index) => {
+                const date = new Date(month);
+                dates.push((date.getMonth() + 1) + '月');
+                const increment = monthlyAggregates.get(month)[name] || 0;
+                values.push(Math.max(increment, 0)); // 确保非负值
+            });
+
+            return { values, dates };
         }
 
         renderReadingWeekChart() {
@@ -2956,79 +3257,262 @@
             // 获取30天数据
             const days = readingTracker.getReadingTimeHistory(30);
             const maxTime = Math.max(...days.map(d => d.minutes), 60);
+            const chartId = 'ldsp-month-chart-' + Date.now();
 
-            // 生成折线图的SVG路径
+            // 生成折线图的SVG路径（带数据点）
             const points = days.map((d, i) => {
                 const x = (i / (days.length - 1)) * 100;
                 const y = 100 - (d.minutes / maxTime * 100);
                 return `${x},${y}`;
             }).join(' ');
 
+            // 生成交互点
+            const circles = days.map((d, i) => {
+                const x = (i / (days.length - 1)) * 100;
+                const y = 100 - (d.minutes / maxTime * 100);
+                const dayNum = new Date(d.date).getDate();
+                const tooltipText = `${dayNum}日: ${Utils.formatReadingTime(d.minutes)}`;
+                return `<circle cx="${x}" cy="${y}" r="2" class="ldsp-chart-point" data-date="${d.date}" data-tooltip="${tooltipText}" data-minutes="${d.minutes}"/>`;
+            }).join('');
+
             const totalMonthTime = days.reduce((sum, d) => sum + d.minutes, 0);
             const avgTime = Math.round(totalMonthTime / 30);
 
-            return `
+            const html = `
                 <div class="ldsp-chart">
                     <div class="ldsp-chart-title">
-                        ⏱️ 本月阅读时间 (折线图)
+                        ⏱️ 本月阅读时间 (按日统计)
                         <span class="ldsp-chart-subtitle">共 ${Utils.formatReadingTime(totalMonthTime)} · 日均 ${Utils.formatReadingTime(avgTime)}</span>
                     </div>
-                    <svg class="ldsp-line-chart" viewBox="0 0 100 100" preserveAspectRatio="none">
-                        <polyline points="${points}" fill="none" stroke="var(--accent-secondary)" stroke-width="2"/>
-                        <circle cx="${(days.length - 1) / (days.length - 1) * 100}" cy="${100 - (days[days.length-1].minutes / maxTime * 100)}" r="1.5" fill="var(--accent-secondary)"/>
-                    </svg>
+                    <div class="ldsp-month-chart-container">
+                        <svg class="ldsp-line-chart ldsp-interactive-chart" id="${chartId}" viewBox="0 0 100 100" preserveAspectRatio="none">
+                            <!-- 网格线 -->
+                            <g class="ldsp-grid">
+                                <line x1="0" y1="25" x2="100" y2="25" class="ldsp-grid-line"/>
+                                <line x1="0" y1="50" x2="100" y2="50" class="ldsp-grid-line"/>
+                                <line x1="0" y1="75" x2="100" y2="75" class="ldsp-grid-line"/>
+                            </g>
+                            <!-- 折线 -->
+                            <polyline points="${points}" fill="none" stroke="var(--accent-secondary)" stroke-width="2" class="ldsp-chart-line"/>
+                            <!-- 数据点 -->
+                            ${circles}
+                            <!-- 悬浮指示线 -->
+                            <line class="ldsp-hover-line" x1="50" y1="0" x2="50" y2="100" style="display:none"/>
+                        </svg>
+                        <div class="ldsp-chart-tooltip" id="${chartId}-tooltip" style="display:none;"></div>
+                    </div>
+                    <!-- 日期标签 -->
+                    <div class="ldsp-month-labels">
+                        <span>1</span>
+                        <span>10</span>
+                        <span>20</span>
+                        <span>30/31</span>
+                    </div>
                 </div>
             `;
+
+            // 延迟绑定事件，确保DOM已加载
+            setTimeout(() => {
+                const chart = document.getElementById(chartId);
+                if (chart) {
+                    this.bindMonthChartInteraction(chart, days, maxTime);
+                }
+            }, 100);
+
+            return html;
+        }
+
+        bindMonthChartInteraction(chart, days, maxTime) {
+            const tooltip = chart.nextElementSibling;
+            const hoverLine = chart.querySelector('.ldsp-hover-line');
+            const points = chart.querySelectorAll('.ldsp-chart-point');
+
+            chart.addEventListener('mousemove', (e) => {
+                const rect = chart.getBoundingClientRect();
+                const x = ((e.clientX - rect.left) / rect.width) * 100;
+
+                // 找到最近的数据点
+                let closestIndex = 0;
+                let closestDist = Infinity;
+
+                points.forEach((point, i) => {
+                    const pointX = parseFloat(point.getAttribute('cx'));
+                    const dist = Math.abs(pointX - x);
+                    if (dist < closestDist) {
+                        closestDist = dist;
+                        closestIndex = i;
+                    }
+                });
+
+                const point = points[closestIndex];
+                const pointX = parseFloat(point.getAttribute('cx'));
+                const pointY = parseFloat(point.getAttribute('cy'));
+                const tooltipText = point.getAttribute('data-tooltip');
+
+                // 更新悬浮线
+                hoverLine.setAttribute('x1', pointX);
+                hoverLine.setAttribute('x2', pointX);
+                hoverLine.style.display = 'block';
+
+                // 更新提示
+                if (tooltip) {
+                    tooltip.textContent = tooltipText;
+                    tooltip.style.display = 'block';
+                    tooltip.style.left = (pointX) + '%';
+                }
+
+                // 高亮点
+                points.forEach(p => p.classList.remove('ldsp-chart-point-active'));
+                point.classList.add('ldsp-chart-point-active');
+            });
+
+            chart.addEventListener('mouseleave', () => {
+                hoverLine.style.display = 'none';
+                if (tooltip) tooltip.style.display = 'none';
+                points.forEach(p => p.classList.remove('ldsp-chart-point-active'));
+            });
         }
 
         renderReadingYearChart() {
-            // 获取52周数据（按周聚合）
+            // 获取12个月的数据
             const today = new Date();
-            const weeks = [];
+            const months = [];
+            const chartId = 'ldsp-year-chart-' + Date.now();
             
-            for (let i = 51; i >= 0; i--) {
-                const weekEnd = new Date(today);
-                weekEnd.setDate(today.getDate() - (today.getDay() || 7) - i * 7);
+            for (let i = 11; i >= 0; i--) {
+                const monthStart = new Date(today.getFullYear(), today.getMonth() - i, 1);
+                const monthEnd = new Date(today.getFullYear(), today.getMonth() - i + 1, 0);
                 
-                // 计算这周的总阅读时间
-                let weekTotal = 0;
-                for (let d = 0; d < 7; d++) {
-                    const date = new Date(weekEnd);
-                    date.setDate(weekEnd.getDate() + d);
+                // 计算这个月的总阅读时间
+                let monthTotal = 0;
+                for (let d = monthStart.getDate(); d <= monthEnd.getDate(); d++) {
+                    const date = new Date(monthStart.getFullYear(), monthStart.getMonth(), d);
                     const dateKey = date.toDateString();
-                    weekTotal += readingTracker.getReadingTimeForDate(dateKey);
+                    monthTotal += readingTracker.getReadingTimeForDate(dateKey);
                 }
                 
-                weeks.push({
-                    weekStart: weekEnd,
-                    minutes: weekTotal
+                months.push({
+                    month: monthStart.getMonth() + 1,
+                    year: monthStart.getFullYear(),
+                    minutes: monthTotal,
+                    label: (monthStart.getMonth() + 1) + '月'
                 });
             }
 
-            const maxTime = Math.max(...weeks.map(w => w.minutes), 60);
+            const maxTime = Math.max(...months.map(m => m.minutes), 60);
 
             // 生成折线图的SVG路径
-            const points = weeks.map((w, i) => {
-                const x = (i / (weeks.length - 1)) * 100;
-                const y = 100 - (w.minutes / maxTime * 100);
+            const points = months.map((m, i) => {
+                const x = (i / (months.length - 1)) * 100;
+                const y = 100 - (m.minutes / maxTime * 100);
                 return `${x},${y}`;
             }).join(' ');
 
-            const totalYearTime = weeks.reduce((sum, w) => sum + w.minutes, 0);
-            const avgTime = Math.round(totalYearTime / 52);
+            // 生成交互点
+            const circles = months.map((m, i) => {
+                const x = (i / (months.length - 1)) * 100;
+                const y = 100 - (m.minutes / maxTime * 100);
+                const tooltipText = `${m.label}: ${Utils.formatReadingTime(m.minutes)}`;
+                return `<circle cx="${x}" cy="${y}" r="2" class="ldsp-chart-point" data-tooltip="${tooltipText}" data-minutes="${m.minutes}"/>`;
+            }).join('');
 
-            return `
+            const totalYearTime = months.reduce((sum, m) => sum + m.minutes, 0);
+            const avgTime = Math.round(totalYearTime / 12);
+
+            const html = `
                 <div class="ldsp-chart">
                     <div class="ldsp-chart-title">
-                        ⏱️ 本年阅读时间 (折线图)
-                        <span class="ldsp-chart-subtitle">共 ${Utils.formatReadingTime(totalYearTime)} · 周均 ${Utils.formatReadingTime(avgTime)}</span>
+                        ⏱️ 本年阅读时间 (按月统计)
+                        <span class="ldsp-chart-subtitle">共 ${Utils.formatReadingTime(totalYearTime)} · 月均 ${Utils.formatReadingTime(avgTime)}</span>
                     </div>
-                    <svg class="ldsp-line-chart" viewBox="0 0 100 100" preserveAspectRatio="none">
-                        <polyline points="${points}" fill="none" stroke="var(--accent-primary)" stroke-width="2"/>
-                        <circle cx="100" cy="${100 - (weeks[weeks.length-1].minutes / maxTime * 100)}" r="1.5" fill="var(--accent-primary)"/>
-                    </svg>
+                    <div class="ldsp-year-chart-container">
+                        <svg class="ldsp-line-chart ldsp-interactive-chart" id="${chartId}" viewBox="0 0 100 100" preserveAspectRatio="none">
+                            <!-- 网格线 -->
+                            <g class="ldsp-grid">
+                                <line x1="0" y1="25" x2="100" y2="25" class="ldsp-grid-line"/>
+                                <line x1="0" y1="50" x2="100" y2="50" class="ldsp-grid-line"/>
+                                <line x1="0" y1="75" x2="100" y2="75" class="ldsp-grid-line"/>
+                            </g>
+                            <!-- 折线 -->
+                            <polyline points="${points}" fill="none" stroke="var(--accent-primary)" stroke-width="2" class="ldsp-chart-line"/>
+                            <!-- 数据点 -->
+                            ${circles}
+                            <!-- 悬浮指示线 -->
+                            <line class="ldsp-hover-line" x1="50" y1="0" x2="50" y2="100" style="display:none"/>
+                        </svg>
+                        <div class="ldsp-chart-tooltip" id="${chartId}-tooltip" style="display:none;"></div>
+                    </div>
+                    <!-- 月份标签 -->
+                    <div class="ldsp-year-labels">
+                        <span>1月</span>
+                        <span>4月</span>
+                        <span>7月</span>
+                        <span>10月</span>
+                        <span>12月</span>
+                    </div>
                 </div>
             `;
+
+            // 延迟绑定事件，确保DOM已加载
+            setTimeout(() => {
+                const chart = document.getElementById(chartId);
+                if (chart) {
+                    this.bindYearChartInteraction(chart, months, maxTime);
+                }
+            }, 100);
+
+            return html;
+        }
+
+        bindYearChartInteraction(chart, months, maxTime) {
+            const tooltip = chart.nextElementSibling;
+            const hoverLine = chart.querySelector('.ldsp-hover-line');
+            const points = chart.querySelectorAll('.ldsp-chart-point');
+
+            chart.addEventListener('mousemove', (e) => {
+                const rect = chart.getBoundingClientRect();
+                const x = ((e.clientX - rect.left) / rect.width) * 100;
+
+                // 找到最近的数据点
+                let closestIndex = 0;
+                let closestDist = Infinity;
+
+                points.forEach((point, i) => {
+                    const pointX = parseFloat(point.getAttribute('cx'));
+                    const dist = Math.abs(pointX - x);
+                    if (dist < closestDist) {
+                        closestDist = dist;
+                        closestIndex = i;
+                    }
+                });
+
+                const point = points[closestIndex];
+                const pointX = parseFloat(point.getAttribute('cx'));
+                const pointY = parseFloat(point.getAttribute('cy'));
+                const tooltipText = point.getAttribute('data-tooltip');
+
+                // 更新悬浮线
+                hoverLine.setAttribute('x1', pointX);
+                hoverLine.setAttribute('x2', pointX);
+                hoverLine.style.display = 'block';
+
+                // 更新提示
+                if (tooltip) {
+                    tooltip.textContent = tooltipText;
+                    tooltip.style.display = 'block';
+                    tooltip.style.left = (pointX) + '%';
+                }
+
+                // 高亮点
+                points.forEach(p => p.classList.remove('ldsp-chart-point-active'));
+                point.classList.add('ldsp-chart-point-active');
+            });
+
+            chart.addEventListener('mouseleave', () => {
+                hoverLine.style.display = 'none';
+                if (tooltip) tooltip.style.display = 'none';
+                points.forEach(p => p.classList.remove('ldsp-chart-point-active'));
+            });
         }
 
         checkUpdate() {
