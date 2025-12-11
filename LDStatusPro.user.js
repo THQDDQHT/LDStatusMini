@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         LDStatus Pro
 // @namespace    http://tampermonkey.net/
-// @version      2.7.2
+// @version      2.7.3
 // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计
 // @author       JackLiii
+// @license      MIT
 // @match        https://linux.do/*
 // @match        https://idcflare.com/*
 // @grant        GM_xmlhttpRequest
@@ -29,14 +30,14 @@
     const SITE_CONFIG = {
         'linux.do': {
             name: 'Linux.do',
-            icon: '🐧',
+            icon: 'https://linux.do/uploads/default/optimized/4X/6/a/6/6a6affc7b1ce8140279e959d32671304db06d5ab_2_180x180.png',
             apiUrl: 'https://connect.linux.do',
             colorPrimary: '#6366f1',
             colorSecondary: '#0ea5e9'
         },
         'idcflare.com': {
             name: 'IDCFlare',
-            icon: '⚡',
+            icon: 'https://idcflare.com/uploads/default/optimized/1X/8746f94a48ddc8140e8c7a52084742f38d3f5085_2_180x180.png',
             apiUrl: 'https://connect.idcflare.com',
             colorPrimary: '#f97316',
             colorSecondary: '#d97706'
@@ -884,6 +885,16 @@
             display: flex;
             align-items: center;
             gap: 10px;
+        }
+
+        .ldsp-site-icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            object-fit: cover;
+            flex-shrink: 0;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            background: rgba(255, 255, 255, 0.1);
         }
 
         .ldsp-title {
@@ -1838,7 +1849,8 @@
             this.el.innerHTML = `
                 <div class="ldsp-header">
                     <div class="ldsp-header-info">
-                        <span class="ldsp-title">${CURRENT_SITE.icon} ${CURRENT_SITE.name}</span>
+                        <img class="ldsp-site-icon" src="${CURRENT_SITE.icon}" alt="${CURRENT_SITE.name}" />
+                        <span class="ldsp-title">${CURRENT_SITE.name}</span>
                         <span class="ldsp-version">v${GM_info.script.version}</span>
                     </div>
                     <div class="ldsp-header-btns">
