@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LDStatus Pro
 // @namespace    http://tampermonkey.net/
-// @version      2.7.3
+// @version      2.8.0
 // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计
 // @author       JackLiii
 // @license      MIT
@@ -88,7 +88,7 @@
             'userAvatar', 'readingTime', 'todayReadingStart'
         ],
         REFRESH_INTERVAL: 300000,
-        MAX_HISTORY_DAYS: 90,
+        MAX_HISTORY_DAYS: 365,  // 保存最近1年的数据
         // 阅读时间追踪配置
         READING_TRACK_INTERVAL: 10000,  // 每10秒检测一次活跃状态
         READING_IDLE_THRESHOLD: 60000,  // 60秒无操作视为不活跃
@@ -1815,13 +1815,35 @@
             background: var(--warning);
             animation: none;
         }
+
+        /* 折线图样式 */
+        .ldsp-line-chart {
+            width: 100%;
+            height: 80px;
+            margin: 12px 0 8px;
+            display: block;
+        }
+
+        .ldsp-line-chart polyline {
+            opacity: 0.8;
+        }
+
+        .ldsp-line-chart circle {
+            opacity: 1;
+        }
     `;
 
     // ==================== 面板类 ====================
     class Panel {
         constructor() {
             this.prevReqs = [];
-            this.currentTrendTab = Utils.get('trendTab', 'today');
+            // 迁移旧的趋势标签值（如果是'last'则改为'today'）
+            let trendTab = Utils.get('trendTab', 'today');
+            if (trendTab === 'last' || trendTab === '7d') {
+                trendTab = 'today';
+                Utils.set('trendTab', trendTab);
+            }
+            this.currentTrendTab = trendTab;
             this.userAvatar = Utils.get('userAvatar', null);
             this.currentReadingTime = 0;  // 当前阅读时间（分钟）
             this.currentUsername = null;
@@ -2231,12 +2253,9 @@
                 Utils.setTodayData(histData, this.currentReadingTime, false);
             }
 
-            // 获取上次访问数据用于对比
-            const lastVisit = Utils.getLastVisitData();
-
             this.renderUser(username, level, isOK, reorderedReqs);
             this.renderReqs(reorderedReqs);
-            this.renderTrends(history, reorderedReqs, lastVisit, this.currentReadingTime);
+            this.renderTrends(history, reorderedReqs, this.currentReadingTime);
 
             // 更新上次访问数据
             Utils.setLastVisitData(histData, this.currentReadingTime);
@@ -2306,13 +2325,14 @@
             this.$.reqs.innerHTML = html;
         }
 
-        renderTrends(history, reqs, lastVisit, currentReadingTime) {
+        renderTrends(history, reqs, currentReadingTime) {
             let html = `
                 <div class="ldsp-subtabs">
-                    <div class="ldsp-subtab ${this.currentTrendTab === 'last' ? 'active' : ''}" data-trend="last">📍 上次访问</div>
                     <div class="ldsp-subtab ${this.currentTrendTab === 'today' ? 'active' : ''}" data-trend="today">☀️ 今日</div>
-                    <div class="ldsp-subtab ${this.currentTrendTab === '7d' ? 'active' : ''}" data-trend="7d">📅 7天</div>
-                    <div class="ldsp-subtab ${this.currentTrendTab === 'all' ? 'active' : ''}" data-trend="all">📊 全部</div>
+                    <div class="ldsp-subtab ${this.currentTrendTab === 'week' ? 'active' : ''}" data-trend="week">📅 本周</div>
+                    <div class="ldsp-subtab ${this.currentTrendTab === 'month' ? 'active' : ''}" data-trend="month">📊 本月</div>
+                    <div class="ldsp-subtab ${this.currentTrendTab === 'year' ? 'active' : ''}" data-trend="year">📈 本年</div>
+                    <div class="ldsp-subtab ${this.currentTrendTab === 'all' ? 'active' : ''}" data-trend="all">🌐 全部</div>
                 </div>
                 <div class="ldsp-trend-content"></div>
             `;
@@ -2325,86 +2345,33 @@
                     Utils.set('trendTab', this.currentTrendTab);
                     this.$.trends.querySelectorAll('.ldsp-subtab').forEach(t => t.classList.remove('active'));
                     tab.classList.add('active');
-                    this.renderTrendContent(history, reqs, lastVisit, currentReadingTime);
+                    this.renderTrendContent(history, reqs, currentReadingTime);
                 });
             });
 
-            this.renderTrendContent(history, reqs, lastVisit, currentReadingTime);
+            this.renderTrendContent(history, reqs, currentReadingTime);
         }
 
-        renderTrendContent(history, reqs, lastVisit, currentReadingTime) {
+        renderTrendContent(history, reqs, currentReadingTime) {
             const container = this.$.trends.querySelector('.ldsp-trend-content');
 
             switch (this.currentTrendTab) {
-                case 'last':
-                    container.innerHTML = this.renderLastVisitTrend(reqs, lastVisit);
-                    break;
                 case 'today':
                     container.innerHTML = this.renderTodayTrend(reqs, currentReadingTime);
                     break;
-                case '7d':
-                    container.innerHTML = this.render7dTrend(history, reqs);
+                case 'week':
+                    container.innerHTML = this.renderWeekTrend(history, reqs);
+                    break;
+                case 'month':
+                    container.innerHTML = this.renderMonthTrend(history, reqs);
+                    break;
+                case 'year':
+                    container.innerHTML = this.renderYearTrend(history, reqs);
                     break;
                 case 'all':
                     container.innerHTML = this.renderAllTrend(history, reqs);
                     break;
             }
-        }
-
-        renderLastVisitTrend(reqs, lastVisit) {
-            if (!lastVisit) {
-                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">👋</div><div class="ldsp-empty-text">首次访问<br>下次访问时将显示变化</div></div>`;
-            }
-
-            const timeDiff = Date.now() - lastVisit.ts;
-            const hours = Math.floor(timeDiff / 3600000);
-            const minutes = Math.floor((timeDiff % 3600000) / 60000);
-            const timeStr = hours > 0 ? `${hours}小时${minutes}分钟` : `${minutes}分钟`;
-
-            let html = `<div class="ldsp-time-info">距上次访问 <span>${timeStr}</span></div>`;
-
-            // 显示阅读时间变化
-            if (lastVisit.readingTime !== undefined && this.currentReadingTime > 0) {
-                const readingDiff = this.currentReadingTime - lastVisit.readingTime;
-                if (readingDiff > 0) {
-                    html += `
-                        <div class="ldsp-reading-stats">
-                            <div class="ldsp-reading-stats-icon">📚</div>
-                            <div class="ldsp-reading-stats-info">
-                                <div class="ldsp-reading-stats-value">+${Utils.formatReadingTime(readingDiff)}</div>
-                                <div class="ldsp-reading-stats-label">阅读时间增加</div>
-                            </div>
-                        </div>
-                    `;
-                }
-            }
-
-            let changes = '';
-            let hasChange = false;
-
-            reqs.forEach(r => {
-                const prevVal = lastVisit.data[r.name] || 0;
-                const diff = r.currentValue - prevVal;
-                if (diff !== 0) {
-                    hasChange = true;
-                    const name = Utils.simplifyName(r.name);
-                    const cls = diff > 0 ? 'up' : 'down';
-                    changes += `
-                        <div class="ldsp-change-row">
-                            <span class="ldsp-change-name">${name}</span>
-                            <span class="ldsp-change-val ${cls}">${diff > 0 ? '+' : ''}${diff}</span>
-                        </div>
-                    `;
-                }
-            });
-
-            if (hasChange) {
-                html += `<div class="ldsp-chart"><div class="ldsp-chart-title">📊 数据变化</div><div class="ldsp-changes">${changes}</div></div>`;
-            } else {
-                html += `<div class="ldsp-no-change">暂无数据变化</div>`;
-            }
-
-            return html;
         }
 
         renderTodayTrend(reqs, currentReadingTime) {
@@ -2511,38 +2478,41 @@
             return html;
         }
 
-        render7dTrend(history, reqs) {
+        renderWeekTrend(history, reqs) {
             const now = Date.now();
-            const d7ago = now - 7 * 24 * 3600000;
-            const recent = history.filter(h => h.ts > d7ago);
+            const weekAgo = now - 7 * 24 * 3600000;
+            const recent = history.filter(h => h.ts > weekAgo);
 
-            if (recent.length < 2) {
-                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">📅</div><div class="ldsp-empty-text">7天内数据不足<br>每天访问积累数据</div></div>`;
+            if (recent.length < 1) {
+                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">📅</div><div class="ldsp-empty-text">本周数据不足<br>每天访问积累数据</div></div>`;
             }
 
-            // 7天阅读时间趋势
+            // 本周阅读时间趋势（柱状图）
             let html = this.renderReadingWeekChart();
 
-            const keys = ['浏览的话题', '已读帖子', '获赞', '送出赞', '回复'];
+            // 按日期聚合数据，计算每日增量
+            const dailyAggregates = this.aggregateDailyIncrements(recent, reqs, 7);
+
+            const keys = ['浏览话题', '已读帖子', '获赞', '送出赞', '回复'];
             const trends = [];
 
             keys.forEach(key => {
-                const req = reqs.find(r => r.name.includes(key));
+                const req = reqs.find(r => r.name.includes(key === '浏览话题' ? '浏览的话题' : key));
                 if (!req) return;
-                const dailyData = this.aggregateByDay(recent, req.name, 7);
-                if (dailyData.values.some(v => v > 0)) {
-                    trends.push({ label: key.replace('浏览的话题', '浏览话题'), ...dailyData, current: req.currentValue });
+                const trendData = this.calculateDailyTrend(dailyAggregates, req.name, 7);
+                if (trendData.values.some(v => v > 0)) {
+                    trends.push({ label: key, ...trendData, current: req.currentValue });
                 }
             });
 
             if (trends.length > 0) {
-                html += `<div class="ldsp-chart"><div class="ldsp-chart-title">📈 7天数据趋势<span class="ldsp-chart-subtitle">${Utils.formatDate(recent[0].ts)} - ${Utils.formatDate(recent[recent.length-1].ts)}</span></div>`;
+                html += `<div class="ldsp-chart"><div class="ldsp-chart-title">📈 本周每日增量<span class="ldsp-chart-subtitle">显示每日新增，而非总量</span></div>`;
 
                 trends.forEach(t => {
                     const max = Math.max(...t.values, 1);
                     const bars = t.values.map((v, i) => {
                         const height = Math.max(v / max * 22, 3);
-                        return `<div class="ldsp-spark-bar" style="height:${height}px" data-value="${v}"></div>`;
+                        return `<div class="ldsp-spark-bar" style="height:${height}px" data-value="${v}" title="${v}增加"></div>`;
                     }).join('');
                     html += `
                         <div class="ldsp-spark-row">
@@ -2565,29 +2535,106 @@
                 html += `</div>`;
             }
 
-            // 添加变化统计
-            const oldest = recent[0];
-            const newest = recent[recent.length - 1];
+            return html;
+        }
 
-            let changes = '';
-            reqs.forEach(r => {
-                const oldVal = oldest.data[r.name] || 0;
-                const newVal = newest.data[r.name] || 0;
-                const diff = newVal - oldVal;
-                if (diff !== 0) {
-                    const name = Utils.simplifyName(r.name);
-                    const cls = diff > 0 ? 'up' : 'down';
-                    changes += `
-                        <div class="ldsp-change-row">
-                            <span class="ldsp-change-name">${name}</span>
-                            <span class="ldsp-change-val ${cls}">${diff > 0 ? '+' : ''}${diff}</span>
-                        </div>
-                    `;
+        renderMonthTrend(history, reqs) {
+            const now = Date.now();
+            const monthAgo = now - 30 * 24 * 3600000;
+            const recent = history.filter(h => h.ts > monthAgo);
+
+            if (recent.length < 2) {
+                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">📊</div><div class="ldsp-empty-text">本月数据不足<br>请继续访问积累数据</div></div>`;
+            }
+
+            // 本月阅读时间趋势（折线图）
+            let html = this.renderReadingMonthChart();
+
+            // 按日期聚合数据（显示增量）
+            const dailyAggregates = this.aggregateDailyIncrements(recent, reqs, 30);
+
+            const keys = ['浏览话题', '已读帖子', '获赞', '送出赞', '回复'];
+            const trends = [];
+
+            keys.forEach(key => {
+                const req = reqs.find(r => r.name.includes(key === '浏览话题' ? '浏览的话题' : key));
+                if (!req) return;
+                const trendData = this.calculateDailyTrend(dailyAggregates, req.name, 30);
+                if (trendData.values.some(v => v > 0)) {
+                    trends.push({ label: key, ...trendData, current: req.currentValue });
                 }
             });
 
-            if (changes) {
-                html += `<div class="ldsp-chart"><div class="ldsp-chart-title">📊 7天总变化</div><div class="ldsp-changes">${changes}</div></div>`;
+            if (trends.length > 0) {
+                html += `<div class="ldsp-chart"><div class="ldsp-chart-title">📈 本月每日增量<span class="ldsp-chart-subtitle">显示每日新增，而非总量</span></div>`;
+
+                trends.forEach(t => {
+                    const max = Math.max(...t.values, 1);
+                    const bars = t.values.map((v, i) => {
+                        const height = Math.max(v / max * 20, 2);
+                        return `<div class="ldsp-spark-bar" style="height:${height}px" data-value="${v}" title="${v}增加"></div>`;
+                    }).join('');
+                    html += `
+                        <div class="ldsp-spark-row">
+                            <span class="ldsp-spark-label">${t.label}</span>
+                            <div class="ldsp-spark-bars" style="max-width: 100%;">${bars}</div>
+                            <span class="ldsp-spark-val">${t.current}</span>
+                        </div>
+                    `;
+                });
+
+                html += `</div>`;
+            }
+
+            return html;
+        }
+
+        renderYearTrend(history, reqs) {
+            const now = Date.now();
+            const yearAgo = now - 365 * 24 * 3600000;
+            const recent = history.filter(h => h.ts > yearAgo);
+
+            if (recent.length < 2) {
+                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">📈</div><div class="ldsp-empty-text">本年数据不足<br>请持续使用积累数据</div></div>`;
+            }
+
+            // 本年阅读时间趋势（折线图）
+            let html = this.renderReadingYearChart();
+
+            // 按周聚合数据（显示增量）
+            const weeklyAggregates = this.aggregateWeeklyIncrements(recent, reqs);
+
+            const keys = ['浏览话题', '已读帖子', '获赞', '送出赞', '回复'];
+            const trends = [];
+
+            keys.forEach(key => {
+                const req = reqs.find(r => r.name.includes(key === '浏览话题' ? '浏览的话题' : key));
+                if (!req) return;
+                const trendData = this.calculateWeeklyTrend(weeklyAggregates, req.name);
+                if (trendData.values.some(v => v > 0)) {
+                    trends.push({ label: key, ...trendData, current: req.currentValue });
+                }
+            });
+
+            if (trends.length > 0) {
+                html += `<div class="ldsp-chart"><div class="ldsp-chart-title">📈 本年周度增量<span class="ldsp-chart-subtitle">显示每周新增</span></div>`;
+
+                trends.forEach(t => {
+                    const max = Math.max(...t.values, 1);
+                    const bars = t.values.map((v, i) => {
+                        const height = Math.max(v / max * 18, 2);
+                        return `<div class="ldsp-spark-bar" style="height:${height}px" data-value="${v}" title="第${i+1}周: ${v}增加"></div>`;
+                    }).join('');
+                    html += `
+                        <div class="ldsp-spark-row">
+                            <span class="ldsp-spark-label">${t.label}</span>
+                            <div class="ldsp-spark-bars" style="max-width: 100%;">${bars}</div>
+                            <span class="ldsp-spark-val">${t.current}</span>
+                        </div>
+                    `;
+                });
+
+                html += `</div>`;
             }
 
             return html;
@@ -2628,7 +2675,7 @@
 
         renderAllTrend(history, reqs) {
             if (history.length < 2) {
-                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">📊</div><div class="ldsp-empty-text">数据不足<br>持续访问积累数据</div></div>`;
+                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">🌐</div><div class="ldsp-empty-text">全部历史数据<br>持续访问积累数据</div></div>`;
             }
 
             const oldest = history[0];
@@ -2727,6 +2774,7 @@
             return html;
         }
 
+        // 按日聚合数据
         aggregateByDay(history, name, maxDays) {
             const values = [];
             const dates = [];
@@ -2744,6 +2792,243 @@
             });
 
             return { values: values.slice(-maxDays), dates: dates.slice(-maxDays) };
+        }
+
+        // 按日聚合增量数据
+        aggregateDailyIncrements(history, reqs, maxDays) {
+            const dayMap = new Map();
+
+            // 先按日期组织数据
+            const historyByDay = new Map();
+            history.forEach(h => {
+                const day = new Date(h.ts).toDateString();
+                if (!historyByDay.has(day)) {
+                    historyByDay.set(day, []);
+                }
+                historyByDay.get(day).push(h);
+            });
+
+            // 按时间顺序处理
+            const sortedDays = Array.from(historyByDay.keys()).sort((a, b) => 
+                new Date(a).getTime() - new Date(b).getTime()
+            );
+
+            let prevData = null;
+            sortedDays.forEach(day => {
+                const dayRecords = historyByDay.get(day);
+                const latestRecord = dayRecords[dayRecords.length - 1];
+                
+                if (!dayMap.has(day)) {
+                    dayMap.set(day, {});
+                }
+
+                // 计算这一天的增量
+                const dayData = dayMap.get(day);
+                reqs.forEach(req => {
+                    const currentVal = latestRecord.data[req.name] || 0;
+                    const prevVal = prevData ? (prevData[req.name] || 0) : 0;
+                    dayData[req.name] = currentVal - prevVal;
+                });
+
+                prevData = { ...latestRecord.data };
+            });
+
+            return dayMap;
+        }
+
+        // 按周聚合增量数据
+        aggregateWeeklyIncrements(history, reqs) {
+            const weekMap = new Map();
+
+            // 按周组织数据
+            const historyByWeek = new Map();
+            history.forEach(h => {
+                const date = new Date(h.ts);
+                const weekStart = new Date(date);
+                weekStart.setDate(date.getDate() - date.getDay());
+                const weekKey = weekStart.toDateString();
+                
+                if (!historyByWeek.has(weekKey)) {
+                    historyByWeek.set(weekKey, []);
+                }
+                historyByWeek.get(weekKey).push(h);
+            });
+
+            // 按时间顺序处理
+            const sortedWeeks = Array.from(historyByWeek.keys()).sort((a, b) => 
+                new Date(a).getTime() - new Date(b).getTime()
+            );
+
+            let prevData = null;
+            sortedWeeks.forEach(week => {
+                const weekRecords = historyByWeek.get(week);
+                const latestRecord = weekRecords[weekRecords.length - 1];
+                
+                if (!weekMap.has(week)) {
+                    weekMap.set(week, {});
+                }
+
+                // 计算这一周的增量
+                const weekData = weekMap.get(week);
+                reqs.forEach(req => {
+                    const currentVal = latestRecord.data[req.name] || 0;
+                    const prevVal = prevData ? (prevData[req.name] || 0) : 0;
+                    weekData[req.name] = currentVal - prevVal;
+                });
+
+                prevData = { ...latestRecord.data };
+            });
+
+            return weekMap;
+        }
+
+        // 计算日度趋势（显示增量）
+        calculateDailyTrend(dailyAggregates, name, maxDays) {
+            const values = [];
+            const dates = [];
+
+            const sortedDays = Array.from(dailyAggregates.keys()).sort((a, b) => 
+                new Date(a).getTime() - new Date(b).getTime()
+            ).slice(-maxDays);
+
+            sortedDays.forEach(day => {
+                const d = new Date(day);
+                dates.push(Utils.formatDate(d.getTime(), 'short'));
+                const increment = dailyAggregates.get(day)[name] || 0;
+                values.push(Math.max(increment, 0)); // 确保非负值
+            });
+
+            return { values, dates };
+        }
+
+        // 计算周度趋势（显示增量）
+        calculateWeeklyTrend(weeklyAggregates, name) {
+            const values = [];
+            const dates = [];
+
+            const sortedWeeks = Array.from(weeklyAggregates.keys()).sort((a, b) => 
+                new Date(a).getTime() - new Date(b).getTime()
+            );
+
+            sortedWeeks.forEach((week, index) => {
+                dates.push(`W${index + 1}`);
+                const increment = weeklyAggregates.get(week)[name] || 0;
+                values.push(Math.max(increment, 0)); // 确保非负值
+            });
+
+            return { values, dates };
+        }
+
+        renderReadingWeekChart() {
+            // 使用阅读追踪器获取7天数据
+            const days = readingTracker.getReadingTimeHistory(7);
+            const maxTime = Math.max(...days.map(d => d.minutes), 60);
+
+            let barsHtml = days.map(d => {
+                const height = Math.max(d.minutes / maxTime * 50, 4);
+                const timeStr = Utils.formatReadingTime(d.minutes);
+                const opacity = d.isToday ? '1' : '0.7';
+                return `
+                    <div class="ldsp-reading-day">
+                        <div class="ldsp-reading-day-bar" style="height:${height}px; opacity:${opacity}" data-time="${timeStr}"></div>
+                        <span class="ldsp-reading-day-label">${d.dayName}</span>
+                    </div>
+                `;
+            }).join('');
+
+            const totalWeekTime = days.reduce((sum, d) => sum + d.minutes, 0);
+            const avgTime = Math.round(totalWeekTime / 7);
+
+            return `
+                <div class="ldsp-chart">
+                    <div class="ldsp-chart-title">
+                        ⏱️ 本周阅读时间 (柱状图)
+                        <span class="ldsp-chart-subtitle">共 ${Utils.formatReadingTime(totalWeekTime)} · 日均 ${Utils.formatReadingTime(avgTime)}</span>
+                    </div>
+                    <div class="ldsp-reading-week">
+                        ${barsHtml}
+                    </div>
+                </div>
+            `;
+        }
+
+        renderReadingMonthChart() {
+            // 获取30天数据
+            const days = readingTracker.getReadingTimeHistory(30);
+            const maxTime = Math.max(...days.map(d => d.minutes), 60);
+
+            // 生成折线图的SVG路径
+            const points = days.map((d, i) => {
+                const x = (i / (days.length - 1)) * 100;
+                const y = 100 - (d.minutes / maxTime * 100);
+                return `${x},${y}`;
+            }).join(' ');
+
+            const totalMonthTime = days.reduce((sum, d) => sum + d.minutes, 0);
+            const avgTime = Math.round(totalMonthTime / 30);
+
+            return `
+                <div class="ldsp-chart">
+                    <div class="ldsp-chart-title">
+                        ⏱️ 本月阅读时间 (折线图)
+                        <span class="ldsp-chart-subtitle">共 ${Utils.formatReadingTime(totalMonthTime)} · 日均 ${Utils.formatReadingTime(avgTime)}</span>
+                    </div>
+                    <svg class="ldsp-line-chart" viewBox="0 0 100 100" preserveAspectRatio="none">
+                        <polyline points="${points}" fill="none" stroke="var(--accent-secondary)" stroke-width="2"/>
+                        <circle cx="${(days.length - 1) / (days.length - 1) * 100}" cy="${100 - (days[days.length-1].minutes / maxTime * 100)}" r="1.5" fill="var(--accent-secondary)"/>
+                    </svg>
+                </div>
+            `;
+        }
+
+        renderReadingYearChart() {
+            // 获取52周数据（按周聚合）
+            const today = new Date();
+            const weeks = [];
+            
+            for (let i = 51; i >= 0; i--) {
+                const weekEnd = new Date(today);
+                weekEnd.setDate(today.getDate() - (today.getDay() || 7) - i * 7);
+                
+                // 计算这周的总阅读时间
+                let weekTotal = 0;
+                for (let d = 0; d < 7; d++) {
+                    const date = new Date(weekEnd);
+                    date.setDate(weekEnd.getDate() + d);
+                    const dateKey = date.toDateString();
+                    weekTotal += readingTracker.getReadingTimeForDate(dateKey);
+                }
+                
+                weeks.push({
+                    weekStart: weekEnd,
+                    minutes: weekTotal
+                });
+            }
+
+            const maxTime = Math.max(...weeks.map(w => w.minutes), 60);
+
+            // 生成折线图的SVG路径
+            const points = weeks.map((w, i) => {
+                const x = (i / (weeks.length - 1)) * 100;
+                const y = 100 - (w.minutes / maxTime * 100);
+                return `${x},${y}`;
+            }).join(' ');
+
+            const totalYearTime = weeks.reduce((sum, w) => sum + w.minutes, 0);
+            const avgTime = Math.round(totalYearTime / 52);
+
+            return `
+                <div class="ldsp-chart">
+                    <div class="ldsp-chart-title">
+                        ⏱️ 本年阅读时间 (折线图)
+                        <span class="ldsp-chart-subtitle">共 ${Utils.formatReadingTime(totalYearTime)} · 周均 ${Utils.formatReadingTime(avgTime)}</span>
+                    </div>
+                    <svg class="ldsp-line-chart" viewBox="0 0 100 100" preserveAspectRatio="none">
+                        <polyline points="${points}" fill="none" stroke="var(--accent-primary)" stroke-width="2"/>
+                        <circle cx="100" cy="${100 - (weeks[weeks.length-1].minutes / maxTime * 100)}" r="1.5" fill="var(--accent-primary)"/>
+                    </svg>
+                </div>
+            `;
         }
 
         checkUpdate() {
