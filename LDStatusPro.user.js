@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LDStatus Pro
 // @namespace    http://tampermonkey.net/
-// @version      3.2.0
-// @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计。Linux.do 站点支持排行榜和云同步功能
+// @version      3.2.1
+// @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计。两站点均支持排行榜和云同步功能
 // @author       JackLiii
 // @license      MIT
 // @match        https://linux.do/*
@@ -40,7 +40,7 @@
             name: 'IDCFlare',
             icon: 'https://idcflare.com/uploads/default/optimized/1X/8746f94a48ddc8140e8c7a52084742f38d3f5085_2_180x180.png',
             apiUrl: 'https://connect.idcflare.com',
-            supportsLeaderboard: false
+            supportsLeaderboard: true  // v3.2.1: 启用排行榜和云同步
         }
     };
 
@@ -1080,7 +1080,9 @@
             if (!authWindow) throw new Error('弹窗被拦截');
 
             return new Promise((resolve, reject) => {
-                this.network.api('/api/auth/init').then(result => {
+                // 传递当前站点信息用于多站点 OAuth
+                const siteParam = encodeURIComponent(CURRENT_SITE.domain);
+                this.network.api(`/api/auth/init?site=${siteParam}`).then(result => {
                     if (result.success && result.data?.auth_url) {
                         authWindow.location.href = result.data.auth_url;
                         this._listenCallback(authWindow, resolve, reject);
