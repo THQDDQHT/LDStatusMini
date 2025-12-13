@@ -1098,6 +1098,12 @@
         }
 
         _listenCallback(win, resolve, reject) {
+            // 允许的 postMessage 来源列表
+            const ALLOWED_ORIGINS = [
+                'https://ldstatus-pro-api.jackcai711.workers.dev',
+                CONFIG.LEADERBOARD_API
+            ];
+
             const check = setInterval(() => {
                 if (win.closed) {
                     clearInterval(check);
@@ -1108,6 +1114,12 @@
             }, 500);
 
             const handler = (e) => {
+                // 安全检查：验证消息来源
+                if (!ALLOWED_ORIGINS.some(origin => e.origin === origin || e.origin.endsWith('.workers.dev'))) {
+                    console.warn('[LDStatus Pro] Ignored message from untrusted origin:', e.origin);
+                    return;
+                }
+
                 if (e.data?.type === 'ldsp_oauth_callback') {
                     clearInterval(check);
                     window.removeEventListener('message', handler);
