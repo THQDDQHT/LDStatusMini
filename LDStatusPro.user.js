@@ -1957,7 +1957,7 @@
             }
 
             let html = this._renderMonthChart(tracker);
-            const weekly = historyMgr.aggregateWeekly(recent, reqs);
+            const weekly = historyMgr.aggregateWeekly(history, reqs);
             const fields = this.getTrendFields(reqs);
             const trends = [];
 
@@ -2016,8 +2016,8 @@
 
         // 渲染全部趋势
         renderAllTrend(history, reqs, tracker) {
-            if (history.length < 2) {
-                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">🌐</div><div class="ldsp-empty-txt">全部历史数据<br>持续访问积累数据</div></div>`;
+            if (history.length < 1) {
+                return `<div class="ldsp-empty"><div class="ldsp-empty-icon">🌐</div><div class="ldsp-empty-txt">数据不足<br>至少需要 2 天数据</div></div>`;
             }
 
             const oldest = history[0], newest = history.at(-1);
