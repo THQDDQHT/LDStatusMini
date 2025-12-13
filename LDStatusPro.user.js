@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LDStatus Pro
 // @namespace    http://tampermonkey.net/
-// @version      3.2.3
+// @version      3.2.4
 // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计。两站点均支持排行榜和云同步功能
 // @author       JackLiii
 // @license      MIT
@@ -613,6 +613,7 @@
                     url: `${CONFIG.LEADERBOARD_API}${endpoint}`,
                     headers: {
                         'Content-Type': 'application/json',
+                        'X-Client-Version': GM_info.script.version || 'unknown',
                         ...(options.token ? { 'Authorization': `Bearer ${options.token}` } : {})
                     },
                     data: options.body ? JSON.stringify(options.body) : undefined,
@@ -3085,7 +3086,7 @@
                 this.$.btnToggle.textContent = '▶';
             }
 
-            const theme = this.storage.getGlobal('theme', 'dark');
+            const theme = this.storage.getGlobal('theme', 'light');
             if (theme === 'light') this.el.classList.add('light');
             this.$.btnTheme.textContent = theme === 'dark' ? '🌓' : '☀️';
 
