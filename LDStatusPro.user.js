@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LDStatus Pro
 // @namespace    http://tampermonkey.net/
-// @version      3.2.2
+// @version      3.2.3
 // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计。两站点均支持排行榜和云同步功能
 // @author       JackLiii
 // @license      MIT
@@ -1485,9 +1485,33 @@
                     return null;
                 }
 
+                // 优化：只上传最近 90 天的数据，减少请求大小
+                const cutoffDate = new Date();
+                cutoffDate.setDate(cutoffDate.getDate() - 90);
+                const cutoff = cutoffDate.toDateString();
+                
+                const recentData = {};
+                let count = 0;
+                for (const [key, value] of Object.entries(local.dailyData)) {
+                    // 只保留最近90天的数据
+                    try {
+                        const date = new Date(key);
+                        if (date >= cutoffDate && count < 100) { // 最多100条
+                            recentData[key] = value;
+                            count++;
+                        }
+                    } catch (e) {}
+                }
+                
+                if (Object.keys(recentData).length === 0) {
+                    this._setSyncing(false);
+                    return null;
+                }
+
+                console.log(`[CloudSync] Uploading ${Object.keys(recentData).length} days of data`);
                 const result = await this.oauth.api('/api/reading/sync-full', {
                     method: 'POST',
-                    body: { dailyData: local.dailyData, lastSyncTime: Date.now() }
+                    body: { dailyData: recentData, lastSyncTime: Date.now() }
                 });
 
                 if (result.success) {
