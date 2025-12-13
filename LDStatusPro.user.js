@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LDStatus Pro
 // @namespace    http://tampermonkey.net/
-// @version      3.0.1
+// @version      3.0.3
 // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计。Linux.do 站点支持排行榜和云同步功能
 // @author       JackLiii
 // @license      MIT
@@ -82,8 +82,9 @@
             SCREEN_TTL: 100,
             YEAR_DATA_TTL: 5000,
             HISTORY_TTL: 1000,
-            LEADERBOARD_DAILY_TTL: 300000,    // 日榜缓存5分钟
-            LEADERBOARD_PERIOD_TTL: 86400000  // 周/月榜缓存1天
+            LEADERBOARD_DAILY_TTL: 300000,     // 日榜缓存 5 分钟
+            LEADERBOARD_WEEKLY_TTL: 3600000,   // 周榜缓存 60 分钟
+            LEADERBOARD_MONTHLY_TTL: 10800000  // 月榜缓存 3 小时
         },
         // 网络配置
         NETWORK: {
@@ -1099,13 +1100,23 @@
             this.cache = new Map();
             this._syncTimer = null;
             this._lastSync = 0;
+            this._manualRefreshTime = new Map(); // 记录每种榜的手动刷新时间
         }
+
+        // 手动刷新冷却时间 5 分钟
+        static MANUAL_REFRESH_COOLDOWN = 5 * 60 * 1000;
 
         async getLeaderboard(type = 'daily') {
             const key = `lb_${type}`;
             const cached = this.cache.get(key);
             const now = Date.now();
-            const ttl = type === 'daily' ? CONFIG.CACHE.LEADERBOARD_DAILY_TTL : CONFIG.CACHE.LEADERBOARD_PERIOD_TTL;
+            // 根据类型使用不同的缓存时间
+            const ttlMap = {
+                daily: CONFIG.CACHE.LEADERBOARD_DAILY_TTL,
+                weekly: CONFIG.CACHE.LEADERBOARD_WEEKLY_TTL,
+                monthly: CONFIG.CACHE.LEADERBOARD_MONTHLY_TTL
+            };
+            const ttl = ttlMap[type] || CONFIG.CACHE.LEADERBOARD_DAILY_TTL;
 
             if (cached && (now - cached.time) < ttl) return cached.data;
 
@@ -1125,6 +1136,48 @@
                 if (cached) return cached.data;
                 throw e;
             }
+        }
+
+        // 手动刷新排行榜（有5分钟冷却时间）
+        async forceRefresh(type = 'daily') {
+            const key = `lb_${type}`;
+            const now = Date.now();
+            const lastRefresh = this._manualRefreshTime.get(type) || 0;
+
+            // 检查冷却时间
+            if (now - lastRefresh < LeaderboardManager.MANUAL_REFRESH_COOLDOWN) {
+                // 冷却中，返回缓存
+                const cached = this.cache.get(key);
+                if (cached) return { data: cached.data, fromCache: true };
+                throw new Error('刷新冷却中');
+            }
+
+            try {
+                const result = await this.oauth.api(`/api/leaderboard/${type}`);
+                if (result.success) {
+                    const data = {
+                        rankings: result.data.rankings || [],
+                        period: result.data.period,
+                        myRank: result.data.myRank
+                    };
+                    this.cache.set(key, { data, time: now });
+                    this._manualRefreshTime.set(type, now);
+                    return { data, fromCache: false };
+                }
+                throw new Error(result.error || '获取排行榜失败');
+            } catch (e) {
+                const cached = this.cache.get(key);
+                if (cached) return { data: cached.data, fromCache: true };
+                throw e;
+            }
+        }
+
+        // 获取手动刷新剩余冷却时间（秒）
+        getRefreshCooldown(type = 'daily') {
+            const lastRefresh = this._manualRefreshTime.get(type) || 0;
+            const elapsed = Date.now() - lastRefresh;
+            const remaining = LeaderboardManager.MANUAL_REFRESH_COOLDOWN - elapsed;
+            return remaining > 0 ? Math.ceil(remaining / 1000) : 0;
         }
 
         async join() {
@@ -1449,6 +1502,18 @@
 .ldsp-hdr-btns button{width:26px;height:26px;border:none;background:rgba(255,255,255,.15);color:#fff;border-radius:var(--r-sm);cursor:pointer;font-size:12px;display:flex;align-items:center;justify-content:center}
 .ldsp-hdr-btns button:hover{background:rgba(255,255,255,.25);transform:translateY(-1px)}
 .ldsp-hdr-btns button:disabled{opacity:.6;cursor:not-allowed;transform:none}
+.ldsp-hdr-btns button.has-update{background:var(--ok);animation:pulse-update 2s ease-in-out infinite}
+@keyframes pulse-update{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}
+.ldsp-update-bubble{position:absolute;top:50px;left:50%;transform:translateX(-50%) scale(0.9);background:var(--bg-card);border:2px solid var(--accent);border-radius:var(--r-lg);padding:16px;text-align:center;z-index:100;box-shadow:0 8px 32px rgba(0,0,0,.3);opacity:0;transition:all .3s ease}
+.ldsp-update-bubble.show{opacity:1;transform:translateX(-50%) scale(1)}
+.ldsp-update-bubble-close{position:absolute;top:8px;right:10px;font-size:16px;cursor:pointer;color:var(--txt-mut);transition:color .2s}
+.ldsp-update-bubble-close:hover{color:var(--txt)}
+.ldsp-update-bubble-icon{font-size:32px;margin-bottom:8px}
+.ldsp-update-bubble-title{font-size:14px;font-weight:700;margin-bottom:6px;color:var(--txt)}
+.ldsp-update-bubble-ver{font-size:12px;margin-bottom:12px}
+.ldsp-update-bubble-btn{background:var(--grad);color:#fff;border:none;padding:8px 20px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;transition:all .2s}
+.ldsp-update-bubble-btn:hover{transform:scale(1.05);box-shadow:0 4px 12px rgba(124,58,237,.4)}
+.ldsp-update-bubble-btn:disabled{opacity:.7;cursor:not-allowed;transform:none}
 .ldsp-body{background:var(--bg)}
 .ldsp-user{display:flex;align-items:center;gap:10px;padding:var(--pd);background:var(--bg-card);border-bottom:1px solid var(--border)}
 .ldsp-avatar{width:var(--av);height:var(--av);border-radius:50%;border:2px solid var(--accent);flex-shrink:0;background:var(--bg-el)}
@@ -1650,8 +1715,12 @@
 .ldsp-rank-item.t1 .ldsp-rank-avatar{border-color:#ffd700}
 .ldsp-rank-item.t2 .ldsp-rank-avatar{border-color:#c0c0c0}
 .ldsp-rank-item.t3 .ldsp-rank-avatar{border-color:#cd7f32}
-.ldsp-rank-info{flex:1;min-width:0}
+.ldsp-rank-info{flex:1;min-width:0;display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 4px}
 .ldsp-rank-name{font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ldsp-rank-display-name{font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:80px}
+.ldsp-rank-username{font-size:9px;color:var(--txt-mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ldsp-rank-name-only{font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ldsp-rank-me-tag{font-size:9px;color:var(--accent);margin-left:2px}
 .ldsp-rank-time{font-size:12px;font-weight:700;color:var(--accent);white-space:nowrap}
 .ldsp-rank-item.t1 .ldsp-rank-time{color:#ffd700}
 .ldsp-rank-item.t2 .ldsp-rank-time{color:#c0c0c0}
@@ -1666,6 +1735,12 @@
 .ldsp-lb-period{font-size:9px;color:var(--txt-mut);text-align:center;padding:6px;background:var(--bg-card);border-radius:var(--r-sm);margin-bottom:8px;display:flex;justify-content:center;align-items:center;gap:8px;flex-wrap:wrap}
 .ldsp-lb-period span{color:var(--accent);font-weight:600}
 .ldsp-lb-period .ldsp-update-rule{font-size:8px;opacity:.8}
+.ldsp-lb-refresh{background:none;border:none;cursor:pointer;font-size:10px;padding:2px 5px;border-radius:4px;transition:all .2s;opacity:.7}
+.ldsp-lb-refresh:hover{opacity:1;background:var(--bg-el)}
+.ldsp-lb-refresh:active{transform:scale(.95)}
+.ldsp-lb-refresh.spinning{animation:ldsp-spin 1s linear infinite}
+.ldsp-lb-refresh:disabled{opacity:.4;cursor:not-allowed}
+@keyframes ldsp-spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 .ldsp-my-rank{display:flex;align-items:center;justify-content:space-between;padding:10px;background:var(--grad);border-radius:var(--r-md);margin-bottom:8px;color:#fff}
 .ldsp-my-rank-lbl{font-size:10px;opacity:.9}
 .ldsp-my-rank-val{font-size:16px;font-weight:800}
@@ -1876,9 +1951,8 @@
 
         // 渲染月趋势
         renderMonthTrend(history, reqs, historyMgr, tracker) {
-            const monthAgo = Date.now() - 30 * 86400000;
-            const recent = history.filter(h => h.ts > monthAgo);
-            if (recent.length < 2) {
+            // 只要有数据就尝试显示
+            if (history.length < 1) {
                 return `<div class="ldsp-empty"><div class="ldsp-empty-icon">📊</div><div class="ldsp-empty-txt">本月数据不足<br>请继续访问积累数据</div></div>`;
             }
 
@@ -1910,7 +1984,8 @@
         renderYearTrend(history, reqs, historyMgr, tracker) {
             const yearAgo = Date.now() - 365 * 86400000;
             const recent = history.filter(h => h.ts > yearAgo);
-            if (recent.length < 2) {
+            // 只要有数据就尝试显示
+            if (recent.length < 1) {
                 return `<div class="ldsp-empty"><div class="ldsp-empty-icon">📈</div><div class="ldsp-empty-txt">本年数据不足<br>请持续使用积累数据</div></div>`;
             }
 
@@ -2201,7 +2276,7 @@
                 return `<div class="ldsp-lb-empty"><div class="ldsp-lb-empty-icon">📭</div><div class="ldsp-lb-empty-txt">暂无排行数据<br>成为第一个上榜的人吧！</div></div>`;
             }
 
-            let html = `<div class="ldsp-lb-period">${data.period ? `📅 统计周期: <span>${data.period}</span>` : ''}<span class="ldsp-update-rule">🔄 ${rules[type]}</span></div>`;
+            let html = `<div class="ldsp-lb-period"><button class="ldsp-lb-refresh" data-type="${type}" title="手动刷新">🔄</button>${data.period ? `📅 统计周期: <span>${data.period}</span>` : ''}<span class="ldsp-update-rule">🔄 ${rules[type]}</span></div>`;
 
             if (data.myRank && isJoined) {
                 html += `<div class="ldsp-my-rank"><div><div class="ldsp-my-rank-lbl">我的排名</div><div class="ldsp-my-rank-val">#${data.myRank.rank}</div></div><div class="ldsp-my-rank-time">${Utils.formatReadingTime(data.myRank.minutes)}</div></div>`;
@@ -2210,15 +2285,19 @@
             html += '<div class="ldsp-rank-list">';
             data.rankings.forEach((user, i) => {
                 const rank = i + 1;
-                const isMe = userId && user.userId === userId;
+                const isMe = userId && user.user_id === userId;
                 const cls = [rank <= 3 ? `t${rank}` : '', isMe ? 'me' : ''].filter(Boolean).join(' ');
                 const icon = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : rank;
-                const avatar = user.avatar ? (user.avatar.startsWith('http') ? user.avatar : `https://linux.do${user.avatar}`) : '';
+                const avatar = user.avatar_url ? (user.avatar_url.startsWith('http') ? user.avatar_url : `https://linux.do${user.avatar_url}`) : '';
+                const hasName = user.name && user.name.trim();
+                const nameHtml = hasName 
+                    ? `<span class="ldsp-rank-display-name">${user.name}</span><span class="ldsp-rank-username">@${user.username}</span>`
+                    : `<span class="ldsp-rank-name-only">${user.username}</span>`;
 
                 html += `<div class="ldsp-rank-item ${cls}" style="animation-delay:${i * 30}ms">
                     <div class="ldsp-rank-num">${rank <= 3 ? icon : rank}</div>
                     ${avatar ? `<img class="ldsp-rank-avatar" src="${avatar}" alt="${user.username}" onerror="this.style.display='none'">` : '<div class="ldsp-rank-avatar" style="display:flex;align-items:center;justify-content:center;font-size:12px">👤</div>'}
-                    <div class="ldsp-rank-info"><div class="ldsp-rank-name">${user.username}${isMe ? ' (我)' : ''}</div></div>
+                    <div class="ldsp-rank-info">${nameHtml}${isMe ? '<span class="ldsp-rank-me-tag">(我)</span>' : ''}</div>
                     <div class="ldsp-rank-time">${Utils.formatReadingTime(user.minutes)}</div>
                 </div>`;
             });
@@ -2322,6 +2401,9 @@
             // 事件监听
             window.addEventListener('resize', Utils.debounce(() => this._onResize(), 250));
             setInterval(() => this.fetch(), CONFIG.INTERVALS.REFRESH);
+            
+            // 自动检查版本更新（首次进入时显示气泡）
+            setTimeout(() => this._checkUpdate(true), 2000);
         }
 
         _createPanel() {
@@ -2344,6 +2426,13 @@
                         <button class="ldsp-theme" title="切换主题">🌓</button>
                         <button class="ldsp-toggle" title="折叠">◀</button>
                     </div>
+                </div>
+                <div class="ldsp-update-bubble" style="display:none">
+                    <div class="ldsp-update-bubble-close">×</div>
+                    <div class="ldsp-update-bubble-icon">🎉</div>
+                    <div class="ldsp-update-bubble-title">发现新版本</div>
+                    <div class="ldsp-update-bubble-ver"></div>
+                    <button class="ldsp-update-bubble-btn">🚀 立即更新</button>
                 </div>
                 <div class="ldsp-body">
                     <div class="ldsp-user">
@@ -2396,7 +2485,11 @@
                 btnRefresh: this.el.querySelector('.ldsp-refresh'),
                 btnTheme: this.el.querySelector('.ldsp-theme'),
                 btnUpdate: this.el.querySelector('.ldsp-update'),
-                btnCloudSync: this.el.querySelector('.ldsp-cloud-sync')
+                btnCloudSync: this.el.querySelector('.ldsp-cloud-sync'),
+                updateBubble: this.el.querySelector('.ldsp-update-bubble'),
+                updateBubbleVer: this.el.querySelector('.ldsp-update-bubble-ver'),
+                updateBubbleBtn: this.el.querySelector('.ldsp-update-bubble-btn'),
+                updateBubbleClose: this.el.querySelector('.ldsp-update-bubble-close')
             };
         }
 
@@ -2607,28 +2700,73 @@
             this.$.reqs.innerHTML = `<div class="ldsp-empty"><div class="ldsp-empty-icon">❌</div><div class="ldsp-empty-txt">${msg}</div></div>`;
         }
 
+        _showLowTrustLevelWarning(username, level) {
+            const $ = this.panel.$;
+            // 显示用户信息（如果有）
+            if (username && username !== '未知') {
+                $.userName.textContent = username;
+                $.userLevel.textContent = `Lv ${level}`;
+                $.userStatus.textContent = '信任等级 < 2';
+                $.status.className = 'ldsp-status';
+                $.status.innerHTML = '<span>ℹ️</span><span>暂无升级要求</span>';
+            }
+            // 显示友好的提示
+            this.$.reqs.innerHTML = `
+                <div class="ldsp-empty">
+                    <div class="ldsp-empty-icon">ℹ️</div>
+                    <div class="ldsp-empty-txt">
+                        <div style="margin-bottom:8px;">信任等级小于2，暂无法获取升级要求</div>
+                        <div style="font-size:12px;color:#6b7280;">阅读时间追踪功能正常运行中</div>
+                    </div>
+                </div>`;
+        }
+
         _parse(html) {
             const doc = new DOMParser().parseFromString(html, 'text/html');
+            
+            // 尝试获取用户名（即使没有升级要求数据也可能有用户信息）
+            const userSection = doc.querySelector('.bg-white.p-6.rounded-lg');
+            const avatarEl = doc.querySelector('img[src*="avatar"]');
+            
+            // 尝试从页面提取用户名
+            let username = null;
+            let level = '?';
+            
+            // 先尝试从头像 alt 或其他元素获取用户名
+            if (avatarEl?.alt) {
+                username = avatarEl.alt;
+            }
+            
+            // 查找包含信任级别的区块
             const section = [...doc.querySelectorAll('.bg-white.p-6.rounded-lg')].find(d => d.querySelector('h2')?.textContent.includes('信任级别'));
-
-            if (!section) return this._showError('未找到数据，请登录');
-
-            const heading = section.querySelector('h2').textContent;
-            const match = heading.match(PATTERNS.TRUST_LEVEL) || ['', '未知', '?'];
-            const [, username, level] = match;
-
+            
+            if (section) {
+                const heading = section.querySelector('h2').textContent;
+                const match = heading.match(PATTERNS.TRUST_LEVEL) || ['', '未知', '?'];
+                [, username, level] = match;
+            }
+            
+            // 无论是否有升级要求，只要能识别用户就初始化阅读追踪
             if (username && username !== '未知') {
                 this.storage.setUser(username);
                 this.username = username;
                 this.tracker.init(username);
                 this._startReadingUpdate();
+            } else {
+                // 即使没有用户名，也尝试使用匿名模式初始化阅读追踪
+                this.tracker.init('anonymous');
+                this._startReadingUpdate();
             }
 
-            const avatarEl = doc.querySelector('img[src*="avatar"]');
             if (avatarEl) this._updateAvatar(avatarEl.src);
 
             this.readingTime = this.tracker.getTodayTime();
             this.renderer.renderReading(this.readingTime);
+            
+            // 如果没有升级要求数据（信任等级 < 2），显示提示但不阻止其他功能
+            if (!section) {
+                return this._showLowTrustLevelWarning(username, level);
+            }
 
             const rows = section.querySelectorAll('table tr');
             const reqs = [];
@@ -2734,7 +2872,7 @@
             container.innerHTML = fns[this.trendTab]?.() || '';
         }
 
-        async _checkUpdate() {
+        async _checkUpdate(autoCheck = false) {
             const url = 'https://raw.githubusercontent.com/caigg188/LDStatusPro/main/LDStatusPro.user.js';
             this.$.btnUpdate.textContent = '⏳';
 
@@ -2743,19 +2881,94 @@
                 const match = text.match(PATTERNS.VERSION);
                 if (match) {
                     const remote = match[1];
-                    if (Utils.compareVersion(remote, GM_info.script.version) > 0) {
+                    const current = GM_info.script.version;
+                    if (Utils.compareVersion(remote, current) > 0) {
                         this.$.btnUpdate.textContent = '🆕';
                         this.$.btnUpdate.title = `新版本 v${remote}`;
-                        this.$.btnUpdate.onclick = () => window.open(url);
+                        this.$.btnUpdate.classList.add('has-update');
+                        this._remoteVersion = remote;
+                        this._updateUrl = url;
+                        
+                        // 检查是否已经提示过这个版本
+                        const dismissedVer = this.storage.getGlobal('dismissedUpdateVer', '');
+                        const shouldShowBubble = autoCheck 
+                            ? (dismissedVer !== remote)  // 自动检查：只有未忽略的版本才显示
+                            : true;  // 手动检查：总是显示
+                        
+                        if (shouldShowBubble) {
+                            this._showUpdateBubble(current, remote);
+                        }
+                        
+                        this.$.btnUpdate.onclick = () => this._showUpdateBubble(current, remote);
                     } else {
                         this.$.btnUpdate.textContent = '✅';
-                        setTimeout(() => this.$.btnUpdate.textContent = '🔍', 2000);
+                        this.$.btnUpdate.title = '已是最新版本';
+                        this.$.btnUpdate.classList.remove('has-update');
+                        if (!autoCheck) {
+                            this.renderer.showToast('✅ 已是最新版本');
+                        }
+                        setTimeout(() => {
+                            this.$.btnUpdate.textContent = '🔍';
+                            this.$.btnUpdate.title = '检查更新';
+                        }, 2000);
                     }
                 }
             } catch (e) {
                 this.$.btnUpdate.textContent = '❌';
-                setTimeout(() => this.$.btnUpdate.textContent = '🔍', 2000);
+                this.$.btnUpdate.title = '检查失败';
+                if (!autoCheck) {
+                    this.renderer.showToast('❌ 检查更新失败');
+                }
+                setTimeout(() => {
+                    this.$.btnUpdate.textContent = '🔍';
+                    this.$.btnUpdate.title = '检查更新';
+                }, 2000);
             }
+        }
+
+        _showUpdateBubble(current, remote) {
+            this.$.updateBubbleVer.innerHTML = `<span style="color:var(--txt-mut)">v${current}</span> → <span style="color:var(--accent);font-weight:700">v${remote}</span>`;
+            this.$.updateBubble.style.display = 'block';
+            // 延迟一帧添加动画类，确保过渡效果生效
+            requestAnimationFrame(() => {
+                this.$.updateBubble.classList.add('show');
+            });
+            
+            // 绑定关闭按钮
+            this.$.updateBubbleClose.onclick = () => this._hideUpdateBubble(true);
+            
+            // 绑定更新按钮
+            this.$.updateBubbleBtn.onclick = () => this._doUpdate();
+        }
+
+        _hideUpdateBubble(dismiss = false) {
+            // 如果用户主动关闭，记录已忽略的版本
+            if (dismiss && this._remoteVersion) {
+                this.storage.setGlobalNow('dismissedUpdateVer', this._remoteVersion);
+            }
+            
+            this.$.updateBubble.classList.remove('show');
+            setTimeout(() => {
+                this.$.updateBubble.style.display = 'none';
+            }, 300);
+        }
+
+        _doUpdate() {
+            this.$.updateBubbleBtn.disabled = true;
+            this.$.updateBubbleBtn.textContent = '⏳ 更新中...';
+            
+            // 打开更新链接，Tampermonkey 会自动弹出更新确认
+            window.open(this._updateUrl || 'https://raw.githubusercontent.com/caigg188/LDStatusPro/main/LDStatusPro.user.js');
+            
+            // 提示用户
+            setTimeout(() => {
+                this.$.updateBubbleBtn.textContent = '✅ 请在弹出窗口确认更新';
+                setTimeout(() => {
+                    this._hideUpdateBubble();
+                    this.$.updateBubbleBtn.disabled = false;
+                    this.$.updateBubbleBtn.textContent = '🚀 立即更新';
+                }, 3000);
+            }, 1000);
         }
 
         // ========== 登录相关 ==========
@@ -2961,12 +3174,56 @@
                 const data = await this.leaderboard.getLeaderboard(this.lbTab);
                 const user = this.oauth.getUserInfo();
                 container.innerHTML = this.renderer.renderLeaderboardData(data, user?.id, joined, this.lbTab);
+                this._bindLeaderboardEvents(container, joined);
+            } catch (e) {
+                container.innerHTML = this.renderer.renderLeaderboardError(e.message || '加载失败');
+                container.querySelector('#ldsp-lb-retry')?.addEventListener('click', () => {
+                    this.leaderboard.clearCache();
+                    this._renderLeaderboardContent();
+                });
+            }
+        }
 
-                // 退出排行榜按钮
-                container.querySelector('#ldsp-lb-quit')?.addEventListener('click', async function() {
+        // 绑定排行榜内容区的事件（统一绑定，避免代码重复）
+        _bindLeaderboardEvents(container, joined) {
+            // 手动刷新按钮
+            const refreshBtn = container.querySelector('.ldsp-lb-refresh');
+            if (refreshBtn) {
+                refreshBtn.onclick = async (e) => {
+                    const btn = e.target;
+                    const type = btn.dataset.type;
+                    if (btn.disabled) return;
+                    
+                    const cooldown = this.leaderboard.getRefreshCooldown(type);
+                    if (cooldown > 0) {
+                        this.renderer.showToast(`⏳ 请等待 ${cooldown} 秒后再刷新`);
+                        return;
+                    }
+                    
+                    btn.disabled = true;
+                    btn.classList.add('spinning');
+                    
+                    try {
+                        const result = await this.leaderboard.forceRefresh(type);
+                        this.renderer.showToast(result.fromCache ? '📦 获取缓存数据' : '✅ 已刷新排行榜');
+                        const userData = this.oauth.getUserInfo();
+                        container.innerHTML = this.renderer.renderLeaderboardData(result.data, userData?.id, joined, type);
+                        this._bindLeaderboardEvents(container, joined);
+                    } catch (err) {
+                        this.renderer.showToast(`❌ ${err.message}`);
+                        btn.disabled = false;
+                        btn.classList.remove('spinning');
+                    }
+                };
+            }
+
+            // 退出排行榜按钮
+            const quitBtn = container.querySelector('#ldsp-lb-quit');
+            if (quitBtn) {
+                quitBtn.onclick = async () => {
                     if (!confirm('确定要退出排行榜吗？')) return;
-                    this.disabled = true;
-                    this.textContent = '退出中...';
+                    quitBtn.disabled = true;
+                    quitBtn.textContent = '退出中...';
                     try {
                         await this.leaderboard.quit();
                         this.leaderboard.stopSync();
@@ -2974,16 +3231,10 @@
                         await this._renderLeaderboardContent();
                     } catch (e) {
                         this.renderer.showToast(`❌ ${e.message}`);
-                        this.disabled = false;
-                        this.textContent = '退出排行榜';
+                        quitBtn.disabled = false;
+                        quitBtn.textContent = '退出排行榜';
                     }
-                }.bind(this));
-            } catch (e) {
-                container.innerHTML = this.renderer.renderLeaderboardError(e.message || '加载失败');
-                container.querySelector('#ldsp-lb-retry')?.addEventListener('click', () => {
-                    this.leaderboard.clearCache();
-                    this._renderLeaderboardContent();
-                });
+                };
             }
         }
 
