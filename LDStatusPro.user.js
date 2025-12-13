@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LDStatus Pro
 // @namespace    http://tampermonkey.net/
-// @version      3.1.2
+// @version      3.2.0
 // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计。Linux.do 站点支持排行榜和云同步功能
 // @author       JackLiii
 // @license      MIT
@@ -164,6 +164,19 @@
     // ==================== 工具函数 ====================
     const Utils = {
         _nameCache: new Map(),
+
+        // HTML 转义（防止 XSS）
+        escapeHtml(str) {
+            if (!str || typeof str !== 'string') return '';
+            const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#x27;' };
+            return str.replace(/[&<>"']/g, c => entities[c]);
+        },
+
+        // 清理用户输入
+        sanitize(str, maxLen = 100) {
+            if (!str || typeof str !== 'string') return '';
+            return str.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '').substring(0, maxLen).trim();
+        },
 
         // 版本比较
         compareVersion(v1, v2) {
@@ -519,6 +532,8 @@
     class Network {
         constructor() {
             this._pending = new Map();
+            this._apiCache = new Map();
+            this._apiCacheTime = new Map();
         }
 
         async fetch(url, options = {}) {
@@ -531,6 +546,17 @@
                 return await promise;
             } finally {
                 this._pending.delete(url);
+            }
+        }
+
+        // 清除 API 缓存
+        clearApiCache(endpoint) {
+            if (endpoint) {
+                this._apiCache.delete(endpoint);
+                this._apiCacheTime.delete(endpoint);
+            } else {
+                this._apiCache.clear();
+                this._apiCacheTime.clear();
             }
         }
 
@@ -562,11 +588,26 @@
             });
         }
 
-        // API 请求（带认证）
+        // API 请求（带认证和缓存）
         async api(endpoint, options = {}) {
+            const method = options.method || 'GET';
+            const cacheTtl = options.cacheTtl || 0;
+            
+            // GET 请求支持缓存
+            if (method === 'GET' && cacheTtl > 0) {
+                const now = Date.now();
+                const cacheKey = `${endpoint}_${options.token || ''}`;
+                if (this._apiCache.has(cacheKey)) {
+                    const cacheTime = this._apiCacheTime.get(cacheKey);
+                    if (now - cacheTime < cacheTtl) {
+                        return this._apiCache.get(cacheKey);
+                    }
+                }
+            }
+
             return new Promise((resolve, reject) => {
                 GM_xmlhttpRequest({
-                    method: options.method || 'GET',
+                    method,
                     url: `${CONFIG.LEADERBOARD_API}${endpoint}`,
                     headers: {
                         'Content-Type': 'application/json',
@@ -577,9 +618,17 @@
                     onload: res => {
                         try {
                             const data = JSON.parse(res.responseText);
-                            res.status >= 200 && res.status < 300 
-                                ? resolve(data) 
-                                : reject(new Error(data.error || `HTTP ${res.status}`));
+                            if (res.status >= 200 && res.status < 300) {
+                                // 缓存成功响应
+                                if (method === 'GET' && cacheTtl > 0) {
+                                    const cacheKey = `${endpoint}_${options.token || ''}`;
+                                    this._apiCache.set(cacheKey, data);
+                                    this._apiCacheTime.set(cacheKey, Date.now());
+                                }
+                                resolve(data);
+                            } else {
+                                reject(new Error(data.error?.message || data.error || `HTTP ${res.status}`));
+                            }
                         } catch (e) {
                             reject(new Error('Parse error'));
                         }
@@ -1933,13 +1982,16 @@
         renderUser(name, level, isOK, reqs, displayName = null) {
             const done = reqs.filter(r => r.isSuccess).length;
             const $ = this.panel.$;
+            // XSS 防护：使用 textContent 而不是 innerHTML，并清理输入
+            const safeName = Utils.sanitize(name, 30);
+            const safeDisplayName = Utils.sanitize(displayName, 100);
             // 如果有 displayName 则显示 displayName + @username，否则只显示 username
-            if (displayName && displayName !== name) {
-                $.userDisplayName.textContent = displayName;
-                $.userHandle.textContent = `@${name}`;
+            if (safeDisplayName && safeDisplayName !== safeName) {
+                $.userDisplayName.textContent = safeDisplayName;
+                $.userHandle.textContent = `@${safeName}`;
                 $.userHandle.style.display = '';
             } else {
-                $.userDisplayName.textContent = name;
+                $.userDisplayName.textContent = safeName;
                 $.userHandle.textContent = '';
                 $.userHandle.style.display = 'none';
             }
@@ -2506,14 +2558,17 @@
                 const cls = [rank <= 3 ? `t${rank}` : '', isMe ? 'me' : ''].filter(Boolean).join(' ');
                 const icon = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : rank;
                 const avatar = user.avatar_url ? (user.avatar_url.startsWith('http') ? user.avatar_url : `https://linux.do${user.avatar_url}`) : '';
-                const hasName = user.name && user.name.trim();
+                // XSS 防护：转义用户名和显示名称
+                const safeUsername = Utils.escapeHtml(Utils.sanitize(user.username, 30));
+                const safeName = Utils.escapeHtml(Utils.sanitize(user.name, 100));
+                const hasName = safeName && safeName.trim();
                 const nameHtml = hasName 
-                    ? `<span class="ldsp-rank-display-name">${user.name}</span><span class="ldsp-rank-username">@${user.username}</span>`
-                    : `<span class="ldsp-rank-name-only">${user.username}</span>`;
+                    ? `<span class="ldsp-rank-display-name">${safeName}</span><span class="ldsp-rank-username">@${safeUsername}</span>`
+                    : `<span class="ldsp-rank-name-only">${safeUsername}</span>`;
 
                 html += `<div class="ldsp-rank-item ${cls}" style="animation-delay:${i * 30}ms">
                     <div class="ldsp-rank-num">${rank <= 3 ? icon : rank}</div>
-                    ${avatar ? `<img class="ldsp-rank-avatar" src="${avatar}" alt="${user.username}" onerror="this.style.display='none'">` : '<div class="ldsp-rank-avatar" style="display:flex;align-items:center;justify-content:center;font-size:12px">👤</div>'}
+                    ${avatar ? `<img class="ldsp-rank-avatar" src="${avatar}" alt="${safeUsername}" onerror="this.style.display='none'">` : '<div class="ldsp-rank-avatar" style="display:flex;align-items:center;justify-content:center;font-size:12px">👤</div>'}
                     <div class="ldsp-rank-info">${nameHtml}${isMe ? '<span class="ldsp-rank-me-tag">(我)</span>' : ''}</div>
                     <div class="ldsp-rank-time">${Utils.formatReadingTime(user.minutes)}</div>
                 </div>`;
