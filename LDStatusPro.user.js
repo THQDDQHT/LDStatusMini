@@ -1519,13 +1519,14 @@
 .ldsp-avatar{width:var(--av);height:var(--av);border-radius:50%;border:2px solid var(--accent);flex-shrink:0;background:var(--bg-el)}
 .ldsp-avatar:hover{transform:scale(1.05);border-color:var(--accent2)}
 .ldsp-avatar-ph{width:var(--av);height:var(--av);border-radius:50%;background:var(--grad);display:flex;align-items:center;justify-content:center;font-size:18px;color:#fff;flex-shrink:0}
-.ldsp-user-info{flex:1;min-width:0}
-.ldsp-user-name{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ldsp-user-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.ldsp-user-display-name{font-weight:700;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2}
+.ldsp-user-handle{font-size:11px;color:var(--txt-mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ldsp-user.not-logged .ldsp-avatar,.ldsp-user.not-logged .ldsp-avatar-ph{border:2px dashed var(--warn);cursor:pointer}
-.ldsp-user.not-logged .ldsp-user-name{color:var(--warn);cursor:pointer}
+.ldsp-user.not-logged .ldsp-user-display-name{color:var(--warn);cursor:pointer}
 .ldsp-login-hint{font-size:8px;color:var(--warn);margin-left:4px;animation:blink 1.5s ease-in-out infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.5}}
-.ldsp-user-meta{display:flex;align-items:center;gap:6px;margin-top:3px}
+.ldsp-user-meta{display:flex;align-items:center;gap:6px;margin-top:2px}
 .ldsp-user-lv{font-size:9px;font-weight:700;color:#fff;background:var(--grad);padding:2px 6px;border-radius:10px}
 .ldsp-user-st{font-size:9px;color:var(--txt-mut)}
 .ldsp-reading{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:6px 10px;border-radius:var(--r-md);min-width:70px}
@@ -1765,10 +1766,19 @@
         }
 
         // 渲染用户信息
-        renderUser(name, level, isOK, reqs) {
+        renderUser(name, level, isOK, reqs, displayName = null) {
             const done = reqs.filter(r => r.isSuccess).length;
             const $ = this.panel.$;
-            $.userName.textContent = name;
+            // 如果有 displayName 则显示 displayName + @username，否则只显示 username
+            if (displayName && displayName !== name) {
+                $.userDisplayName.textContent = displayName;
+                $.userHandle.textContent = `@${name}`;
+                $.userHandle.style.display = '';
+            } else {
+                $.userDisplayName.textContent = name;
+                $.userHandle.textContent = '';
+                $.userHandle.style.display = 'none';
+            }
             $.userLevel.textContent = `Lv ${level}`;
             $.userStatus.textContent = `${done}/${reqs.length} 完成`;
             $.status.className = `ldsp-status ${isOK ? 'ok' : 'fail'}`;
@@ -2387,6 +2397,8 @@
                             this.storage.invalidateCache();  // 清除缓存确保使用新 key
                             this.storage.migrate(oauthUser.username);
                         }
+                        // 使用 OAuth 用户信息更新界面（即使 connect API 失败也能显示用户信息）
+                        this._updateUserInfoFromOAuth(oauthUser);
                     }
                     console.log('[CloudSync] Storage user after:', this.storage.getUser());
                     this.cloudSync.onPageLoad();
@@ -2420,8 +2432,8 @@
                         <span class="ldsp-ver">v${GM_info.script.version}</span>
                     </div>
                     <div class="ldsp-hdr-btns">
-                        <button class="ldsp-cloud-sync" title="云同步" style="display:none">☁️</button>
                         <button class="ldsp-update" title="检查更新">🔍</button>
+                        <button class="ldsp-cloud-sync" title="云同步" style="display:none">☁️</button>
                         <button class="ldsp-refresh" title="刷新数据">🔄</button>
                         <button class="ldsp-theme" title="切换主题">🌓</button>
                         <button class="ldsp-toggle" title="折叠">◀</button>
@@ -2438,7 +2450,8 @@
                     <div class="ldsp-user">
                         <div class="ldsp-avatar-ph">👤</div>
                         <div class="ldsp-user-info">
-                            <div class="ldsp-user-name">加载中...</div>
+                            <div class="ldsp-user-display-name">加载中...</div>
+                            <div class="ldsp-user-handle"></div>
                             <div class="ldsp-user-meta">
                                 <span class="ldsp-user-lv">Lv ?</span>
                                 <span class="ldsp-user-st">--</span>
@@ -2468,7 +2481,8 @@
             this.$ = {
                 header: this.el.querySelector('.ldsp-hdr'),
                 user: this.el.querySelector('.ldsp-user'),
-                userName: this.el.querySelector('.ldsp-user-name'),
+                userDisplayName: this.el.querySelector('.ldsp-user-display-name'),
+                userHandle: this.el.querySelector('.ldsp-user-handle'),
                 userLevel: this.el.querySelector('.ldsp-user-lv'),
                 userStatus: this.el.querySelector('.ldsp-user-st'),
                 reading: this.el.querySelector('.ldsp-reading'),
@@ -2701,10 +2715,12 @@
         }
 
         _showLowTrustLevelWarning(username, level) {
-            const $ = this.panel.$;
+            const $ = this.$;
             // 显示用户信息（如果有）
             if (username && username !== '未知') {
-                $.userName.textContent = username;
+                $.userDisplayName.textContent = username;
+                $.userHandle.textContent = '';
+                $.userHandle.style.display = 'none';
                 $.userLevel.textContent = `Lv ${level}`;
                 $.userStatus.textContent = '信任等级 < 2';
                 $.status.className = 'ldsp-status';
@@ -2984,16 +3000,16 @@
             }
 
             if (!logged) {
-                const hint = this.$.userName.querySelector('.ldsp-login-hint');
+                const hint = this.$.userDisplayName.querySelector('.ldsp-login-hint');
                 if (!hint) {
                     const span = document.createElement('span');
                     span.className = 'ldsp-login-hint';
                     span.textContent = '点击登录';
-                    this.$.userName.appendChild(span);
+                    this.$.userDisplayName.appendChild(span);
                 }
                 this._bindUserLogin();
             } else {
-                this.$.userName.querySelector('.ldsp-login-hint')?.remove();
+                this.$.userDisplayName.querySelector('.ldsp-login-hint')?.remove();
             }
         }
 
@@ -3009,7 +3025,7 @@
             };
 
             this.$.user.querySelector('.ldsp-avatar, .ldsp-avatar-ph')?.addEventListener('click', handle);
-            this.$.userName.addEventListener('click', handle);
+            this.$.userDisplayName.addEventListener('click', handle);
         }
 
         async _doLogin() {
@@ -3022,12 +3038,38 @@
                     this.storage.setUser(user.username);
                     this.storage.invalidateCache();  // 清除缓存确保使用新 key
                     this.storage.migrate(user.username);
+                    // 使用 OAuth 用户信息更新界面
+                    this._updateUserInfoFromOAuth(user);
                 }
                 this._updateLoginUI();
                 await this._syncPrefs();
                 this.cloudSync.fullSync().catch(e => console.warn('[CloudSync]', e));
             } catch (e) {
                 this.renderer.showToast(`❌ ${e.message}`);
+            }
+        }
+
+        // 使用 OAuth 用户信息更新界面
+        _updateUserInfoFromOAuth(user) {
+            if (!user) return;
+            const $ = this.$;
+            // 显示用户名和昵称
+            if (user.name && user.name !== user.username) {
+                $.userDisplayName.textContent = user.name;
+                $.userHandle.textContent = `@${user.username}`;
+                $.userHandle.style.display = '';
+            } else {
+                $.userDisplayName.textContent = user.username;
+                $.userHandle.textContent = '';
+                $.userHandle.style.display = 'none';
+            }
+            // 显示信任等级（如果有）
+            if (user.trust_level !== undefined) {
+                $.userLevel.textContent = `Lv ${user.trust_level}`;
+            }
+            // 更新头像（如果有）
+            if (user.avatar_url) {
+                this._updateAvatar(user.avatar_url.startsWith('http') ? user.avatar_url : `https://linux.do${user.avatar_url}`);
             }
         }
 
@@ -3130,41 +3172,47 @@
 
             if (!logged) {
                 container.innerHTML = this.renderer.renderLeaderboardLogin();
-                container.querySelector('#ldsp-lb-login')?.addEventListener('click', async function() {
-                    this.disabled = true;
-                    this.textContent = '⏳ 登录中...';
-                    try {
-                        await this.oauth.login();
-                        this.renderer.showToast('✅ 登录成功');
-                        this._updateLoginUI();
-                        await this._syncPrefs();
-                        this.cloudSync.fullSync().catch(e => console.warn('[CloudSync]', e));
-                        await this._renderLeaderboardContent();
-                    } catch (e) {
-                        this.renderer.showToast(`❌ ${e.message}`);
-                        this.disabled = false;
-                        this.textContent = '🚀 立即登录';
-                    }
-                }.bind(this));
+                const loginBtn = container.querySelector('#ldsp-lb-login');
+                if (loginBtn) {
+                    loginBtn.onclick = async () => {
+                        loginBtn.disabled = true;
+                        loginBtn.textContent = '⏳ 登录中...';
+                        try {
+                            await this.oauth.login();
+                            this.renderer.showToast('✅ 登录成功');
+                            this._updateLoginUI();
+                            await this._syncPrefs();
+                            this.cloudSync.fullSync().catch(e => console.warn('[CloudSync]', e));
+                            await this._renderLeaderboardContent();
+                        } catch (e) {
+                            this.renderer.showToast(`❌ ${e.message}`);
+                            loginBtn.disabled = false;
+                            loginBtn.textContent = '🚀 立即登录';
+                        }
+                    };
+                }
                 return;
             }
 
             if (!joined) {
                 container.innerHTML = this.renderer.renderLeaderboardJoin();
-                container.querySelector('#ldsp-lb-join')?.addEventListener('click', async function() {
-                    this.disabled = true;
-                    this.textContent = '⏳ 加入中...';
-                    try {
-                        await this.leaderboard.join();
-                        this.leaderboard.startSync();
-                        this.renderer.showToast('✅ 已成功加入排行榜');
-                        await this._renderLeaderboardContent();
-                    } catch (e) {
-                        this.renderer.showToast(`❌ ${e.message}`);
-                        this.disabled = false;
-                        this.textContent = '✨ 加入排行榜';
-                    }
-                }.bind(this));
+                const joinBtn = container.querySelector('#ldsp-lb-join');
+                if (joinBtn) {
+                    joinBtn.onclick = async () => {
+                        joinBtn.disabled = true;
+                        joinBtn.textContent = '⏳ 加入中...';
+                        try {
+                            await this.leaderboard.join();
+                            this.leaderboard.startSync();
+                            this.renderer.showToast('✅ 已成功加入排行榜');
+                            await this._renderLeaderboardContent();
+                        } catch (e) {
+                            this.renderer.showToast(`❌ ${e.message}`);
+                            joinBtn.disabled = false;
+                            joinBtn.textContent = '✨ 加入排行榜';
+                        }
+                    };
+                }
                 return;
             }
 
