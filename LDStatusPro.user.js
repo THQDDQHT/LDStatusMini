@@ -2177,7 +2177,7 @@
          */
         async getAnnouncement() {
             try {
-                const response = await fetch(`${CONFIG.API_BASE}/api/config/announcement`);
+                const response = await fetch(`${CONFIG.LEADERBOARD_API}/api/config/announcement`);
                 if (!response.ok) return null;
                 const result = await response.json();
                 if (result.success && result.data) {
@@ -3903,7 +3903,7 @@
          */
         async _loadAnnouncement() {
             try {
-                const response = await fetch(`${CONFIG.API_BASE}/api/config/announcement`);
+                const response = await fetch(`${CONFIG.LEADERBOARD_API}/api/config/announcement`);
                 if (!response.ok) return;
                 
                 const result = await response.json();
