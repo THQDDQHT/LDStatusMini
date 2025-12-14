@@ -1964,21 +1964,21 @@
 
         _css(c) {
             return `
-#ldsp-panel{--dur-fast:150ms;--dur:250ms;--dur-slow:400ms;--ease:cubic-bezier(.16,1,.3,1);--ease-circ:cubic-bezier(.85,0,.15,1);--ease-spring:cubic-bezier(.34,1.56,.64,1);--bg:#0f0f1a;--bg-card:#1a1a2e;--bg-hover:#252542;--bg-el:#16213e;--txt:#eaeaea;--txt-sec:#a0a0b0;--txt-mut:#6a6a7a;--accent:#7c3aed;--accent2:#06b6d4;--grad:linear-gradient(135deg,#7c3aed,#06b6d4);--ok:#22c55e;--ok-bg:rgba(34,197,94,.15);--err:#ef4444;--err-bg:rgba(239,68,68,.15);--warn:#f59e0b;--border:rgba(255,255,255,.06);--border2:rgba(255,255,255,.1);--shadow:0 16px 48px rgba(0,0,0,.5);--r-sm:6px;--r-md:10px;--r-lg:14px;--w:${c.width}px;--h:${c.maxHeight}px;--fs:${c.fontSize}px;--pd:${c.padding}px;--av:${c.avatarSize}px;--ring:${c.ringSize}px;position:fixed;left:12px;top:80px;width:var(--w);background:var(--bg);border-radius:var(--r-lg);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif;font-size:var(--fs);color:var(--txt);box-shadow:var(--shadow);z-index:99999;overflow:hidden;border:1px solid var(--border)}
+#ldsp-panel{--dur-fast:150ms;--dur:250ms;--dur-slow:400ms;--ease:cubic-bezier(.16,1,.3,1);--ease-circ:cubic-bezier(.85,0,.15,1);--ease-spring:cubic-bezier(.34,1.56,.64,1);--bg:#0f0f1a;--bg-card:#1a1a2e;--bg-hover:#252542;--bg-el:#16213e;--txt:#eaeaea;--txt-sec:#a0a0b0;--txt-mut:#6a6a7a;--accent:#7c3aed;--accent2:#06b6d4;--grad:linear-gradient(135deg,#7c3aed,#06b6d4);--ok:#22c55e;--ok-bg:rgba(34,197,94,.15);--err:#ef4444;--err-bg:rgba(239,68,68,.15);--warn:#f59e0b;--border:rgba(255,255,255,.06);--border2:rgba(255,255,255,.1);--shadow:0 16px 48px rgba(0,0,0,.5);--r-sm:6px;--r-md:10px;--r-lg:14px;--w:${c.width}px;--h:${c.maxHeight}px;--fs:${c.fontSize}px;--pd:${c.padding}px;--av:${c.avatarSize}px;--ring:${c.ringSize}px;position:fixed;right:12px;top:80px;left:auto;width:var(--w);background:var(--bg);border-radius:var(--r-lg);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif;font-size:var(--fs);color:var(--txt);box-shadow:var(--shadow);z-index:99999;overflow:hidden;border:1px solid var(--border)}
 #ldsp-panel,#ldsp-panel *{transition:background-color var(--dur),color var(--dur),border-color var(--dur),opacity var(--dur),transform var(--dur)}
 #ldsp-panel.no-trans,#ldsp-panel.no-trans *{transition:none!important}
 #ldsp-panel.anim{transition:width var(--dur-slow) var(--ease),height var(--dur-slow) var(--ease),left var(--dur-slow) var(--ease),top var(--dur-slow) var(--ease)}
 #ldsp-panel.light{--bg:#fff;--bg-card:#f8fafc;--bg-hover:#f1f5f9;--bg-el:#fff;--txt:#1e293b;--txt-sec:#64748b;--txt-mut:#94a3b8;--accent:#6366f1;--accent2:#0ea5e9;--ok:#16a34a;--ok-bg:rgba(22,163,74,.1);--err:#dc2626;--err-bg:rgba(220,38,38,.1);--border:rgba(0,0,0,.04);--border2:rgba(0,0,0,.08);--shadow:0 16px 48px rgba(0,0,0,.12)}
-#ldsp-panel.collapsed{width:44px!important;height:44px!important;border-radius:var(--r-md);cursor:move;background:var(--grad);border:none}
+#ldsp-panel.collapsed{width:44px!important;height:44px!important;border-radius:var(--r-md);cursor:move;touch-action:none;background:var(--grad);border:none}
 #ldsp-panel.collapsed .ldsp-hdr{padding:0;justify-content:center;height:44px;background:0 0}
 #ldsp-panel.collapsed .ldsp-hdr-info,#ldsp-panel.collapsed .ldsp-hdr-btns>button:not(.ldsp-toggle),#ldsp-panel.collapsed .ldsp-body{display:none!important}
 #ldsp-panel.collapsed .ldsp-toggle{width:44px;height:44px;font-size:18px;background:0 0}
-.ldsp-hdr{display:flex;align-items:center;justify-content:space-between;padding:var(--pd);background:var(--grad);cursor:move;user-select:none;min-height:42px}
-.ldsp-hdr-info{display:flex;align-items:center;gap:8px}
+.ldsp-hdr{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--grad);cursor:move;user-select:none;touch-action:none}
+.ldsp-hdr-info{display:flex;align-items:center;gap:6px;min-width:0}
 .ldsp-site-icon{width:20px;height:20px;border-radius:50%;border:2px solid rgba(255,255,255,.3);flex-shrink:0}
-.ldsp-hdr-text{display:flex;flex-direction:column;gap:1px;min-width:0}
-.ldsp-title{font-weight:700;font-size:12px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ldsp-ver{font-size:8px;color:rgba(255,255,255,.7);line-height:1}
+.ldsp-hdr-text{display:flex;flex-direction:column;gap:0;min-width:0}
+.ldsp-title{font-weight:700;font-size:12px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2}
+.ldsp-ver{font-size:9px;color:rgba(255,255,255,.9);line-height:1;background:rgba(0,0,0,.2);padding:1px 4px;border-radius:3px;display:inline-block;margin-top:2px}
 .ldsp-hdr-btns{display:flex;gap:3px;flex-shrink:0}
 .ldsp-hdr-btns button{width:24px;height:24px;border:none;background:rgba(255,255,255,.15);color:#fff;border-radius:var(--r-sm);cursor:pointer;font-size:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .ldsp-hdr-btns button:hover{background:rgba(255,255,255,.25);transform:translateY(-1px)}
@@ -2243,9 +2243,9 @@
 .ldsp-privacy-note{font-size:8px;color:var(--txt-mut);margin-top:8px;display:flex;align-items:center;justify-content:center;gap:4px}
 @media (prefers-reduced-motion:reduce){#ldsp-panel,#ldsp-panel *{animation-duration:.01ms!important;transition-duration:.01ms!important}}
 @media (max-height:700px){#ldsp-panel{top:60px}.ldsp-content{max-height:calc(100vh - 240px)}}
-@media (max-width:1200px){#ldsp-panel{left:8px}}
-@media (max-width:768px){#ldsp-panel{--w:280px;--fs:12px;--pd:10px;left:6px;top:70px}#ldsp-panel.collapsed{width:36px!important;height:36px!important}#ldsp-panel.collapsed .ldsp-toggle{width:36px;height:36px;font-size:14px}.ldsp-hdr{padding:8px 10px}.ldsp-site-icon{width:18px;height:18px}.ldsp-title{font-size:11px}.ldsp-ver{font-size:7px}.ldsp-hdr-btns{gap:2px}.ldsp-hdr-btns button{width:22px;height:22px;font-size:10px}.ldsp-update-bubble{width:180px;padding:10px 12px}.ldsp-content{max-height:calc(100vh - 260px)}}
-@media (max-width:480px){#ldsp-panel{--w:260px;--av:32px;left:4px;top:60px}#ldsp-panel.collapsed{width:32px!important;height:32px!important}#ldsp-panel.collapsed .ldsp-toggle{width:32px;height:32px;font-size:12px}.ldsp-hdr{padding:6px 8px}.ldsp-hdr-btns button{width:20px;height:20px;font-size:9px}.ldsp-site-icon{width:16px;height:16px}.ldsp-user{padding:8px}.ldsp-reading{min-width:60px;padding:4px 6px}.ldsp-reading-time{font-size:11px}.ldsp-tabs{padding:6px 8px;gap:4px}.ldsp-tab{padding:5px 8px;font-size:10px}.ldsp-rank-item{padding:8px}.ldsp-rank-num{width:20px;font-size:11px}.ldsp-my-rank{padding:8px}.ldsp-my-rank-val{font-size:14px}}
+@media (max-width:1200px){#ldsp-panel{right:8px;left:auto}}
+@media (max-width:768px){#ldsp-panel{--w:280px;--fs:12px;--pd:10px;right:6px;left:auto;top:60px}#ldsp-panel.collapsed{width:36px!important;height:36px!important}#ldsp-panel.collapsed .ldsp-toggle{width:36px;height:36px;font-size:14px}.ldsp-hdr{padding:6px 8px}.ldsp-site-icon{width:18px;height:18px}.ldsp-title{font-size:11px}.ldsp-ver{font-size:8px;padding:1px 3px}.ldsp-hdr-btns{gap:2px}.ldsp-hdr-btns button{width:22px;height:22px;font-size:10px}.ldsp-update-bubble{width:180px;padding:10px 12px}.ldsp-content{max-height:calc(100vh - 240px)}}
+@media (max-width:480px){#ldsp-panel{--w:260px;--av:32px;right:4px;left:auto;top:50px}#ldsp-panel.collapsed{width:32px!important;height:32px!important}#ldsp-panel.collapsed .ldsp-toggle{width:32px;height:32px;font-size:12px}.ldsp-hdr{padding:5px 6px}.ldsp-hdr-info{gap:4px}.ldsp-hdr-btns{gap:1px}.ldsp-hdr-btns button{width:20px;height:20px;font-size:9px}.ldsp-site-icon{width:16px;height:16px}.ldsp-title{font-size:10px}.ldsp-ver{font-size:7px;padding:1px 2px}.ldsp-user{padding:8px}.ldsp-reading{min-width:60px;padding:4px 6px}.ldsp-reading-time{font-size:11px}.ldsp-tabs{padding:6px 8px;gap:4px}.ldsp-tab{padding:5px 8px;font-size:10px}.ldsp-rank-item{padding:8px}.ldsp-rank-num{width:20px;font-size:11px}.ldsp-my-rank{padding:8px}.ldsp-my-rank-val{font-size:14px}}
 @media (max-height:500px){#ldsp-panel{top:40px}.ldsp-content{max-height:calc(100vh - 180px)}.ldsp-user{padding:6px}.ldsp-reading{display:none}}`;
         }
     };
@@ -3061,27 +3061,34 @@
         }
 
         _bindEvents() {
-            // 拖拽
+            // 拖拽（支持鼠标和触摸）
             let dragging = false, ox, oy, moved = false, sx, sy;
             const THRESHOLD = 5;
 
+            const getPos = e => e.touches ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : { x: e.clientX, y: e.clientY };
+
             const startDrag = e => {
                 if (!this.el.classList.contains('collapsed') && e.target.closest('button')) return;
+                const p = getPos(e);
                 dragging = true;
                 moved = false;
-                ox = e.clientX - this.el.offsetLeft;
-                oy = e.clientY - this.el.offsetTop;
-                sx = e.clientX;
-                sy = e.clientY;
+                // 使用 left/top 进行拖拽计算
+                this.el.style.right = 'auto';
+                this.el.style.left = this.el.offsetLeft + 'px';
+                ox = p.x - this.el.offsetLeft;
+                oy = p.y - this.el.offsetTop;
+                sx = p.x;
+                sy = p.y;
                 this.el.classList.add('no-trans');
                 e.preventDefault();
             };
 
             const updateDrag = e => {
                 if (!dragging) return;
-                if (Math.abs(e.clientX - sx) > THRESHOLD || Math.abs(e.clientY - sy) > THRESHOLD) moved = true;
-                this.el.style.left = Math.max(0, Math.min(e.clientX - ox, innerWidth - this.el.offsetWidth)) + 'px';
-                this.el.style.top = Math.max(0, Math.min(e.clientY - oy, innerHeight - this.el.offsetHeight)) + 'px';
+                const p = getPos(e);
+                if (Math.abs(p.x - sx) > THRESHOLD || Math.abs(p.y - sy) > THRESHOLD) moved = true;
+                this.el.style.left = Math.max(0, Math.min(p.x - ox, innerWidth - this.el.offsetWidth)) + 'px';
+                this.el.style.top = Math.max(0, Math.min(p.y - oy, innerHeight - this.el.offsetHeight)) + 'px';
             };
 
             const endDrag = () => {
@@ -3092,10 +3099,16 @@
                 this._updateExpandDir();
             };
 
+            // 鼠标事件
             this.$.header.addEventListener('mousedown', e => !this.el.classList.contains('collapsed') && startDrag(e));
             this.el.addEventListener('mousedown', e => this.el.classList.contains('collapsed') && startDrag(e));
             document.addEventListener('mousemove', updateDrag);
             document.addEventListener('mouseup', endDrag);
+            // 触摸事件（移动端拖拽）
+            this.$.header.addEventListener('touchstart', e => !this.el.classList.contains('collapsed') && startDrag(e), { passive: false });
+            this.el.addEventListener('touchstart', e => this.el.classList.contains('collapsed') && startDrag(e), { passive: false });
+            document.addEventListener('touchmove', updateDrag, { passive: false });
+            document.addEventListener('touchend', endDrag);
 
             // 按钮事件
             this.$.btnToggle.addEventListener('click', e => {
@@ -3170,7 +3183,11 @@
 
         _restore() {
             const pos = this.storage.getGlobal('position');
-            if (pos) { this.el.style.left = pos.left; this.el.style.top = pos.top; }
+            if (pos) { 
+                this.el.style.right = 'auto'; // 拖拽后使用 left
+                this.el.style.left = pos.left; 
+                this.el.style.top = pos.top; 
+            }
 
             if (this.storage.getGlobal('collapsed', false)) {
                 this.el.classList.add('collapsed');
