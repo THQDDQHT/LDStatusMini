@@ -3899,14 +3899,18 @@
         }
 
         /**
-         * 加载并显示系统公告
+         * 加载并显示系统公告（公开接口，不需要登录）
          */
         async _loadAnnouncement() {
-            if (!this.cloudSync) return;
-            
             try {
-                const announcement = await this.cloudSync.getAnnouncement();
-                if (!announcement || !announcement.enabled || !announcement.content) {
+                const response = await fetch(`${CONFIG.API_BASE}/api/config/announcement`);
+                if (!response.ok) return;
+                
+                const result = await response.json();
+                if (!result.success || !result.data) return;
+                
+                const announcement = result.data;
+                if (!announcement.enabled || !announcement.content) {
                     return;
                 }
                 
