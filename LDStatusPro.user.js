@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LDStatus Pro
 // @namespace    http://tampermonkey.net/
-// @version      3.3.0
+// @version      3.3.1
 // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计。两站点均支持排行榜和云同步功能
 // @author       JackLiii
 // @license      MIT
@@ -73,7 +73,8 @@
             CLOUD_UPLOAD: 3600000,     // 云同步上传（60分钟，原30分钟）
             CLOUD_DOWNLOAD: 43200000,  // 云同步下载（12小时，原6小时）
             CLOUD_CHECK: 600000,       // 云同步检查（10分钟，原5分钟）
-            REQ_SYNC: 7200000,         // 升级要求同步（2小时）
+            REQ_SYNC_INCREMENTAL: 3600000, // 升级要求增量同步（1小时）
+            REQ_SYNC_FULL: 43200000,   // 升级要求全量同步（12小时，与reading同步间隔一致）
             SYNC_RETRY_DELAY: 60000    // 同步失败后重试延迟（1分钟）
         },
         // 缓存配置
@@ -204,6 +205,17 @@
                 if (diff !== 0) return diff > 0 ? 1 : -1;
             }
             return 0;
+        },
+
+        // 简单字符串哈希
+        hash(str) {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                const char = str.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash = hash & hash; // Convert to 32bit integer
+            }
+            return Math.abs(hash).toString(16);
         },
 
         // 简化名称
@@ -1838,8 +1850,11 @@
          */
         setHistoryManager(historyMgr) {
             this._historyMgr = historyMgr;
-            this._reqLastUpload = this.storage.getGlobal('lastReqSync', 0);
+            // 兼容旧版本存储 key
             this._reqLastDownload = this.storage.getGlobal('lastReqDownload', 0);
+            this._reqLastFullSync = this.storage.getGlobal('lastReqFullSync', 0) || 
+                                    this.storage.getGlobal('lastReqSync', 0); // 兼容旧 key
+            this._reqLastIncrementalSync = this.storage.getGlobal('lastReqIncrementalSync', 0);
         }
 
         /**
@@ -1947,21 +1962,79 @@
         }
 
         /**
-         * 上传升级要求历史数据
+         * 增量同步当天的升级要求数据
+         * @param {Object} todayRecord - 今天的历史记录 {ts, data, readingTime}
          */
-        async uploadRequirements() {
-            if (!this.oauth.isLoggedIn() || !this._historyMgr || this._syncing) return null;
+        async syncTodayRequirements(todayRecord) {
+            if (!this.oauth.isLoggedIn() || !this._historyMgr) return null;
             
             // 检查 trust_level 缓存
             const cachedTrust = this._hasSufficientTrustLevel();
             if (cachedTrust === false) {
-                console.log('[CloudSync] Requirements upload skipped - cached trust_level < 2');
+                console.log('[CloudSync] Requirements sync skipped - cached trust_level < 2');
                 return null;
             }
             
             // 检查退避延迟
             if (!this._canRetry('requirements')) {
-                console.log('[CloudSync] Requirements upload skipped - in backoff period');
+                console.log('[CloudSync] Requirements incremental sync skipped - in backoff period');
+                return null;
+            }
+
+            try {
+                if (!todayRecord?.data) return null;
+                
+                const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+                const result = await this.oauth.api('/api/requirements/sync', {
+                    method: 'POST',
+                    body: { 
+                        date: today,
+                        requirements: todayRecord.data,
+                        readingTime: todayRecord.readingTime || 0
+                    }
+                });
+
+                if (result.success) {
+                    this._reqLastIncrementalSync = Date.now();
+                    this.storage.setGlobalNow('lastReqIncrementalSync', this._reqLastIncrementalSync);
+                    this._updateTrustLevelCache(true);
+                    this._recordSuccess('requirements');
+                    console.log('[CloudSync] Requirements incremental sync:', result.data);
+                    return result.data;
+                }
+                
+                // 权限不足是正常情况，缓存结果
+                if (result.error?.code === 'INSUFFICIENT_TRUST_LEVEL') {
+                    console.log('[CloudSync] Requirements sync requires trust_level >= 2');
+                    this._updateTrustLevelCache(false);
+                    return null;
+                }
+                
+                this._recordFailure('requirements');
+                return null;
+            } catch (e) {
+                console.error('[CloudSync] Requirements incremental sync failed:', e);
+                this._recordFailure('requirements');
+                return null;
+            }
+        }
+
+        /**
+         * 全量上传升级要求历史数据（仅在需要时调用）
+         */
+        async uploadRequirementsFull() {
+            if (!this.oauth.isLoggedIn() || !this._historyMgr || this._syncing) return null;
+            
+            // 检查 trust_level 缓存
+            const cachedTrust = this._hasSufficientTrustLevel();
+            if (cachedTrust === false) {
+                console.log('[CloudSync] Requirements full upload skipped - cached trust_level < 2');
+                return null;
+            }
+            
+            // 检查退避延迟
+            if (!this._canRetry('requirements')) {
+                console.log('[CloudSync] Requirements full upload skipped - in backoff period');
                 return null;
             }
 
@@ -1975,11 +2048,11 @@
                 });
 
                 if (result.success) {
-                    this._reqLastUpload = Date.now();
-                    this.storage.setGlobalNow('lastReqSync', this._reqLastUpload);
+                    this._reqLastFullSync = Date.now();
+                    this.storage.setGlobalNow('lastReqFullSync', this._reqLastFullSync);
                     this._updateTrustLevelCache(true);
                     this._recordSuccess('requirements');
-                    console.log('[CloudSync] Requirements uploaded:', result.data);
+                    console.log('[CloudSync] Requirements full uploaded:', result.data);
                     return result.data;
                 }
                 
@@ -1993,15 +2066,33 @@
                 this._recordFailure('requirements');
                 throw new Error(result.error?.message || '上传失败');
             } catch (e) {
-                console.error('[CloudSync] Requirements upload failed:', e);
+                console.error('[CloudSync] Requirements full upload failed:', e);
                 this._recordFailure('requirements');
                 return null;
             }
         }
 
         /**
+         * 兼容旧调用 - 重定向到增量同步
+         * @deprecated 使用 syncTodayRequirements 或 uploadRequirementsFull
+         */
+        async uploadRequirements() {
+            // 获取今天的记录并进行增量同步
+            const history = this._historyMgr?.getHistory() || [];
+            const today = new Date().toDateString();
+            const todayRecord = history.find(h => new Date(h.ts).toDateString() === today);
+            return this.syncTodayRequirements(todayRecord);
+        }
+
+        /**
          * 页面加载时同步升级要求数据
          * 仅 trust_level >= 2 的用户可用
+         * 
+         * 优化策略（v3.3.1）：
+         * 1. 增量同步：默认只同步当天数据（1小时间隔）
+         * 2. 全量同步：仅在以下情况触发（12小时间隔）：
+         *    - 首次登录（从未下载过云端数据）
+         *    - 本地数据天数与云端不一致
          */
         async syncRequirementsOnLoad() {
             if (!this.oauth.isLoggedIn() || !this._historyMgr) return;
@@ -2015,8 +2106,8 @@
             
             // 如果无法确定 trust_level (hasTrust === null)，检查本地是否有数据
             // 只有本地有升级要求数据时才尝试同步（避免低等级新用户发起无效请求）
+            const localHistory = this._historyMgr.getHistory();
             if (hasTrust === null) {
-                const localHistory = this._historyMgr.getHistory();
                 if (!localHistory || localHistory.length === 0) {
                     console.log('[CloudSync] Requirements sync skipped - no local data and trust_level unknown');
                     return;
@@ -2024,25 +2115,78 @@
             }
 
             const now = Date.now();
-            const SYNC_INTERVAL = CONFIG.INTERVALS.REQ_SYNC || 2 * 60 * 60 * 1000; // 使用配置或默认2小时
-
-            // 下载检查
-            if (this._reqLastDownload === 0 || (now - this._reqLastDownload) > SYNC_INTERVAL) {
-                const result = await this.downloadRequirements();
-                if (result) {
+            const INCREMENTAL_INTERVAL = CONFIG.INTERVALS.REQ_SYNC_INCREMENTAL || 3600000; // 1小时
+            const FULL_INTERVAL = CONFIG.INTERVALS.REQ_SYNC_FULL || 43200000; // 12小时
+            
+            // ========== 判断是否需要全量同步 ==========
+            const isFirstTime = this._reqLastDownload === 0;
+            const needFullSync = isFirstTime || (now - (this._reqLastFullSync || 0)) > FULL_INTERVAL;
+            
+            if (needFullSync) {
+                console.log('[CloudSync] Requirements full sync needed:', isFirstTime ? 'first time' : 'interval exceeded');
+                
+                // 1. 先下载云端数据
+                const downloadResult = await this.downloadRequirements();
+                if (downloadResult) {
                     this._reqLastDownload = now;
                     this.storage.setGlobalNow('lastReqDownload', now);
+                    
+                    // 2. 如果本地有数据且云端数据较少，上传本地数据
+                    const cloudDays = downloadResult.merged || 0;
+                    const localDays = localHistory.length;
+                    
+                    if (localDays > 0 && (isFirstTime || localDays > cloudDays)) {
+                        console.log('[CloudSync] Local has more data, uploading full history...');
+                        const uploadResult = await this.uploadRequirementsFull();
+                        if (uploadResult) {
+                            this._reqLastFullSync = now;
+                            this.storage.setGlobalNow('lastReqFullSync', now);
+                        }
+                    } else {
+                        this._reqLastFullSync = now;
+                        this.storage.setGlobalNow('lastReqFullSync', now);
+                    }
                 }
+                return;
             }
-
-            // 上传检查（只在数据变化时上传）
-            const hash = this._getReqHash();
-            const lastHash = this.storage.getGlobal('lastReqHash', '');
-            if (hash && hash !== lastHash) {
-                const result = await this.uploadRequirements();
+            
+            // ========== 增量同步：只同步当天数据 ==========
+            const lastIncremental = this._reqLastIncrementalSync || 0;
+            if ((now - lastIncremental) < INCREMENTAL_INTERVAL) {
+                console.log('[CloudSync] Requirements incremental sync skipped - within interval');
+                return;
+            }
+            
+            // 获取今天的记录
+            const today = new Date().toDateString();
+            const todayRecord = localHistory.find(h => new Date(h.ts).toDateString() === today);
+            
+            if (todayRecord) {
+                const result = await this.syncTodayRequirements(todayRecord);
                 if (result) {
-                    this.storage.setGlobalNow('lastReqHash', hash);
+                    console.log('[CloudSync] Requirements incremental sync completed');
                 }
+            } else {
+                console.log('[CloudSync] No today record to sync');
+            }
+        }
+
+        /**
+         * 获取系统公告（公开接口，不需要登录）
+         * @returns {Promise<{enabled: boolean, content: string, type: string}|null>}
+         */
+        async getAnnouncement() {
+            try {
+                const response = await fetch(`${CONFIG.API_BASE}/api/config/announcement`);
+                if (!response.ok) return null;
+                const result = await response.json();
+                if (result.success && result.data) {
+                    return result.data;
+                }
+                return null;
+            } catch (e) {
+                console.error('[CloudSync] Get announcement failed:', e);
+                return null;
             }
         }
 
@@ -2118,6 +2262,17 @@
 .ldsp-update-bubble-btn:active{transform:translateY(0) scale(.98)}
 .ldsp-update-bubble-btn:disabled{opacity:.6;cursor:not-allowed;transform:none!important}
 .ldsp-body{background:var(--bg)}
+.ldsp-announcement{overflow:hidden;background:linear-gradient(90deg,rgba(59,130,246,.1),rgba(139,92,246,.1));border-bottom:1px solid var(--border);padding:0;height:0;opacity:0;transition:all .3s var(--ease)}
+.ldsp-announcement.active{height:24px;opacity:1;padding:0 10px}
+.ldsp-announcement.warning{background:linear-gradient(90deg,rgba(245,158,11,.15),rgba(239,68,68,.08))}
+.ldsp-announcement.success{background:linear-gradient(90deg,rgba(16,185,129,.12),rgba(34,197,94,.08))}
+.ldsp-announcement-inner{display:flex;align-items:center;height:24px;white-space:nowrap;animation:marquee var(--marquee-duration,20s) linear infinite}
+.ldsp-announcement-inner:hover{animation-play-state:paused}
+.ldsp-announcement-text{font-size:11px;font-weight:500;color:var(--txt-sec);display:flex;align-items:center;gap:6px;padding-right:50px}
+.ldsp-announcement-text::before{content:'📢';font-size:12px}
+.ldsp-announcement.warning .ldsp-announcement-text::before{content:'⚠️'}
+.ldsp-announcement.success .ldsp-announcement-text::before{content:'🎉'}
+@keyframes marquee{0%{transform:translateX(100%)}100%{transform:translateX(-100%)}}
 .ldsp-user{display:flex;align-items:center;gap:12px;padding:8px var(--pd);background:var(--bg-card);border-bottom:1px solid var(--border);position:relative;overflow:hidden}
 .ldsp-user::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--accent),transparent);opacity:.3}
 .ldsp-avatar{width:var(--av);height:var(--av);border-radius:12px;border:2px solid var(--accent);flex-shrink:0;background:var(--bg-el);position:relative;box-shadow:0 4px 12px rgba(139,92,246,.2);transition:all .3s var(--ease)}
@@ -2191,12 +2346,12 @@
 .ldsp-ring-val.anim{animation:val 1s var(--ease-spring) .5s forwards;opacity:0}
 @keyframes val{from{opacity:0;transform:scale(.6)}60%{transform:scale(1.1)}to{opacity:1;transform:scale(1)}}
 .ldsp-ring-lbl{font-size:9px;color:var(--txt-mut);margin-top:2px;font-weight:500}
-.ldsp-ring-lvl{font-size:12px;font-weight:700;margin-top:8px;padding:4px 14px;border-radius:12px;background:linear-gradient(90deg,#64748b 0%,#94a3b8 50%,#64748b 100%);background-size:200% 100%;color:#fff;box-shadow:0 2px 10px rgba(100,116,139,.35);letter-spacing:.03em;text-shadow:0 1px 2px rgba(0,0,0,.2);cursor:pointer;transition:transform 2s ease;transform-style:preserve-3d;animation:lvl-shimmer 4s ease-in-out infinite}
+.ldsp-ring-lvl{font-size:12px;font-weight:700;margin-top:8px;padding:4px 14px;border-radius:12px;background-image:linear-gradient(90deg,#64748b 0%,#94a3b8 50%,#64748b 100%);background-size:200% 100%;background-position:0% 50%;color:#fff;box-shadow:0 2px 10px rgba(100,116,139,.35);letter-spacing:.03em;text-shadow:0 1px 2px rgba(0,0,0,.2);cursor:pointer;transition:transform 2s ease;transform-style:preserve-3d;animation:lvl-shimmer 4s ease-in-out infinite}
 .ldsp-ring-lvl:hover{transform:rotateY(360deg);animation-play-state:paused}
-.ldsp-ring-lvl.lv1{background:linear-gradient(90deg,#64748b 0%,#94a3b8 50%,#64748b 100%);box-shadow:0 2px 10px rgba(100,116,139,.35);animation-duration:4s}
-.ldsp-ring-lvl.lv2{background:linear-gradient(90deg,#3b82f6 0%,#60a5fa 50%,#3b82f6 100%);box-shadow:0 2px 10px rgba(59,130,246,.4);animation-duration:3.5s}
-.ldsp-ring-lvl.lv3{background:linear-gradient(90deg,#7c3aed 0%,#a78bfa 30%,#06b6d4 70%,#7c3aed 100%);box-shadow:0 2px 12px rgba(139,92,246,.45);animation-duration:3s}
-.ldsp-ring-lvl.lv4{background:linear-gradient(90deg,#f59e0b 0%,#fbbf24 25%,#f97316 50%,#ef4444 75%,#f59e0b 100%);box-shadow:0 2px 15px rgba(245,158,11,.5),0 0 20px rgba(249,115,22,.3);animation-duration:2.5s;animation-name:lvl-shimmer-gold}
+.ldsp-ring-lvl.lv1{background-image:linear-gradient(90deg,#64748b 0%,#94a3b8 50%,#64748b 100%);box-shadow:0 2px 10px rgba(100,116,139,.35);animation-duration:4s}
+.ldsp-ring-lvl.lv2{background-image:linear-gradient(90deg,#3b82f6 0%,#60a5fa 50%,#3b82f6 100%);box-shadow:0 2px 10px rgba(59,130,246,.4);animation-duration:3.5s}
+.ldsp-ring-lvl.lv3{background-image:linear-gradient(90deg,#7c3aed 0%,#a78bfa 30%,#06b6d4 70%,#7c3aed 100%);box-shadow:0 2px 12px rgba(139,92,246,.45);animation-duration:3s}
+.ldsp-ring-lvl.lv4{background-image:linear-gradient(90deg,#f59e0b 0%,#fbbf24 25%,#f97316 50%,#ef4444 75%,#f59e0b 100%);box-shadow:0 2px 15px rgba(245,158,11,.5),0 0 20px rgba(249,115,22,.3);animation-duration:2.5s;animation-name:lvl-shimmer-gold}
 @keyframes lvl-shimmer{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
 @keyframes lvl-shimmer-gold{0%,100%{background-position:0% 50%;filter:brightness(1)}50%{background-position:100% 50%;filter:brightness(1.2)}}
 .ldsp-confetti{position:absolute;width:100%;height:100%;top:0;left:0;pointer-events:none;overflow:visible;z-index:10}
@@ -2503,8 +2658,11 @@
                 return `<span class="ldsp-confetti-piece" style="color:${color};--tx:${tx}px;--ty:${ty}px;--drift:${drift}px;--rot:${rot}deg;animation-delay:${delay}s">${shape}</span>`;
             }).join('') : '';
 
-            let html = `<div class="ldsp-ring${pct === 100 ? ' complete' : ''}">
-                ${pct === 100 ? `<div class="ldsp-confetti">${confettiPieces}</div>` : ''}
+            // 使用数组构建HTML（避免多次字符串拼接）
+            const htmlParts = [];
+            htmlParts.push(`<div class="ldsp-ring${pct === 100 ? ' complete' : ''}">`);
+            if (pct === 100) htmlParts.push(`<div class="ldsp-confetti">${confettiPieces}</div>`);
+            htmlParts.push(`
                 <div class="ldsp-ring-stat">
                     <div class="ldsp-ring-stat-val ok">✓${done}</div>
                     <div class="ldsp-ring-stat-lbl">已达标</div>
@@ -2525,13 +2683,17 @@
                     <div class="ldsp-ring-stat-lbl">待完成</div>
                 </div>
             </div>
-            <div class="ldsp-ring-tip ${tipClass}">${tipText}</div>`;
+            <div class="ldsp-ring-tip ${tipClass}">${tipText}</div>`);
 
+            // 批量处理需求项（减少Map查询和字符串操作）
             for (const r of reqs) {
                 const name = Utils.simplifyName(r.name);
                 const prev = this.prevValues.get(r.name);
                 const upd = prev !== undefined && prev !== r.currentValue;
-                html += `<div class="ldsp-item ${r.isSuccess ? 'ok' : 'fail'}">
+                const changeHtml = r.change 
+                    ? `<span class="ldsp-item-chg ${r.change > 0 ? 'up' : 'down'}">${r.change > 0 ? '+' : ''}${r.change}</span>` 
+                    : '';
+                htmlParts.push(`<div class="ldsp-item ${r.isSuccess ? 'ok' : 'fail'}">
                     <span class="ldsp-item-icon">${r.isSuccess ? '✓' : '○'}</span>
                     <span class="ldsp-item-name">${name}</span>
                     <div class="ldsp-item-vals">
@@ -2539,12 +2701,12 @@
                         <span class="ldsp-item-sep">/</span>
                         <span class="ldsp-item-req">${r.requiredValue}</span>
                     </div>
-                    ${r.change ? `<span class="ldsp-item-chg ${r.change > 0 ? 'up' : 'down'}">${r.change > 0 ? '+' : ''}${r.change}</span>` : ''}
-                </div>`;
+                    ${changeHtml}
+                </div>`);
                 this.prevValues.set(r.name, r.currentValue);
             }
 
-            this.panel.$.reqs.innerHTML = html;
+            this.panel.$.reqs.innerHTML = htmlParts.join('');
             
             // 100%时，等圆环动画完成后触发撒花
             if (pct === 100 && anim) {
@@ -3209,6 +3371,9 @@
             
             // 自动检查版本更新（首次进入时显示气泡）
             setTimeout(() => this._checkUpdate(true), 2000);
+            
+            // 加载系统公告（延迟加载，不影响主要功能）
+            setTimeout(() => this._loadAnnouncement(), 1500);
         }
 
         _createPanel() {
@@ -3245,6 +3410,11 @@
                     <button class="ldsp-update-bubble-btn">🚀 立即更新</button>
                 </div>
                 <div class="ldsp-body">
+                    <div class="ldsp-announcement">
+                        <div class="ldsp-announcement-inner">
+                            <span class="ldsp-announcement-text"></span>
+                        </div>
+                    </div>
                     <div class="ldsp-user">
                         <div class="ldsp-avatar-wrap"><div class="ldsp-avatar-ph">👤</div></div>
                         <div class="ldsp-user-info">
@@ -3274,6 +3444,8 @@
 
             this.$ = {
                 header: this.el.querySelector('.ldsp-hdr'),
+                announcement: this.el.querySelector('.ldsp-announcement'),
+                announcementText: this.el.querySelector('.ldsp-announcement-text'),
                 user: this.el.querySelector('.ldsp-user'),
                 userDisplayName: this.el.querySelector('.ldsp-user-display-name'),
                 userHandle: this.el.querySelector('.ldsp-user-handle'),
@@ -3724,6 +3896,65 @@
             };
 
             container.innerHTML = fns[this.trendTab]?.() || '';
+        }
+
+        /**
+         * 加载并显示系统公告
+         */
+        async _loadAnnouncement() {
+            if (!this.cloudSync) return;
+            
+            try {
+                const announcement = await this.cloudSync.getAnnouncement();
+                if (!announcement || !announcement.enabled || !announcement.content) {
+                    return;
+                }
+                
+                // 检查是否已关闭过此公告（基于内容hash）
+                const contentHash = Utils.hash(announcement.content);
+                const dismissedHash = this.storage.getGlobal('dismissedAnnouncement', '');
+                if (dismissedHash === contentHash) {
+                    return;
+                }
+                
+                // 显示公告
+                this._showAnnouncement(announcement);
+            } catch (e) {
+                console.warn('[Announcement] Load failed:', e);
+            }
+        }
+
+        /**
+         * 显示公告栏
+         */
+        _showAnnouncement(announcement) {
+            if (!this.$.announcement || !this.$.announcementText) return;
+            
+            // 设置公告类型样式
+            this.$.announcement.className = 'ldsp-announcement';
+            if (announcement.type && announcement.type !== 'info') {
+                this.$.announcement.classList.add(announcement.type);
+            }
+            
+            // 设置公告内容
+            this.$.announcementText.textContent = announcement.content;
+            
+            // 根据文字长度设置滚动速度
+            const textLength = announcement.content.length;
+            const duration = Math.max(10, Math.min(30, textLength * 0.3)); // 10-30秒
+            this.$.announcement.style.setProperty('--marquee-duration', `${duration}s`);
+            
+            // 显示公告栏
+            requestAnimationFrame(() => {
+                this.$.announcement.classList.add('active');
+            });
+            
+            // 点击关闭公告
+            this.$.announcement.onclick = () => {
+                const contentHash = Utils.hash(announcement.content);
+                this.storage.setGlobalNow('dismissedAnnouncement', contentHash);
+                this.$.announcement.classList.remove('active');
+            };
         }
 
         async _checkUpdate(autoCheck = false) {
