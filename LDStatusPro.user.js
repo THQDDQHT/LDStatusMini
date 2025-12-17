@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         LDStatus Pro
 // @namespace    http://tampermonkey.net/
-// @version      3.4.6
+// @version      3.4.7
 // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计、排行榜系统。两站点均支持排行榜和云同步功能
 // @author       JackLiii
 // @license      MIT
@@ -9,7 +9,7 @@
 // @match        https://idcflare.com/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
-// @grant        GM_setValue
+// @grant        GM_setValue    
 // @grant        GM_getValue
 // @grant        GM_info
 // @grant        GM_notification
@@ -332,9 +332,9 @@
         // 获取热力图等级
         getHeatmapLevel(minutes) {
             if (minutes < 1) return 0;
-            if (minutes <= 30) return 1;
-            if (minutes <= 90) return 2;
-            if (minutes <= 180) return 3;
+            if (minutes < 60) return 1;
+            if (minutes < 180) return 2;
+            if (minutes < 300) return 3;
             return 4;
         },
 
@@ -1680,9 +1680,11 @@
         // 优先从 OAuth 用户信息获取，其次使用缓存
         _hasSufficientTrustLevel() {
             // 1. 优先从 OAuth 用户信息获取 trust_level（最准确）
+            // v3.4.7: 兼容 trust_level 和 trustLevel 两种命名格式
             const userInfo = this.oauth.getUserInfo();
-            if (userInfo && typeof userInfo.trust_level === 'number') {
-                const hasTrust = userInfo.trust_level >= 2;
+            const trustLevel = userInfo?.trust_level ?? userInfo?.trustLevel;
+            if (userInfo && typeof trustLevel === 'number') {
+                const hasTrust = trustLevel >= 2;
                 // 更新缓存以便其他地方使用
                 if (this._trustLevelCache !== hasTrust) {
                     this._updateTrustLevelCache(hasTrust);
@@ -1701,11 +1703,12 @@
             return null;
         }
         
-        // 更新 trust_level 缓存
+        // 更新 trust_level 缓存（兼容性保留）
         _updateTrustLevelCache(hasTrust) {
-            this._trustLevelCache = hasTrust;
+            // v3.4.8: 移除等级限制，始终缓存为 true
+            this._trustLevelCache = true;
             this._trustLevelCacheTime = Date.now();
-            this.storage.setGlobalNow('trustLevelCache', hasTrust);
+            this.storage.setGlobalNow('trustLevelCache', true);
             this.storage.setGlobalNow('trustLevelCacheTime', this._trustLevelCacheTime);
         }
 
@@ -1989,12 +1992,6 @@
         async downloadRequirements() {
             if (!this.oauth.isLoggedIn() || !this._historyMgr) return null;
             
-            // 检查 trust_level 缓存（如果已知不足，跳过请求）
-            const cachedTrust = this._hasSufficientTrustLevel();
-            if (cachedTrust === false) {
-                return null;
-            }
-            
             // 检查退避延迟
             if (!this._canRetry('requirements')) {
                 return null;
@@ -2080,12 +2077,6 @@
         async syncTodayRequirements(todayRecord) {
             if (!this.oauth.isLoggedIn() || !this._historyMgr) return null;
             
-            // 检查 trust_level 缓存
-            const cachedTrust = this._hasSufficientTrustLevel();
-            if (cachedTrust === false) {
-                return null;
-            }
-            
             // 检查退避延迟
             if (!this._canRetry('requirements')) {
                 return null;
@@ -2132,12 +2123,6 @@
          */
         async uploadRequirementsFull() {
             if (!this.oauth.isLoggedIn() || !this._historyMgr || this._syncing) return null;
-            
-            // 检查 trust_level 缓存
-            const cachedTrust = this._hasSufficientTrustLevel();
-            if (cachedTrust === false) {
-                return null;
-            }
             
             // 检查退避延迟
             if (!this._canRetry('requirements')) {
@@ -2200,23 +2185,9 @@
          */
         async syncRequirementsOnLoad() {
             if (!this.oauth.isLoggedIn() || !this._historyMgr) return;
-            
-            // 检查 trust_level，如果已知不足则直接跳过（不发起任何请求）
-            const hasTrust = this._hasSufficientTrustLevel();
-            if (hasTrust === false) {
-                return;
-            }
-            
-            // 如果无法确定 trust_level (hasTrust === null)，检查本地是否有数据
-            // 只有本地有升级要求数据时才尝试同步（避免低等级新用户发起无效请求）
-            const localHistory = this._historyMgr.getHistory();
-            if (hasTrust === null) {
-                if (!localHistory || localHistory.length === 0) {
-                    return;
-                }
-            }
 
             const now = Date.now();
+            const localHistory = this._historyMgr.getHistory();
             const INCREMENTAL_INTERVAL = CONFIG.INTERVALS.REQ_SYNC_INCREMENTAL || 3600000; // 1小时
             const FULL_INTERVAL = CONFIG.INTERVALS.REQ_SYNC_FULL || 43200000; // 12小时
             
@@ -2305,49 +2276,46 @@
 
         _css(c) {
             return `
-#ldsp-panel{--dur-fast:120ms;--dur:200ms;--dur-slow:350ms;--ease:cubic-bezier(.22,1,.36,1);--ease-circ:cubic-bezier(.85,0,.15,1);--ease-spring:cubic-bezier(.175,.885,.32,1.275);--ease-out:cubic-bezier(0,.55,.45,1);--bg:#12131a;--bg-card:rgba(24,26,36,.92);--bg-hover:rgba(38,42,56,.95);--bg-el:rgba(32,35,48,.88);--bg-glass:rgba(255,255,255,.02);--txt:#e4e6ed;--txt-sec:#9499ad;--txt-mut:#5d6275;--accent:#6b8cef;--accent-light:#8aa4f4;--accent2:#5bb5a6;--accent2-light:#7cc9bc;--accent3:#e07a8d;--grad:linear-gradient(135deg,#5a7de0 0%,#4a6bc9 100%);--grad-accent:linear-gradient(135deg,#4a6bc9,#3d5aaa);--grad-warm:linear-gradient(135deg,#e07a8d,#c9606e);--grad-gold:linear-gradient(135deg,#d4a853 0%,#c49339 100%);--ok:#5bb5a6;--ok-light:#7cc9bc;--ok-bg:rgba(91,181,166,.12);--err:#e07a8d;--err-light:#ea9aa8;--err-bg:rgba(224,122,141,.12);--warn:#d4a853;--warn-bg:rgba(212,168,83,.12);--border:rgba(255,255,255,.06);--border2:rgba(255,255,255,.1);--border-accent:rgba(107,140,239,.3);--shadow:0 20px 50px rgba(0,0,0,.4),0 0 0 1px rgba(255,255,255,.04);--shadow-lg:0 25px 70px rgba(0,0,0,.5),0 0 30px rgba(107,140,239,.06);--shadow-glow:0 0 20px rgba(107,140,239,.15);--glow-accent:0 0 15px rgba(107,140,239,.2);--r-xs:4px;--r-sm:8px;--r-md:12px;--r-lg:16px;--r-xl:20px;--w:${c.width}px;--h:${c.maxHeight}px;--fs:${c.fontSize}px;--pd:${c.padding}px;--av:${c.avatarSize}px;--ring:${c.ringSize}px;position:fixed;right:12px;top:80px;left:auto;width:var(--w);background:var(--bg);border-radius:var(--r-lg);font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Noto Sans SC',sans-serif;font-size:var(--fs);color:var(--txt);box-shadow:var(--shadow);z-index:99999;overflow:hidden;border:1px solid var(--border);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+#ldsp-panel{--dur-fast:120ms;--dur:200ms;--dur-slow:350ms;--ease:cubic-bezier(.22,1,.36,1);--ease-circ:cubic-bezier(.85,0,.15,1);--ease-spring:cubic-bezier(.175,.885,.32,1.275);--ease-out:cubic-bezier(0,.55,.45,1);--bg:#12131a;--bg-card:rgba(24,26,36,.92);--bg-hover:rgba(38,42,56,.95);--bg-el:rgba(32,35,48,.88);--bg-glass:rgba(255,255,255,.02);--txt:#e4e6ed;--txt-sec:#9499ad;--txt-mut:#5d6275;--accent:#6b8cef;--accent-light:#8aa4f4;--accent2:#5bb5a6;--accent2-light:#7cc9bc;--accent3:#e07a8d;--grad:linear-gradient(135deg,#5a7de0 0%,#4a6bc9 100%);--grad-accent:linear-gradient(135deg,#4a6bc9,#3d5aaa);--grad-warm:linear-gradient(135deg,#e07a8d,#c9606e);--grad-gold:linear-gradient(135deg,#d4a853 0%,#c49339 100%);--ok:#5bb5a6;--ok-light:#7cc9bc;--ok-bg:rgba(91,181,166,.12);--err:#e07a8d;--err-light:#ea9aa8;--err-bg:rgba(224,122,141,.12);--warn:#d4a853;--warn-bg:rgba(212,168,83,.12);--border:rgba(255,255,255,.06);--border2:rgba(255,255,255,.1);--border-accent:rgba(107,140,239,.3);--shadow:0 20px 50px rgba(0,0,0,.4),0 0 0 1px rgba(255,255,255,.04);--shadow-lg:0 25px 70px rgba(0,0,0,.5),0 0 30px rgba(107,140,239,.06);--shadow-glow:0 0 20px rgba(107,140,239,.15);--glow-accent:0 0 15px rgba(107,140,239,.2);--scrollbar:rgba(140,150,175,.5);--scrollbar-hover:rgba(140,150,175,.7);--r-xs:4px;--r-sm:8px;--r-md:12px;--r-lg:16px;--r-xl:20px;--w:${c.width}px;--h:${c.maxHeight}px;--fs:${c.fontSize}px;--pd:${c.padding}px;--av:${c.avatarSize}px;--ring:${c.ringSize}px;display:flex;flex-direction:column;position:fixed;right:12px;top:80px;left:auto;width:var(--w);background:var(--bg);border-radius:var(--r-lg);font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Noto Sans SC',sans-serif;font-size:var(--fs);color:var(--txt);box-shadow:var(--shadow);z-index:99999;overflow:hidden;border:1px solid var(--border);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
 #ldsp-panel,#ldsp-panel *{transition:opacity var(--dur) var(--ease),transform var(--dur) var(--ease);user-select:none;-webkit-font-smoothing:antialiased}
 #ldsp-panel{transform:translateZ(0);backface-visibility:hidden}
 #ldsp-panel input,#ldsp-panel textarea{cursor:text;user-select:text}
-#ldsp-panel [data-clickable],#ldsp-panel [data-clickable] *,#ldsp-panel button,#ldsp-panel a,#ldsp-panel .ldsp-tab,#ldsp-panel .ldsp-subtab,#ldsp-panel .ldsp-ring-lvl,#ldsp-panel .ldsp-rd-day-bar,#ldsp-panel .ldsp-year-cell:not(.empty),#ldsp-panel .ldsp-rank-item,#ldsp-panel .ldsp-ticket-item,#ldsp-panel .ldsp-ticket-type,#ldsp-panel .ldsp-ticket-tab,#ldsp-panel .ldsp-ticket-close,#ldsp-panel .ldsp-ticket-back,#ldsp-panel .ldsp-lb-refresh,#ldsp-panel .ldsp-modal-btn,#ldsp-panel .ldsp-lb-btn,#ldsp-panel .ldsp-site-icon,#ldsp-panel .ldsp-update-bubble-close{cursor:pointer}
+#ldsp-panel [data-clickable],#ldsp-panel [data-clickable] *,#ldsp-panel button,#ldsp-panel a,#ldsp-panel .ldsp-tab,#ldsp-panel .ldsp-subtab,#ldsp-panel .ldsp-ring-lvl,#ldsp-panel .ldsp-rd-day-bar,#ldsp-panel .ldsp-year-cell:not(.empty),#ldsp-panel .ldsp-rank-item,#ldsp-panel .ldsp-ticket-item,#ldsp-panel .ldsp-ticket-type,#ldsp-panel .ldsp-ticket-tab,#ldsp-panel .ldsp-ticket-close,#ldsp-panel .ldsp-ticket-back,#ldsp-panel .ldsp-lb-refresh,#ldsp-panel .ldsp-modal-btn,#ldsp-panel .ldsp-lb-btn,#ldsp-panel .ldsp-update-bubble-close{cursor:pointer}
 #ldsp-panel.no-trans,#ldsp-panel.no-trans *{transition:none!important;animation-play-state:paused!important}
 #ldsp-panel.anim{transition:width var(--dur-slow) var(--ease),height var(--dur-slow) var(--ease),left var(--dur-slow) var(--ease),top var(--dur-slow) var(--ease)}
-#ldsp-panel.light{--bg:rgba(250,251,254,.97);--bg-card:rgba(245,247,252,.94);--bg-hover:rgba(238,242,250,.96);--bg-el:rgba(255,255,255,.94);--bg-glass:rgba(0,0,0,.012);--txt:#1e2030;--txt-sec:#4a5068;--txt-mut:#8590a6;--accent:#5070d0;--accent-light:#6b8cef;--accent2:#4a9e8f;--accent2-light:#5bb5a6;--ok:#4a9e8f;--ok-light:#5bb5a6;--ok-bg:rgba(74,158,143,.08);--err:#d45d6e;--err-light:#e07a8d;--err-bg:rgba(212,93,110,.08);--warn:#c49339;--warn-bg:rgba(196,147,57,.08);--border:rgba(0,0,0,.05);--border2:rgba(0,0,0,.08);--border-accent:rgba(80,112,208,.2);--shadow:0 20px 50px rgba(0,0,0,.07),0 0 0 1px rgba(0,0,0,.04);--shadow-lg:0 25px 70px rgba(0,0,0,.1);--glow-accent:0 0 15px rgba(80,112,208,.1)}
+#ldsp-panel.light{--bg:rgba(250,251,254,.97);--bg-card:rgba(245,247,252,.94);--bg-hover:rgba(238,242,250,.96);--bg-el:rgba(255,255,255,.94);--bg-glass:rgba(0,0,0,.012);--txt:#1e2030;--txt-sec:#4a5068;--txt-mut:#8590a6;--accent:#5070d0;--accent-light:#6b8cef;--accent2:#4a9e8f;--accent2-light:#5bb5a6;--ok:#4a9e8f;--ok-light:#5bb5a6;--ok-bg:rgba(74,158,143,.08);--err:#d45d6e;--err-light:#e07a8d;--err-bg:rgba(212,93,110,.08);--warn:#c49339;--warn-bg:rgba(196,147,57,.08);--border:rgba(0,0,0,.05);--border2:rgba(0,0,0,.08);--border-accent:rgba(80,112,208,.2);--shadow:0 20px 50px rgba(0,0,0,.07),0 0 0 1px rgba(0,0,0,.04);--shadow-lg:0 25px 70px rgba(0,0,0,.1);--glow-accent:0 0 15px rgba(80,112,208,.1);--scrollbar:var(--accent);--scrollbar-hover:var(--accent-light)}
 #ldsp-panel.collapsed{width:48px!important;height:48px!important;border-radius:var(--r-md);cursor:pointer;touch-action:none;background:linear-gradient(135deg,#7a9bf5 0%,#5a7de0 50%,#5bb5a6 100%);border:none;box-shadow:var(--shadow),0 0 20px rgba(107,140,239,.35)}
-#ldsp-panel.collapsed .ldsp-hdr{padding:0;justify-content:center;align-items:center;height:100%;background:0 0}
+#ldsp-panel.collapsed .ldsp-hdr{padding:0;justify-content:center;align-items:center;height:100%;background:0 0;min-height:0}
 #ldsp-panel.collapsed .ldsp-hdr-info{opacity:0;visibility:hidden;pointer-events:none;position:absolute;transform:translateX(-10px)}
 #ldsp-panel.collapsed .ldsp-body{display:none!important}
 #ldsp-panel.collapsed .ldsp-hdr-btns>button:not(.ldsp-toggle){opacity:0;visibility:hidden;pointer-events:none;transform:scale(0.8);position:absolute}
-#ldsp-panel.collapsed .ldsp-hdr-btns{justify-content:center;width:100%;height:100%}
+#ldsp-panel.collapsed .ldsp-hdr-btns{justify-content:center;width:100%;height:100%;margin-left:0}
 #ldsp-panel.collapsed,#ldsp-panel.collapsed *{cursor:pointer!important}
-#ldsp-panel.collapsed .ldsp-toggle{width:100%;height:100%;font-size:18px;background:0 0;display:flex;align-items:center;justify-content:center;color:#fff;position:absolute;inset:0}
+#ldsp-panel.collapsed .ldsp-toggle{width:100%;height:100%;font-size:18px;background:0 0;display:flex;align-items:center;justify-content:center;color:#fff;position:absolute;inset:0;margin:0;padding:0;box-sizing:border-box}
 #ldsp-panel.collapsed .ldsp-toggle .ldsp-toggle-arrow{display:none}
 #ldsp-panel.collapsed .ldsp-toggle .ldsp-toggle-logo{display:block;width:24px;height:24px;filter:brightness(1.05) drop-shadow(0 0 2px rgba(140,180,255,.2));transition:filter .2s var(--ease),transform .2s var(--ease)}
 #ldsp-panel:not(.collapsed) .ldsp-toggle .ldsp-toggle-logo{display:none}
 @media (hover:hover){#ldsp-panel.collapsed:hover{transform:scale(1.08);box-shadow:var(--shadow-lg),0 0 35px rgba(120,160,255,.6)}#ldsp-panel.collapsed:hover .ldsp-toggle-logo{filter:brightness(1.6) drop-shadow(0 0 12px rgba(160,200,255,1)) drop-shadow(0 0 20px rgba(140,180,255,.8));transform:scale(1.15) rotate(360deg);transition:filter .3s var(--ease),transform .6s var(--ease-spring)}}
 #ldsp-panel.collapsed:active .ldsp-toggle-logo{filter:brightness(2) drop-shadow(0 0 16px rgba(200,230,255,1)) drop-shadow(0 0 30px rgba(160,200,255,1));transform:scale(0.92)}
 #ldsp-panel.collapsed.no-hover-effect{transform:none!important}#ldsp-panel.collapsed.no-hover-effect .ldsp-toggle-logo{filter:brightness(1.05) drop-shadow(0 0 2px rgba(140,180,255,.2))!important;transform:none!important}
-.ldsp-hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--grad);cursor:move;user-select:none;touch-action:none;position:relative;gap:8px}
+.ldsp-hdr{display:flex;align-items:center;padding:10px 12px;background:var(--grad);cursor:move;user-select:none;touch-action:none;position:relative;gap:8px;min-height:52px;box-sizing:border-box;flex-shrink:0}
 .ldsp-hdr::before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.1) 0%,transparent 100%);pointer-events:none}
 .ldsp-hdr::after{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle,rgba(255,255,255,.1) 0%,transparent 60%);opacity:0;transition:opacity .5s;pointer-events:none}
 .ldsp-hdr:hover::after{opacity:1}
-.ldsp-hdr-info{display:flex;align-items:center;gap:8px;min-width:0;flex:1;position:relative;z-index:1;transition:opacity .25s var(--ease),visibility .25s,transform .25s var(--ease);overflow:hidden}
-.ldsp-site-wrap{display:flex;flex-direction:column;align-items:center;gap:4px;flex-shrink:0;position:relative;padding:2px}
-.ldsp-site-wrap::after{content:'点击退出登录';position:absolute;bottom:-20px;left:50%;transform:translateX(-50%) translateY(4px);background:rgba(0,0,0,.75);color:#fff;padding:3px 8px;border-radius:6px;font-size:8px;white-space:nowrap;opacity:0;pointer-events:none;transition:transform .2s var(--ease),opacity .2s;z-index:10}
-.ldsp-site-wrap:hover::after{opacity:1;transform:translateX(-50%) translateY(0)}
-.ldsp-site-icon{width:28px;height:28px;border-radius:8px;border:2px solid rgba(255,255,255,.25);flex-shrink:0;box-shadow:0 2px 8px rgba(0,0,0,.2);transition:transform .2s var(--ease),border-color .2s}
-.ldsp-site-icon:hover{transform:scale(1.05) rotate(-5deg);border-color:rgba(255,255,255,.5)}
-.ldsp-hdr-text{display:flex;flex-direction:column;align-items:flex-start;gap:2px;min-width:0;flex:1 1 0;overflow:hidden}
-.ldsp-title{font-weight:800;font-size:15px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2;letter-spacing:-.02em;text-shadow:0 1px 2px rgba(0,0,0,.2)}
-.ldsp-ver{font-size:11px;color:rgba(255,255,255,.6);line-height:1.3;display:flex;flex-wrap:nowrap;align-items:center;gap:3px 6px;overflow:hidden;max-width:100%}
+.ldsp-hdr-info{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 auto;position:relative;z-index:1;transition:opacity .25s var(--ease),visibility .25s,transform .25s var(--ease);overflow:hidden}
+.ldsp-site-wrap{display:flex;flex-direction:column;align-items:center;gap:3px;flex-shrink:0;position:relative}
+.ldsp-site-icon{width:26px;height:26px;border-radius:7px;border:2px solid rgba(255,255,255,.25);flex-shrink:0;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+.ldsp-hdr-text{display:flex;flex-direction:column;align-items:flex-start;gap:1px;min-width:0;flex:1 1 0;overflow:hidden}
+.ldsp-title{font-weight:800;font-size:14px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2;letter-spacing:-.02em;text-shadow:0 1px 2px rgba(0,0,0,.2);max-width:100%}
+.ldsp-ver{font-size:10px;color:rgba(255,255,255,.6);line-height:1.2;display:flex;align-items:center;gap:4px;overflow:hidden;max-width:100%}
 .ldsp-learn-trust{display:block;text-align:center;margin-top:8px;font-size:10px;color:var(--txt-dim);text-decoration:none;opacity:.6;transition:opacity .15s,color .15s}
 .ldsp-learn-trust:hover{opacity:1;color:var(--txt-sec)}
-.ldsp-app-name{font-size:11px;font-weight:700;white-space:nowrap;background:linear-gradient(90deg,#a8c0f8,#7a9eef,#7cc9bc,#7a9eef,#a8c0f8);background-size:200% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:gradient-shift 6s ease infinite;will-change:background-position}
+.ldsp-app-name{font-size:10px;font-weight:700;white-space:nowrap;background:linear-gradient(90deg,#a8c0f8,#7a9eef,#7cc9bc,#7a9eef,#a8c0f8);background-size:200% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:gradient-shift 6s ease infinite;will-change:background-position}
 @keyframes gradient-shift{0%{background-position:0% center}50%{background-position:100% center}100%{background-position:0% center}}
 .ldsp-ver-num{background:rgba(255,255,255,.2);padding:2px 8px;border-radius:10px;color:#fff;font-weight:600;font-size:9px;backdrop-filter:blur(4px)}
-.ldsp-site-ver{font-size:10px;color:#fff;text-align:center;font-weight:700;background:rgba(0,0,0,.25);padding:2px 7px;border-radius:6px;letter-spacing:.02em}
-.ldsp-hdr-btns{display:flex;gap:6px;flex-shrink:0;position:relative;z-index:1}
-.ldsp-hdr-btns button{width:30px;height:30px;border:none;background:rgba(255,255,255,.12);color:#fff;border-radius:var(--r-sm);font-size:13px;display:flex;align-items:center;justify-content:center;flex-shrink:0;outline:none;-webkit-tap-highlight-color:transparent;backdrop-filter:blur(4px);transition:transform .25s var(--ease),background .15s,box-shadow .2s,opacity .2s,visibility .2s}
+.ldsp-site-ver{font-size:9px;color:#fff;text-align:center;font-weight:700;background:rgba(0,0,0,.25);padding:1px 5px;border-radius:5px;letter-spacing:.02em}
+.ldsp-hdr-btns{display:flex;gap:4px;flex-shrink:0;position:relative;z-index:1;margin-left:auto}
+.ldsp-hdr-btns button{width:28px;height:28px;border:none;background:rgba(255,255,255,.12);color:#fff;border-radius:var(--r-sm);font-size:12px;display:flex;align-items:center;justify-content:center;flex-shrink:0;outline:none;-webkit-tap-highlight-color:transparent;backdrop-filter:blur(4px);transition:transform .25s var(--ease),background .15s,box-shadow .2s,opacity .2s,visibility .2s}
 .ldsp-hdr-btns button:hover{background:rgba(255,255,255,.25);transform:translateY(-2px) scale(1.05);box-shadow:0 4px 12px rgba(0,0,0,.2)}
 .ldsp-hdr-btns button:active{transform:translateY(0) scale(.95)}
 .ldsp-hdr-btns button:focus{outline:none}
@@ -2369,9 +2337,9 @@
 .ldsp-update-bubble-btn:hover{transform:translateY(-2px) scale(1.02);box-shadow:0 6px 20px rgba(107,140,239,.4)}
 .ldsp-update-bubble-btn:active{transform:translateY(0) scale(.98)}
 .ldsp-update-bubble-btn:disabled{opacity:.6;cursor:not-allowed;transform:none!important}
-.ldsp-body{background:var(--bg);position:relative;overflow:hidden}
-.ldsp-announcement{overflow:hidden;background:linear-gradient(90deg,rgba(59,130,246,.1),rgba(107,140,239,.1));border-bottom:1px solid var(--border);padding:0;height:0;opacity:0;transition:height .3s var(--ease),opacity .3s,padding .3s}
-.ldsp-announcement.active{height:24px;opacity:1;padding:0 10px}
+.ldsp-body{background:var(--bg);position:relative;overflow:hidden;display:flex;flex-direction:column;flex:1;min-height:0}
+.ldsp-announcement{overflow:hidden;background:linear-gradient(90deg,rgba(59,130,246,.1),rgba(107,140,239,.1));border-bottom:1px solid var(--border);padding:0;height:0;opacity:0;transition:height .3s var(--ease),opacity .3s,padding .3s;flex-shrink:0}
+.ldsp-announcement.active{height:24px;min-height:24px;opacity:1;padding:0 10px}
 .ldsp-announcement.warning{background:linear-gradient(90deg,rgba(245,158,11,.15),rgba(239,68,68,.08))}
 .ldsp-announcement.success{background:linear-gradient(90deg,rgba(16,185,129,.12),rgba(34,197,94,.08))}
 .ldsp-announcement-inner{display:flex;align-items:center;height:24px;white-space:nowrap;animation:marquee var(--marquee-duration,20s) linear forwards}
@@ -2381,7 +2349,7 @@
 .ldsp-announcement.warning .ldsp-announcement-text::before{content:'⚠️'}
 .ldsp-announcement.success .ldsp-announcement-text::before{content:'🎉'}
 @keyframes marquee{0%{transform:translateX(100%)}100%{transform:translateX(-100%)}}
-.ldsp-user{display:flex;align-items:stretch;gap:10px;padding:10px var(--pd) 22px;background:var(--bg-card);border-bottom:1px solid var(--border);position:relative;overflow:visible}
+.ldsp-user{display:flex;align-items:stretch;gap:10px;padding:10px var(--pd) 24px;background:var(--bg-card);border-bottom:1px solid var(--border);position:relative;overflow:hidden;flex-shrink:0}
 .ldsp-user::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--accent),transparent);opacity:.3}
 .ldsp-user-left{display:flex;flex-direction:column;flex:1;min-width:0;gap:8px}
 .ldsp-user-row{display:flex;align-items:center;gap:10px}
@@ -2411,7 +2379,7 @@
 .ldsp-reading-time{font-size:13px;font-weight:800;letter-spacing:-.02em}
 .ldsp-reading-label{font-size:9px;opacity:.85;margin-top:2px;font-weight:600;letter-spacing:.02em}
 .ldsp-reading{--rc:#94a3b8}
-.ldsp-reading::after{content:'未活动 已停止记录';position:absolute;bottom:-14px;left:50%;transform:translateX(-50%);font-size:8px;color:var(--err);white-space:nowrap;font-weight:600;letter-spacing:.02em;opacity:.8}
+.ldsp-reading::after{content:'未活动 已停止记录';position:absolute;bottom:-16px;left:50%;transform:translateX(-50%);font-size:8px;color:var(--err);white-space:nowrap;font-weight:600;letter-spacing:.02em;opacity:.8}
 .ldsp-reading.tracking{animation:reading-glow 3.5s ease-in-out infinite;will-change:box-shadow}
 .ldsp-reading.tracking::after{content:'阅读时间记录中...';color:var(--rc);opacity:1}
 @keyframes reading-glow{0%,100%{box-shadow:0 0 8px color-mix(in srgb,var(--rc) 40%,transparent),0 0 16px color-mix(in srgb,var(--rc) 20%,transparent),0 0 24px color-mix(in srgb,var(--rc) 10%,transparent)}50%{box-shadow:0 0 16px color-mix(in srgb,var(--rc) 60%,transparent),0 0 32px color-mix(in srgb,var(--rc) 35%,transparent),0 0 48px color-mix(in srgb,var(--rc) 15%,transparent)}}
@@ -2427,15 +2395,17 @@
 .ldsp-reading.max .ldsp-reading-icon{animation:crown 2s ease-in-out infinite;will-change:transform}
 @keyframes crown{0%,100%{transform:rotate(-5deg) scale(1)}50%{transform:rotate(5deg) scale(1.1)}}
 
-.ldsp-tabs{display:flex;padding:10px 12px;gap:8px;background:var(--bg);border-bottom:1px solid var(--border)}
+.ldsp-tabs{display:flex;padding:10px 12px;gap:8px;background:var(--bg);border-bottom:1px solid var(--border);flex-shrink:0}
 .ldsp-tab{flex:1;padding:8px 12px;border:none;background:var(--bg-card);color:var(--txt-sec);border-radius:var(--r-sm);font-size:11px;font-weight:600;transition:background .15s,color .15s,border-color .15s,box-shadow .2s;border:1px solid transparent}
 .ldsp-tab:hover{background:var(--bg-hover);color:var(--txt);border-color:var(--border2);transform:translateY(-1px)}
 .ldsp-tab.active{background:var(--grad);color:#fff;box-shadow:0 4px 15px rgba(107,140,239,.3);border-color:transparent}
-.ldsp-content{flex:1;max-height:calc(var(--h) - 180px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--accent) transparent}
-.ldsp-content::-webkit-scrollbar{width:6px}
+.ldsp-content{flex:1 1 auto;min-height:0;max-height:calc(var(--h) - 180px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:transparent transparent}
+.ldsp-content.scrolling{scrollbar-color:var(--scrollbar) transparent}
+.ldsp-content::-webkit-scrollbar{width:6px;background:transparent}
 .ldsp-content::-webkit-scrollbar-track{background:transparent}
-.ldsp-content::-webkit-scrollbar-thumb{background:linear-gradient(180deg,var(--accent),var(--accent2));border-radius:4px}
-.ldsp-content::-webkit-scrollbar-thumb:hover{background:var(--accent-light)}
+.ldsp-content::-webkit-scrollbar-thumb{background:transparent;border-radius:4px;transition:background .3s}
+.ldsp-content.scrolling::-webkit-scrollbar-thumb{background:var(--scrollbar)}
+.ldsp-content::-webkit-scrollbar-button{width:0;height:0;display:none}
 .ldsp-section{display:none;padding:10px}
 .ldsp-section.active{display:block;animation:enter var(--dur) var(--ease-out)}
 @keyframes enter{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
@@ -2497,10 +2467,13 @@
 @keyframes pop{from{transform:scale(0) rotate(-10deg);opacity:0}to{transform:scale(1) rotate(0);opacity:1}}
 .ldsp-item-chg.up{background:var(--ok-bg);color:var(--ok);box-shadow:0 2px 8px rgba(16,185,129,.2)}
 .ldsp-item-chg.down{background:var(--err-bg);color:var(--err);box-shadow:0 2px 8px rgba(244,63,94,.2)}
-.ldsp-subtabs{display:flex;align-items:center;gap:6px;padding:1px 0 6px;overflow-x:auto;scrollbar-width:thin;scrollbar-color:var(--accent) transparent}
-.ldsp-subtabs::-webkit-scrollbar{height:4px}
-.ldsp-subtabs::-webkit-scrollbar-track{background:var(--bg-el);border-radius:2px}
-.ldsp-subtabs::-webkit-scrollbar-thumb{background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:2px}
+.ldsp-subtabs{display:flex;align-items:center;gap:6px;padding:1px 0 6px;overflow-x:auto;scrollbar-width:thin;scrollbar-color:transparent transparent}
+.ldsp-subtabs.scrolling{scrollbar-color:var(--scrollbar) transparent}
+.ldsp-subtabs::-webkit-scrollbar{height:4px;background:transparent}
+.ldsp-subtabs::-webkit-scrollbar-track{background:transparent;border-radius:2px}
+.ldsp-subtabs::-webkit-scrollbar-thumb{background:transparent;border-radius:2px;transition:background .3s}
+.ldsp-subtabs.scrolling::-webkit-scrollbar-thumb{background:var(--scrollbar)}
+.ldsp-subtabs::-webkit-scrollbar-button{width:0;height:0;display:none}
 .ldsp-subtab{padding:6px 12px;border:1px solid var(--border2);background:var(--bg-card);color:var(--txt-sec);border-radius:20px;font-size:10px;font-weight:600;white-space:nowrap;flex-shrink:0;transition:background .15s,color .15s,border-color .15s}
 .ldsp-subtab:hover{border-color:var(--accent);color:var(--accent);background:rgba(107,140,239,.08);transform:translateY(-1px)}
 .ldsp-subtab.active{background:var(--grad);border-color:transparent;color:#fff;box-shadow:0 4px 12px rgba(107,140,239,.25)}
@@ -2564,11 +2537,13 @@
 .ldsp-today-stat-lbl{font-size:10px;color:var(--txt-mut);margin-top:4px;font-weight:500}
 .ldsp-time-info{font-size:10px;color:var(--txt-mut);text-align:center;padding:8px 10px;background:var(--bg-card);border-radius:var(--r-sm);margin-bottom:10px;border:1px solid var(--border);font-weight:500}
 .ldsp-time-info span{color:var(--accent);font-weight:700}
-.ldsp-year-heatmap{padding:10px 14px 10px 0;overflow-x:hidden;overflow-y:auto;max-height:320px;scrollbar-width:thin;scrollbar-color:var(--border2) transparent}
-.ldsp-year-heatmap::-webkit-scrollbar{width:4px}
+.ldsp-year-heatmap{padding:10px 14px 10px 0;overflow-x:hidden;overflow-y:auto;max-height:320px;scrollbar-width:thin;scrollbar-color:transparent transparent}
+.ldsp-year-heatmap.scrolling{scrollbar-color:var(--scrollbar) transparent}
+.ldsp-year-heatmap::-webkit-scrollbar{width:6px;background:transparent}
 .ldsp-year-heatmap::-webkit-scrollbar-track{background:transparent}
-.ldsp-year-heatmap::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px}
-.ldsp-year-heatmap::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+.ldsp-year-heatmap::-webkit-scrollbar-thumb{background:transparent;border-radius:4px;transition:background .3s}
+.ldsp-year-heatmap.scrolling::-webkit-scrollbar-thumb{background:var(--scrollbar)}
+.ldsp-year-heatmap::-webkit-scrollbar-button{width:0;height:0;display:none}
 .ldsp-year-wrap{display:flex;flex-direction:column;gap:3px;width:100%;padding-right:6px}
 .ldsp-year-row{display:flex;align-items:center;gap:4px;width:100%;position:relative}
 .ldsp-year-month{width:28px;font-size:8px;font-weight:600;color:var(--txt-mut);text-align:right;flex-shrink:0;line-height:1;position:absolute;left:0;top:50%;transform:translateY(-50%)}
@@ -2576,10 +2551,10 @@
 .ldsp-year-cell{width:100%;aspect-ratio:1;border-radius:3px;background:var(--bg-card);border:1px solid var(--border);position:relative;transition:transform .15s var(--ease),box-shadow .15s}
 .ldsp-year-cell:hover{transform:scale(1.6);box-shadow:0 4px 15px rgba(107,140,239,.4);border-color:var(--accent);z-index:10}
 .ldsp-year-cell.l0{background:rgba(107,140,239,.1);border-color:rgba(107,140,239,.18)}
-.ldsp-year-cell.l1{background:rgba(107,140,239,.25);border-color:rgba(107,140,239,.35)}
-.ldsp-year-cell.l2{background:rgba(107,140,239,.42);border-color:rgba(107,140,239,.52)}
-.ldsp-year-cell.l3{background:rgba(91,181,166,.5);border-color:rgba(91,181,166,.6)}
-.ldsp-year-cell.l4{background:linear-gradient(135deg,var(--accent),var(--accent2));border-color:var(--accent);box-shadow:0 0 8px rgba(107,140,239,.3)}
+.ldsp-year-cell.l1{background:rgba(180,230,210,.35);border-color:rgba(180,230,210,.45)}
+.ldsp-year-cell.l2{background:rgba(130,215,180,.5);border-color:rgba(130,215,180,.6)}
+.ldsp-year-cell.l3{background:rgba(90,195,155,.65);border-color:rgba(90,195,155,.75)}
+.ldsp-year-cell.l4{background:linear-gradient(135deg,#6dcfa5,#50c090);border-color:#6dcfa5;box-shadow:0 0 8px rgba(109,207,165,.4)}
 .ldsp-year-cell.empty{background:0 0;border-color:transparent;cursor:default}
 .ldsp-year-cell.empty:hover{transform:none;box-shadow:none}
 .ldsp-year-tip{position:absolute;left:50%;transform:translateX(-50%);background:var(--bg-el);padding:5px 8px;border-radius:6px;font-size:9px;white-space:nowrap;opacity:0;pointer-events:none;border:1px solid var(--border2);z-index:1000;line-height:1.3;box-shadow:0 4px 15px rgba(0,0,0,.25);font-weight:500}
@@ -2619,7 +2594,28 @@
 .ldsp-modal-btn.primary:active{transform:translateY(0)}
 .ldsp-modal-btn.secondary{background:var(--bg-el);color:var(--txt-sec);border:1px solid var(--border2)}
 .ldsp-modal-btn.secondary:hover{background:var(--bg-hover);border-color:var(--border-accent)}
+.ldsp-modal-btn.danger{background:var(--grad-warm);color:#fff;box-shadow:0 4px 15px rgba(224,122,141,.3)}
+.ldsp-modal-btn.danger:hover{transform:translateY(-2px);box-shadow:0 8px 25px rgba(224,122,141,.4)}
+.ldsp-modal-btn.danger:active{transform:translateY(0)}
 .ldsp-modal-note{margin-top:14px;font-size:11px;color:var(--txt-mut);text-align:center;font-weight:500}
+.ldsp-confirm-overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(18,19,26,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:center;z-index:20;opacity:0;pointer-events:none;transition:opacity .3s var(--ease);border-radius:inherit}
+.ldsp-confirm-overlay.show{opacity:1;pointer-events:auto}
+.ldsp-confirm-box{background:linear-gradient(145deg,var(--bg-card),var(--bg));border-radius:var(--r-lg);padding:24px 20px;width:calc(100% - 40px);max-width:260px;box-shadow:var(--shadow-lg),0 0 40px rgba(224,122,141,.1);transform:scale(.92) translateY(20px);transition:transform .35s var(--ease-spring);border:1px solid var(--border2);position:relative;overflow:hidden}
+.ldsp-confirm-box::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--grad-warm);opacity:.8}
+.ldsp-confirm-overlay.show .ldsp-confirm-box{transform:scale(1) translateY(0)}
+.ldsp-confirm-icon{text-align:center;font-size:40px;margin-bottom:14px;filter:drop-shadow(0 4px 8px rgba(224,122,141,.3));animation:confirm-icon-bounce .5s var(--ease-spring) .1s both}
+@keyframes confirm-icon-bounce{0%{transform:scale(0) rotate(-20deg);opacity:0}60%{transform:scale(1.15) rotate(5deg)}100%{transform:scale(1) rotate(0);opacity:1}}
+.ldsp-confirm-title{text-align:center;font-size:16px;font-weight:700;margin-bottom:10px;color:var(--txt);letter-spacing:-.02em}
+.ldsp-confirm-msg{text-align:center;font-size:12px;color:var(--txt-sec);line-height:1.7;margin-bottom:20px;padding:0 4px}
+.ldsp-confirm-btns{display:flex;gap:10px}
+.ldsp-confirm-btn{flex:1;padding:11px 14px;border:none;border-radius:var(--r-sm);font-size:12px;font-weight:600;transition:background .15s,transform .15s,box-shadow .15s,border-color .15s;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+.ldsp-confirm-btn.cancel{background:var(--bg-el);color:var(--txt-sec);border:1px solid var(--border2)}
+@media (hover:hover){.ldsp-confirm-btn.cancel:hover{background:var(--bg-hover);border-color:var(--border-accent)}}
+.ldsp-confirm-btn.confirm{background:var(--grad-warm);color:#fff;box-shadow:0 4px 15px rgba(224,122,141,.3);border:none}
+@media (hover:hover){.ldsp-confirm-btn.confirm:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(224,122,141,.4)}}
+.ldsp-confirm-btn:active{transform:scale(.96)}
+@media (max-width:480px){.ldsp-confirm-box{padding:20px 16px;max-width:240px}.ldsp-confirm-icon{font-size:36px;margin-bottom:12px}.ldsp-confirm-title{font-size:14px}.ldsp-confirm-msg{font-size:11px;margin-bottom:16px}.ldsp-confirm-btn{padding:10px 12px;font-size:11px}}
+@media (max-width:320px){.ldsp-confirm-box{padding:16px 12px;max-width:220px;width:calc(100% - 24px)}.ldsp-confirm-icon{font-size:32px;margin-bottom:10px}.ldsp-confirm-title{font-size:13px}.ldsp-confirm-msg{font-size:10px;margin-bottom:14px;line-height:1.6}.ldsp-confirm-btns{gap:8px}.ldsp-confirm-btn{padding:9px 10px;font-size:10px}}
 .ldsp-no-chg{text-align:center;padding:18px;color:var(--txt-mut);font-size:11px;font-weight:500}
 .ldsp-lb-hdr{display:flex;align-items:center;justify-content:space-between;padding:12px;background:var(--bg-card);border-radius:var(--r-md);margin-bottom:10px;border:1px solid var(--border)}
 .ldsp-lb-status{display:flex;align-items:center;gap:10px}
@@ -2693,16 +2689,20 @@
 @media (min-width:1920px){#ldsp-panel{--w:340px;--fs:13px;--pd:16px;--av:50px;--ring:85px}}
 @media (max-height:700px){#ldsp-panel{top:60px}.ldsp-content{max-height:calc(100vh - 240px)}}
 @media (max-width:1200px){#ldsp-panel{right:10px;left:auto}}
-@media (max-width:768px){#ldsp-panel{--w:290px;--fs:12px;--pd:11px;right:8px;left:auto;top:60px}#ldsp-panel.collapsed{width:42px!important;height:42px!important}#ldsp-panel.collapsed .ldsp-toggle{font-size:16px}.ldsp-hdr{padding:8px 10px}.ldsp-hdr-info{gap:6px;flex:1;min-width:0;overflow:hidden}.ldsp-hdr-text{gap:1px;min-width:0}.ldsp-site-wrap{padding:1px}.ldsp-site-icon{width:22px;height:22px;border-radius:6px}.ldsp-site-ver{font-size:8px;padding:1px 5px}.ldsp-title{font-size:12px;max-width:100%}.ldsp-ver{font-size:8px}.ldsp-app-name{font-size:10px}.ldsp-hdr-btns{gap:3px;flex-shrink:0}.ldsp-hdr-btns button{width:26px;height:26px;font-size:11px}.ldsp-update-bubble{width:200px;padding:14px 16px}.ldsp-content{max-height:calc(100vh - 240px)}.ldsp-rank-item{padding:10px}.ldsp-rank-num{width:26px;height:26px}.ldsp-rank-avatar{width:30px;height:30px}.ldsp-learn-trust{font-size:9px}}
-@media (max-width:480px){#ldsp-panel{--w:270px;--av:36px;--ring:68px;right:6px;left:auto;top:55px;border-radius:var(--r-md);max-height:60vh}#ldsp-panel.collapsed{width:38px!important;height:38px!important;border-radius:10px;max-height:none}#ldsp-panel.collapsed .ldsp-toggle{font-size:14px}.ldsp-hdr{padding:6px 8px;gap:4px}.ldsp-hdr-info{gap:4px;min-width:0;overflow:hidden}.ldsp-hdr-text{gap:0;min-width:0}.ldsp-site-wrap{padding:1px}.ldsp-site-icon{width:18px;height:18px;border-radius:5px}.ldsp-site-ver{font-size:7px;padding:1px 4px}.ldsp-site-wrap::after{display:none}.ldsp-title{font-size:10px}.ldsp-ver{font-size:7px}.ldsp-app-name{font-size:8px}.ldsp-hdr-btns{gap:2px}.ldsp-hdr-btns button{width:22px;height:22px;font-size:10px;border-radius:5px}.ldsp-user{padding:8px;gap:8px}.ldsp-user-actions{gap:4px}.ldsp-action-btn{padding:4px 6px;font-size:9px;flex:0 1 calc(50% - 2px)}.ldsp-action-btn:only-child{flex:0 1 auto}.ldsp-reading{min-width:60px;padding:5px 8px}.ldsp-reading-icon{font-size:16px}.ldsp-reading-time{font-size:10px}.ldsp-reading-label{font-size:7px}.ldsp-tabs{padding:8px 10px;gap:6px}.ldsp-tab{padding:6px 10px;font-size:10px;border-radius:var(--r-sm)}.ldsp-section{padding:8px}.ldsp-content{max-height:calc(60vh - 180px)}.ldsp-rank-item{padding:8px 10px}.ldsp-rank-num{width:24px;height:24px;font-size:10px;border-radius:8px}.ldsp-rank-avatar{width:28px;height:28px;border-radius:8px}.ldsp-rank-display-name,.ldsp-rank-name-only{font-size:11px}.ldsp-rank-time{font-size:12px}.ldsp-my-rank{padding:10px}.ldsp-my-rank-val{font-size:16px}.ldsp-subtab{padding:5px 10px;font-size:9px}.ldsp-learn-trust{font-size:8px}}
-@media (max-height:500px){#ldsp-panel{top:40px}.ldsp-content{max-height:calc(100vh - 180px)}.ldsp-user{padding:8px}.ldsp-user-actions{display:none}.ldsp-tabs{padding:6px 8px}.ldsp-section{padding:6px}}
-.ldsp-action-btn{display:inline-flex;align-items:center;gap:4px;padding:5px 10px;background:linear-gradient(135deg,rgba(107,140,239,.08),rgba(90,125,224,.12));border:1px solid rgba(107,140,239,.2);border-radius:8px;font-size:10px;color:var(--accent);transition:background .15s,border-color .15s,transform .2s var(--ease);font-weight:600;white-space:nowrap;flex:0 1 calc(50% - 3px);min-width:60px;justify-content:center}
-.ldsp-action-btn:hover{background:linear-gradient(135deg,rgba(107,140,239,.15),rgba(90,125,224,.2));border-color:var(--accent);box-shadow:0 4px 12px rgba(107,140,239,.18)}
+@media (max-width:768px){#ldsp-panel{--w:280px;--fs:12px;--pd:11px;right:8px;left:auto;top:60px}#ldsp-panel.collapsed{width:42px!important;height:42px!important;border-radius:12px}#ldsp-panel.collapsed .ldsp-toggle{font-size:16px}#ldsp-panel.collapsed .ldsp-toggle-logo{width:22px;height:22px}.ldsp-hdr{padding:8px 10px;gap:6px;min-height:46px}.ldsp-hdr-info{gap:6px}.ldsp-hdr-text{gap:0}.ldsp-site-icon{width:22px;height:22px;border-radius:6px}.ldsp-site-ver{font-size:8px;padding:1px 4px}.ldsp-title{font-size:12px}.ldsp-ver{font-size:8px}.ldsp-app-name{font-size:9px}.ldsp-hdr-btns{gap:3px}.ldsp-hdr-btns button{width:24px;height:24px;font-size:11px}.ldsp-update-bubble{width:200px;padding:14px 16px}.ldsp-content{max-height:calc(100vh - 240px)}.ldsp-rank-item{padding:10px}.ldsp-rank-num{width:26px;height:26px}.ldsp-rank-avatar{width:30px;height:30px}.ldsp-learn-trust{font-size:9px}}
+@media (max-width:480px){#ldsp-panel{--w:260px;--av:36px;--ring:68px;right:6px;left:auto;top:55px;border-radius:var(--r-md);max-height:70vh}#ldsp-panel.collapsed{width:38px!important;height:38px!important;border-radius:10px;max-height:none}#ldsp-panel.collapsed .ldsp-toggle{font-size:14px}#ldsp-panel.collapsed .ldsp-toggle-logo{width:20px;height:20px}.ldsp-hdr{padding:6px 8px;gap:4px;min-height:40px}.ldsp-hdr-info{gap:4px}.ldsp-hdr-text{gap:0}.ldsp-site-icon{width:18px;height:18px;border-radius:5px}.ldsp-site-ver{font-size:7px;padding:1px 3px}.ldsp-site-wrap::after{display:none}.ldsp-title{font-size:10px}.ldsp-ver{font-size:7px}.ldsp-app-name{font-size:8px}.ldsp-hdr-btns{gap:2px}.ldsp-hdr-btns button{width:22px;height:22px;font-size:10px;border-radius:5px}.ldsp-user{padding:8px 8px 20px;gap:8px}.ldsp-reading::after{bottom:-12px;font-size:7px}.ldsp-user-actions{gap:4px}.ldsp-action-btn{padding:4px 6px;font-size:9px;flex:0 1 calc(50% - 2px)}.ldsp-action-btn:only-child{flex:0 1 auto}.ldsp-reading{min-width:60px;padding:5px 8px}.ldsp-reading-icon{font-size:16px}.ldsp-reading-time{font-size:10px}.ldsp-reading-label{font-size:7px}.ldsp-tabs{padding:8px 10px;gap:6px}.ldsp-tab{padding:6px 10px;font-size:10px;border-radius:var(--r-sm)}.ldsp-section{padding:8px}.ldsp-content{max-height:none}.ldsp-rank-item{padding:8px 10px}.ldsp-rank-num{width:24px;height:24px;font-size:10px;border-radius:8px}.ldsp-rank-avatar{width:28px;height:28px;border-radius:8px}.ldsp-rank-display-name,.ldsp-rank-name-only{font-size:11px}.ldsp-rank-time{font-size:12px}.ldsp-my-rank{padding:10px}.ldsp-my-rank-val{font-size:16px}.ldsp-subtab{padding:5px 10px;font-size:9px}.ldsp-learn-trust{font-size:8px}}
+@media (max-height:500px){#ldsp-panel{top:40px}.ldsp-content{max-height:calc(100vh - 180px)}.ldsp-user{padding:8px 8px 18px}.ldsp-user-actions{display:none}.ldsp-tabs{padding:6px 8px}.ldsp-section{padding:6px}}
+.ldsp-action-btn{display:inline-flex;align-items:center;gap:4px;padding:5px 10px;background:linear-gradient(135deg,rgba(107,140,239,.08),rgba(90,125,224,.12));border:1px solid rgba(107,140,239,.2);border-radius:8px;font-size:10px;color:var(--accent);transition:background .15s,border-color .15s,transform .15s,box-shadow .15s;font-weight:600;white-space:nowrap;flex:0 1 calc(50% - 3px);min-width:60px;justify-content:center;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+@media (hover:hover){.ldsp-action-btn:hover{background:linear-gradient(135deg,rgba(107,140,239,.15),rgba(90,125,224,.2));border-color:var(--accent);box-shadow:0 4px 12px rgba(107,140,239,.18)}}
+.ldsp-action-btn:active{background:linear-gradient(135deg,rgba(107,140,239,.18),rgba(90,125,224,.24));transform:scale(.97)}
 .ldsp-action-btn:only-child{flex:0 1 auto}
 .ldsp-action-btn .ldsp-action-icon{flex-shrink:0}
 .ldsp-action-btn .ldsp-action-text{overflow:hidden;text-overflow:ellipsis}
-@media (max-width:320px){.ldsp-hdr{padding:5px 6px;gap:3px}.ldsp-hdr-info{gap:3px}.ldsp-site-icon{width:16px;height:16px;border-radius:4px}.ldsp-site-ver{display:none}.ldsp-title{font-size:9px}.ldsp-app-name{display:none}.ldsp-hdr-btns button{width:20px;height:20px;font-size:9px}.ldsp-user-actions{flex-direction:column}.ldsp-action-btn{flex:1 1 100%;min-width:0}}
-.ldsp-ticket-btn{}
+@media (max-width:320px){#ldsp-panel{--w:240px}#ldsp-panel.collapsed{width:34px!important;height:34px!important;border-radius:8px}#ldsp-panel.collapsed .ldsp-toggle-logo{width:18px;height:18px}.ldsp-hdr{padding:5px 6px;gap:3px;min-height:36px}.ldsp-hdr-info{gap:3px}.ldsp-site-icon{width:16px;height:16px;border-radius:4px;border-width:1px}.ldsp-site-ver{display:none}.ldsp-title{font-size:9px}.ldsp-app-name{display:none}.ldsp-hdr-btns{gap:2px}.ldsp-hdr-btns button{width:20px;height:20px;font-size:9px;border-radius:4px}.ldsp-user-actions{flex-direction:column}.ldsp-action-btn{flex:1 1 100%;min-width:0}}
+.ldsp-logout-btn,.ldsp-ticket-btn{flex:0 0 auto;min-width:auto;padding:5px 8px}
+.ldsp-login-btn{flex:1 1 100%;background:linear-gradient(135deg,rgba(212,168,83,.15),rgba(196,147,57,.2));border-color:rgba(212,168,83,.3);color:var(--warn);animation:login-pulse 2.5s ease-in-out infinite}
+.ldsp-login-btn:hover{background:linear-gradient(135deg,rgba(212,168,83,.25),rgba(196,147,57,.3));border-color:var(--warn)}
+@keyframes login-pulse{0%,100%{box-shadow:0 0 0 0 rgba(212,168,83,.3)}50%{box-shadow:0 0 12px 2px rgba(212,168,83,.2)}}
 .ldsp-ticket-btn .ldsp-ticket-badge{background:var(--err);color:#fff;font-size:8px;padding:2px 5px;border-radius:8px;margin-left:2px;font-weight:700;animation:pulse 3s ease infinite}
 .ldsp-ticket-overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--bg);border-radius:0 0 var(--r-lg) var(--r-lg);z-index:10;display:none;flex-direction:column;overflow:hidden}
 .ldsp-ticket-overlay.show{display:flex}
@@ -3247,8 +3247,22 @@
             this.panel.animRing = false;
             
             // 使用缓存的level或传入的level
-            const currentLevel = level !== null ? level : (this.panel.cachedLevel || 2);
-            if (level !== null) this.panel.cachedLevel = level;
+            // v3.4.7: 确保 level 是数字类型，避免字符串拼接 bug (如 "2" + 1 = "21")
+            // 注意：不能用 || 2，因为 0 级用户会被错误地当作 2 级
+            // 优先级：传入的 level > panel.cachedLevel > OAuth userInfo > 默认值 2
+            const parsedLevel = level !== null ? parseInt(level, 10) : NaN;
+            let currentLevel;
+            if (!isNaN(parsedLevel)) {
+                currentLevel = parsedLevel;
+            } else if (this.panel.cachedLevel !== undefined) {
+                currentLevel = this.panel.cachedLevel;
+            } else {
+                // 尝试从 OAuth 用户信息获取（Tab 切换时的 fallback）
+                const oauthUser = this.panel.oauth?.getUserInfo?.();
+                const oauthLevel = oauthUser?.trust_level ?? oauthUser?.trustLevel;
+                currentLevel = typeof oauthLevel === 'number' ? oauthLevel : 2;
+            }
+            if (level !== null && !isNaN(parsedLevel)) this.panel.cachedLevel = currentLevel;
             
             // 普通用户最高只能升级到LV3，LV4需要管理员手动授予
             const maxTargetLevel = 3;
@@ -3769,8 +3783,9 @@
             });
 
             html += `</div><div class="ldsp-heatmap-legend"><span>&lt;1分</span>`;
-            for (let i = 0; i <= 4; i++) html += `<div class="ldsp-heatmap-legend-cell" style="background:${i === 0 ? 'rgba(107,140,239,.1)' : i === 4 ? 'var(--accent)' : `rgba(107,140,239,${0.15 + i * 0.15})`}"></div>`;
-            html += `<span>&gt;3小时</span></div></div></div>`;
+            const legendColors = ['rgba(107,140,239,.1)', 'rgba(180,230,210,.35)', 'rgba(130,215,180,.5)', 'rgba(90,195,155,.65)', 'linear-gradient(135deg,#6dcfa5,#50c090)'];
+            for (let i = 0; i <= 4; i++) html += `<div class="ldsp-heatmap-legend-cell" style="background:${legendColors[i]}"></div>`;
+            html += `<span>&gt;5小时</span></div></div></div>`;
 
             return html;
         }
@@ -4066,11 +4081,11 @@
                         </div>
                     </div>
                     <div class="ldsp-hdr-btns">
-                        <button class="ldsp-update" title="检查更新">🔍</button>
-                        <button class="ldsp-cloud-sync" title="云同步" style="display:none">☁️</button>
-                        <button class="ldsp-refresh" title="刷新数据">🔄</button>
-                        <button class="ldsp-theme" title="切换主题">🌓</button>
-                        <button class="ldsp-toggle" title="折叠"><span class="ldsp-toggle-arrow">◀</span><svg class="ldsp-toggle-logo" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="ldsp-logo-grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#8fa8f8"/><stop offset="100%" stop-color="#7ed4c4"/></linearGradient></defs><path d="M 31,4 A 28,28 0 1,1 11,52" fill="none" stroke="url(#ldsp-logo-grad)" stroke-width="8" stroke-linecap="round"/><rect x="25" y="26" width="12" height="12" rx="3" fill="url(#ldsp-logo-grad)" transform="rotate(45 31 32)"/></svg></button>
+                        <button class="ldsp-update" title="检查更新" aria-label="检查更新">🔍</button>
+                        <button class="ldsp-cloud-sync" title="云同步" aria-label="云同步" style="display:none">☁️</button>
+                        <button class="ldsp-refresh" title="刷新数据" aria-label="刷新数据">🔄</button>
+                        <button class="ldsp-theme" title="切换主题" aria-label="切换主题">🌓</button>
+                        <button class="ldsp-toggle" title="折叠面板" aria-label="折叠面板"><span class="ldsp-toggle-arrow">◀</span><svg class="ldsp-toggle-logo" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="ldsp-logo-grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#8fa8f8"/><stop offset="100%" stop-color="#7ed4c4"/></linearGradient></defs><path d="M 31,4 A 28,28 0 1,1 11,52" fill="none" stroke="url(#ldsp-logo-grad)" stroke-width="8" stroke-linecap="round"/><rect x="25" y="26" width="12" height="12" rx="3" fill="url(#ldsp-logo-grad)" transform="rotate(45 31 32)"/></svg></button>
                     </div>
                 </div>
                 <div class="ldsp-update-bubble" style="display:none">
@@ -4096,7 +4111,9 @@
                                 </div>
                             </div>
                             <div class="ldsp-user-actions">
-                                <div class="ldsp-action-btn ldsp-ticket-btn" data-clickable title="工单系统"><span class="ldsp-action-icon">📪</span><span class="ldsp-action-text">工单系统</span></div>
+                                <div class="ldsp-action-btn ldsp-login-btn" data-clickable title="点击登录"><span class="ldsp-action-icon">🔑</span><span class="ldsp-action-text">点击登录</span></div>
+                                <div class="ldsp-action-btn ldsp-logout-btn" data-clickable title="注销登录"><span class="ldsp-action-icon">🚪</span><span class="ldsp-action-text">注销</span></div>
+                                <div class="ldsp-action-btn ldsp-ticket-btn" data-clickable title="工单系统"><span class="ldsp-action-icon">📪</span><span class="ldsp-action-text">工单</span></div>
                             </div>
                         </div>
                         <div class="ldsp-reading" data-clickable title="点击访问 LDStatus Pro 官网">
@@ -4116,6 +4133,17 @@
                         <div id="ldsp-trends" class="ldsp-section"><div class="ldsp-empty"><div class="ldsp-empty-icon">📊</div><div class="ldsp-empty-txt">暂无历史数据</div></div></div>
                         ${this.hasLeaderboard ? '<div id="ldsp-leaderboard" class="ldsp-section"><div class="ldsp-loading"><div class="ldsp-spinner"></div><div>加载中...</div></div></div>' : ''}
                     </div>
+                    <div class="ldsp-confirm-overlay">
+                        <div class="ldsp-confirm-box">
+                            <div class="ldsp-confirm-icon">🚪</div>
+                            <div class="ldsp-confirm-title">确认注销登录</div>
+                            <div class="ldsp-confirm-msg">退出后排行榜和云同步功能将不可用，确定要注销吗？</div>
+                            <div class="ldsp-confirm-btns">
+                                <button class="ldsp-confirm-btn cancel">取消</button>
+                                <button class="ldsp-confirm-btn confirm">确认注销</button>
+                            </div>
+                        </div>
+                    </div>
                 </div>`;
 
             document.body.appendChild(this.el);
@@ -4128,6 +4156,11 @@
                 userDisplayName: this.el.querySelector('.ldsp-user-display-name'),
                 userHandle: this.el.querySelector('.ldsp-user-handle'),
                 ticketBtn: this.el.querySelector('.ldsp-ticket-btn'),
+                logoutBtn: this.el.querySelector('.ldsp-logout-btn'),
+                loginBtn: this.el.querySelector('.ldsp-login-btn'),
+                confirmOverlay: this.el.querySelector('.ldsp-confirm-overlay'),
+                confirmCancel: this.el.querySelector('.ldsp-confirm-btn.cancel'),
+                confirmOk: this.el.querySelector('.ldsp-confirm-btn.confirm'),
                 panelBody: this.el.querySelector('.ldsp-body'),
                 reading: this.el.querySelector('.ldsp-reading'),
                 readingIcon: this.el.querySelector('.ldsp-reading-icon'),
@@ -4236,34 +4269,36 @@
                 }
             });
             
-            // 点击 site-icon 退出登录（同时支持 click 和 touchend）
-            this.$.siteIcon = this.el.querySelector('.ldsp-site-icon');
-            const handleSiteIconClick = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
+            // 注销登录按钮与确认弹窗
+            const showLogoutConfirm = () => {
                 if (!this.hasLeaderboard || !this.oauth?.isLoggedIn()) {
                     this.renderer.showToast('ℹ️ 当前未登录');
                     return;
                 }
-                // 确认退出
-                if (confirm('确定要退出登录吗？\n退出后排行榜和云同步功能将不可用')) {
-                    this.oauth.logout();
-                    this.leaderboard?.stopSync();
-                    this.renderer.showToast('✅ 已退出登录');
-                    this._updateLoginUI();
-                    this._renderLeaderboard();
-                }
+                this.$.confirmOverlay?.classList.add('show');
             };
-            this.$.siteIcon?.addEventListener('click', handleSiteIconClick);
-            // Safari 移动端需要 touchend 事件
-            let siteIconTouchMoved = false;
-            this.$.siteIcon?.addEventListener('touchstart', () => { siteIconTouchMoved = false; }, { passive: true });
-            this.$.siteIcon?.addEventListener('touchmove', () => { siteIconTouchMoved = true; }, { passive: true });
-            this.$.siteIcon?.addEventListener('touchend', (e) => {
-                if (!siteIconTouchMoved) {
-                    e.preventDefault();
-                    handleSiteIconClick(e);
-                }
+            const hideLogoutConfirm = () => {
+                this.$.confirmOverlay?.classList.remove('show');
+            };
+            const doLogout = () => {
+                hideLogoutConfirm();
+                this.oauth.logout();
+                this.leaderboard?.stopSync();
+                this.renderer.showToast('✅ 已退出登录');
+                this._updateLoginUI();
+                this._renderLeaderboard();
+            };
+            // 注销按钮点击
+            this.$.logoutBtn?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                showLogoutConfirm();
+            });
+            // 确认弹窗按钮
+            this.$.confirmCancel?.addEventListener('click', hideLogoutConfirm);
+            this.$.confirmOk?.addEventListener('click', doLogout);
+            // 点击遮罩关闭
+            this.$.confirmOverlay?.addEventListener('click', (e) => {
+                if (e.target === this.$.confirmOverlay) hideLogoutConfirm();
             });
             
             // 云同步按钮（状态由 CloudSyncManager 的回调自动管理）
@@ -4343,6 +4378,36 @@
                 this.renderer.showToast('⚠️ 登录已过期，请重新登录');
                 this._renderLeaderboard();
             });
+            
+            // 滚动条自动隐藏：滚动时显示，停止后隐藏
+            this._initScrollbarAutoHide();
+        }
+        
+        _initScrollbarAutoHide() {
+            // 使用闭包存储状态，避免污染实例属性
+            const timers = new WeakMap();
+            const showScrollbar = (el) => {
+                if (this._programmaticScroll) return; // 忽略程序性滚动
+                el.classList.add('scrolling');
+                clearTimeout(timers.get(el));
+                timers.set(el, setTimeout(() => el.classList.remove('scrolling'), 800));
+            };
+            // 事件委托：捕获所有可滚动元素的滚动事件
+            this.el.addEventListener('scroll', (e) => {
+                const t = e.target;
+                if (t.classList.contains('ldsp-content') || 
+                    t.classList.contains('ldsp-subtabs') || 
+                    t.classList.contains('ldsp-year-heatmap')) {
+                    showScrollbar(t);
+                }
+            }, { capture: true, passive: true });
+        }
+        
+        // 程序性滚动（不显示滚动条）
+        _scrollTo(el, top) {
+            this._programmaticScroll = true;
+            el.scrollTop = top;
+            requestAnimationFrame(() => { this._programmaticScroll = false; });
         }
 
         _restore() {
@@ -4470,7 +4535,8 @@
             if (!this.oauth?.isLoggedIn()) return;
             
             const userInfo = this.oauth.getUserInfo();
-            const currentLevel = userInfo?.trust_level;
+            // v3.4.7: 兼容 trust_level 和 trustLevel 两种命名格式
+            const currentLevel = userInfo?.trust_level ?? userInfo?.trustLevel;
             
             // 只有当等级变化时才更新
             if (currentLevel === connectLevel) return;
@@ -4492,7 +4558,8 @@
             }
         }
 
-        async _showLowTrustLevelWarning(username, level) {
+        // 当没有升级要求表格时显示备选内容（尝试从 summary 获取统计数据）
+        async _showFallbackStats(username, level) {
             const $ = this.$;
             // 显示用户信息（如果有）
             if (username && username !== '未知') {
@@ -4501,12 +4568,13 @@
                 $.userHandle.style.display = 'none';
             }
             
-            // 优先从 OAuth 用户信息获取信任等级（最准确）
+            // 获取信任等级
             let numLevel = parseInt(level) || 0;
             if (this.oauth) {
                 const oauthUser = this.oauth.getUserInfo();
-                if (oauthUser && typeof oauthUser.trust_level === 'number') {
-                    numLevel = oauthUser.trust_level;
+                const oauthTrustLevel = oauthUser?.trust_level ?? oauthUser?.trustLevel;
+                if (typeof oauthTrustLevel === 'number') {
+                    numLevel = oauthTrustLevel;
                 }
             }
             
@@ -4519,43 +4587,13 @@
                 }
             }
             
-            // 如果无法获取 summary 数据，显示升级指引
-            let upgradeInfo = '';
-            
-            if (numLevel === 0) {
-                upgradeInfo = `
-                    <div style="margin-top:12px;padding:12px;background:rgba(107,140,239,0.1);border-radius:8px;text-align:left;">
-                        <div style="font-weight:600;margin-bottom:8px;color:#5a7de0;">📈 升级到等级1的要求：</div>
-                        <ul style="margin:0;padding-left:20px;font-size:12px;line-height:1.8;color:#4b5563;">
-                            <li>进入至少 <b>5</b> 个话题</li>
-                            <li>阅读至少 <b>30</b> 篇帖子</li>
-                            <li>总共花费 <b>10</b> 分钟阅读帖子</li>
-                        </ul>
-                    </div>`;
-            } else if (numLevel === 1) {
-                upgradeInfo = `
-                    <div style="margin-top:12px;padding:12px;background:rgba(107,140,239,0.1);border-radius:8px;text-align:left;">
-                        <div style="font-weight:600;margin-bottom:8px;color:#5a7de0;">📈 升级到等级2的要求：</div>
-                        <ul style="margin:0;padding-left:20px;font-size:12px;line-height:1.8;color:#4b5563;">
-                            <li>至少访问 <b>15</b> 天（不必连续）</li>
-                            <li>至少点赞 <b>1</b> 次</li>
-                            <li>至少收到 <b>1</b> 次点赞</li>
-                            <li>回复至少 <b>3</b> 个不同的话题</li>
-                            <li>进入至少 <b>20</b> 个话题</li>
-                            <li>阅读至少 <b>100</b> 篇帖子</li>
-                            <li>总共花费 <b>60</b> 分钟阅读帖子</li>
-                        </ul>
-                    </div>`;
-            }
-            
-            // 显示友好的提示
+            // 如果无法获取 summary 数据，显示简要信息
             this.$.reqs.innerHTML = `
                 <div class="ldsp-empty">
-                    <div class="ldsp-empty-icon">ℹ️</div>
+                    <div class="ldsp-empty-icon">📊</div>
                     <div class="ldsp-empty-txt">
                         <div style="margin-bottom:8px;">当前信任等级：<b style="color:#5a7de0;">${numLevel}</b></div>
-                        <div style="font-size:12px;color:#6b7280;">达到等级2后可查看详细升级进度</div>
-                        ${upgradeInfo}
+                        <div style="font-size:12px;color:#6b7280;">暂无升级进度数据</div>
                         <div style="margin-top:10px;font-size:11px;color:#9ca3af;">
                             <a href="https://linux.do/t/topic/2460" target="_blank" style="color:#5a7de0;text-decoration:none;">📖 查看完整信任等级说明</a>
                         </div>
@@ -4883,9 +4921,9 @@
                 this._updateTrustLevel(connectLevel);
             }
             
-            // 如果没有升级要求数据（信任等级 < 2），尝试从 summary 页面获取统计数据
+            // 如果没有升级要求表格，尝试从 summary 页面获取统计数据
             if (!section) {
-                return await this._showLowTrustLevelWarning(username, level);
+                return await this._showFallbackStats(username, level);
             }
 
             const rows = section.querySelectorAll('table tr');
@@ -4990,12 +5028,10 @@
                 requestAnimationFrame(() => {
                     setTimeout(() => {
                         container.innerHTML = this.renderer.renderYearTrend(history, reqs, this.historyMgr, this.tracker);
-                        // 自动滚动热力图到today位置（底部）
+                        // 自动滚动热力图到today位置（底部），使用程序性滚动避免显示滚动条
                         const heatmap = container.querySelector('.ldsp-year-heatmap');
                         if (heatmap) {
-                            requestAnimationFrame(() => {
-                                heatmap.scrollTop = heatmap.scrollHeight;
-                            });
+                            requestAnimationFrame(() => this._scrollTo(heatmap, heatmap.scrollHeight));
                         }
                     }, 50);
                 });
@@ -5258,7 +5294,14 @@
         // ========== 登录相关 ==========
 
         _updateLoginUI() {
-            if (!this.hasLeaderboard) return;
+            // 无排行榜站点隐藏登录相关按钮
+            if (!this.hasLeaderboard) {
+                if (this.$.btnCloudSync) this.$.btnCloudSync.style.display = 'none';
+                if (this.$.logoutBtn) this.$.logoutBtn.style.display = 'none';
+                if (this.$.ticketBtn) this.$.ticketBtn.style.display = 'none';
+                if (this.$.loginBtn) this.$.loginBtn.style.display = 'none';
+                return;
+            }
             const logged = this.oauth.isLoggedIn();
             this.$.user.classList.toggle('not-logged', !logged);
 
@@ -5267,18 +5310,32 @@
                 this.$.btnCloudSync.style.display = logged ? '' : 'none';
             }
 
-            if (!logged) {
-                const hint = this.$.userDisplayName.querySelector('.ldsp-login-hint');
-                if (!hint) {
-                    const span = document.createElement('span');
-                    span.className = 'ldsp-login-hint';
-                    span.textContent = '点击登录';
-                    this.$.userDisplayName.appendChild(span);
-                }
-                this._bindUserLogin();
-            } else {
-                this.$.userDisplayName.querySelector('.ldsp-login-hint')?.remove();
+            // 显示/隐藏注销按钮和工单按钮（未登录时都隐藏）
+            if (this.$.logoutBtn) {
+                this.$.logoutBtn.style.display = logged ? '' : 'none';
             }
+            if (this.$.ticketBtn) {
+                this.$.ticketBtn.style.display = logged ? '' : 'none';
+            }
+            // 显示/隐藏登录按钮（已登录时隐藏）
+            if (this.$.loginBtn) {
+                this.$.loginBtn.style.display = logged ? 'none' : '';
+            }
+
+            if (!logged) {
+                this._bindUserLogin();
+            }
+        }
+
+        _bindLoginButton() {
+            if (this._loginBtnBound || !this.$.loginBtn) return;
+            this._loginBtnBound = true;
+            this.$.loginBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                if (!this.oauth?.isLoggedIn()) {
+                    await this._doLogin();
+                }
+            });
         }
 
         _bindUserLogin() {
@@ -5294,6 +5351,9 @@
 
             this.$.user.querySelector('.ldsp-avatar-wrap')?.addEventListener('click', handle);
             this.$.userDisplayName.addEventListener('click', handle);
+            
+            // 绑定登录按钮
+            this._bindLoginButton();
         }
 
         /**
