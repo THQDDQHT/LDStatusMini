@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         LDStatus Pro
 // @namespace    http://tampermonkey.net/
-// @version      3.4.8.1
+// @version      3.4.8.2
 // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计、排行榜系统。两站点均支持排行榜和云同步功能
 // @author       JackLiii
 // @license      MIT
@@ -2838,12 +2838,31 @@
             this.currentView = 'list';
             this.unreadCount = 0;
             this._pollTimer = null;
+            this._isOverlayOpen = false;  // 工单面板是否打开
+            this._lastCheck = 0;  // 上次检查时间（用于防抖）
         }
 
         async init() {
             this._createOverlay();
             await this._loadTicketTypes();
-            this._startUnreadPoll();
+            this._bindVisibilityHandler();
+            // 延迟 5 秒后首次检查
+            setTimeout(() => this._checkUnread(), 5000);
+        }
+        
+        _bindVisibilityHandler() {
+            // 页面可见性变化时控制轮询（切换标签页、最小化窗口等）
+            this._visibilityHandler = () => {
+                if (document.hidden) {
+                    // 页面隐藏时，停止轮询
+                    this._stopUnreadPoll();
+                } else if (this._isOverlayOpen) {
+                    // 页面恢复可见且工单面板打开时，立即检查并恢复轮询
+                    this._checkUnread();
+                    this._startUnreadPoll();
+                }
+            };
+            document.addEventListener('visibilitychange', this._visibilityHandler);
         }
 
         _createOverlay() {
@@ -2901,13 +2920,28 @@
             }
         }
 
+        // 启动轮询（仅在工单面板打开时调用）
         _startUnreadPoll() {
-            this._checkUnread();
+            if (this._pollTimer) return;  // 避免重复启动
+            // 工单面板打开时，每 60 秒检查一次
             this._pollTimer = setInterval(() => this._checkUnread(), 60000);
         }
+        
+        // 停止轮询
+        _stopUnreadPoll() {
+            if (this._pollTimer) {
+                clearInterval(this._pollTimer);
+                this._pollTimer = null;
+            }
+        }
 
+        // 检查未读工单数（触发式调用，非轮询）
         async _checkUnread() {
             if (!this.oauth?.isLoggedIn()) return;
+            // 防抖保护：至少间隔3秒才允许下一次检查
+            const now = Date.now();
+            if (now - this._lastCheck < 3000) return;
+            this._lastCheck = now;
             try {
                 const result = await this.oauth.api('/api/tickets/unread/count');
                 const data = result.data?.data || result.data;
@@ -2936,6 +2970,7 @@
 
         async show() {
             this.currentView = 'list';
+            this._isOverlayOpen = true;
             const activeTab = this.overlay.querySelector('.ldsp-ticket-tab.active');
             if (activeTab?.dataset.tab === 'create') {
                 this._renderCreate();
@@ -2949,6 +2984,11 @@
             this._updateTabBadge();
             if (activeTab?.dataset.tab !== 'create') {
                 this._renderList();
+            }
+            // 工单面板打开时立即检查一次并启动轮询（仅在页面可见时）
+            if (!document.hidden) {
+                this._checkUnread();
+                this._startUnreadPoll();
             }
         }
 
@@ -2970,6 +3010,9 @@
             this.overlay.classList.remove('show');
             this.currentView = 'list';
             this.currentTicket = null;
+            this._isOverlayOpen = false;
+            // 工单面板关闭时停止轮询
+            this._stopUnreadPoll();
             this.overlay.querySelectorAll('.ldsp-ticket-tab').forEach(t => t.classList.remove('active'));
             this.overlay.querySelector('.ldsp-ticket-tab[data-tab="list"]')?.classList.add('active');
         }
@@ -3247,11 +3290,13 @@
             return `${d.getMonth() + 1}/${d.getDate()}`;
         }
 
-        // 销毁方法 - 清理定时器
+        // 销毁方法 - 清理定时器和事件监听
         destroy() {
-            if (this._pollTimer) {
-                clearInterval(this._pollTimer);
-                this._pollTimer = null;
+            this._stopUnreadPoll();
+            // 移除页面可见性监听
+            if (this._visibilityHandler) {
+                document.removeEventListener('visibilitychange', this._visibilityHandler);
+                this._visibilityHandler = null;
             }
             if (this.overlay) {
                 this.overlay.remove();
@@ -4072,6 +4117,10 @@
                         this.$.btnCloudSync.textContent = syncing ? '⏳' : '☁️';
                         this.$.btnCloudSync.title = syncing ? '同步中...' : '云同步';
                     }
+                    // 云同步完成时检查未读工单
+                    if (!syncing) {
+                        this.ticketManager?._checkUnread();
+                    }
                 });
 
                 if (this.oauth.isLoggedIn() && !justLoggedIn) {
@@ -4311,6 +4360,8 @@
                 if (this.loading) return;
                 this.animRing = true;
                 this.fetch();
+                // 刷新数据时同步检查未读工单
+                this.ticketManager?._checkUnread();
             });
 
             this.$.btnTheme.addEventListener('click', () => this._switchTheme());
