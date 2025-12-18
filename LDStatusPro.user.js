@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         LDStatus Pro
 // @namespace    http://tampermonkey.net/
-// @version      3.4.8.6
+// @version      3.4.8.7
 // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计、排行榜系统。两站点均支持排行榜和云同步功能
 // @author       JackLiii
 // @license      MIT
@@ -155,7 +155,7 @@
     const TabLeader = {
         LEADER_KEY: `ldsp_tab_leader_${CURRENT_SITE.prefix}`,
         HEARTBEAT: 5000,    // 5秒心跳
-        TIMEOUT: 15000,     // 15秒超时
+        TIMEOUT: 10000,     // 10秒超时（减少陈旧数据导致的等待时间）
         _tabId: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
         _isLeader: false,
         _initialized: false,
@@ -1318,20 +1318,9 @@
             this.storage.migrate(username);
             this._bindEvents();
             
-            // 使用全局 TabLeader 管理领导者状态
-            // 只有领导者才启动计时，避免多标签页重复计时
-            if (TabLeader.isLeader()) {
-                this._startTracking();
-            }
-            
-            // 监听领导者状态变化
-            TabLeader.onLeaderChange((isLeader) => {
-                if (isLeader) {
-                    this._startTracking();
-                } else {
-                    this._stopTracking();
-                }
-            });
+            // 始终启动活动状态追踪（用于 UI 显示）
+            // 但只有领导者才会执行数据保存（避免多标签页重复写入）
+            this._startTracking();
             
             this._initialized = true;
         }
@@ -1339,6 +1328,7 @@
         _stopTracking() {
             this._intervals.forEach(id => clearInterval(id));
             this._intervals = [];
+            this._tracking = false;
             // 停止前保存当前数据
             this.save();
         }
@@ -1377,6 +1367,10 @@
         }
 
         _startTracking() {
+            // 防止重复启动
+            if (this._tracking) return;
+            this._tracking = true;
+            
             this._intervals.push(
                 setInterval(() => {
                     const idle = Date.now() - this.lastActivity;
@@ -1395,13 +1389,8 @@
 
             const todayKey = Utils.getTodayKey();
             const now = Date.now();
-            let stored = this.storage.get('readingTime', null);
-
-            if (!stored?.dailyData) {
-                stored = { version: 3, dailyData: {}, monthlyCache: {}, yearlyCache: {} };
-            }
-
-            let today = stored.dailyData[todayKey] || { totalMinutes: 0, lastActive: now, sessions: [] };
+            
+            // 计算这次应该加的时间（基于本标签页的活动状态）
             const elapsed = (now - this.lastSave) / 1000;
             const idle = now - this.lastActivity;
             
@@ -1411,6 +1400,20 @@
                     ? elapsed 
                     : Math.max(0, elapsed - (idle - CONFIG.INTERVALS.READING_IDLE) / 1000);
             }
+            
+            // 无论是否是领导者，都更新 lastSave（避免时间累积）
+            this.lastSave = now;
+            
+            // 只有领导者才写入 storage
+            if (!TabLeader.isLeader()) return;
+
+            let stored = this.storage.get('readingTime', null);
+
+            if (!stored?.dailyData) {
+                stored = { version: 3, dailyData: {}, monthlyCache: {}, yearlyCache: {} };
+            }
+
+            let today = stored.dailyData[todayKey] || { totalMinutes: 0, lastActive: now, sessions: [] };
 
             const minutes = toAdd / 60;
             if (minutes > 0.1) {
@@ -1423,7 +1426,6 @@
                 this._updateCache(stored, todayKey, minutes);
                 this._cleanOld(stored);
                 this.storage.set('readingTime', stored);
-                this.lastSave = now;
                 this._yearCache = null;
             }
         }
