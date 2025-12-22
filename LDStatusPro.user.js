@@ -1,7 +1,7 @@
 ﻿    // ==UserScript==
     // @name         LDStatus Pro
     // @namespace    http://tampermonkey.net/
-    // @version      3.5.0.6
+    // @version      3.5.0.7
     // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计、排行榜系统、我的活动查看。两站点均支持排行榜和云同步功能
     // @author       JackLiii
     // @license      MIT
@@ -698,24 +698,45 @@
             _cache: null,
             _cacheTime: 0,
 
-            getSize() {
-                const now = Date.now();
-                if (this._cache && (now - this._cacheTime) < CONFIG.CACHE.SCREEN_TTL) {
-                    return this._cache;
-                }
-                const { innerWidth: w, innerHeight: h } = window;
-                this._cache = (w < 1400 || h < 800) ? 'small' : w < 1920 ? 'medium' : 'large';
-                this._cacheTime = now;
-                return this._cache;
-            },
-
+            // 动态计算面板配置 - 基于视口尺寸的相对计算
+            // 确保面板始终在窗口内显示
             getConfig() {
-                const configs = {
-                    small: { width: 280, maxHeight: Math.min(innerHeight - 100, 450), fontSize: 11, padding: 10, avatarSize: 44, ringSize: 70 },
-                    medium: { width: 300, maxHeight: Math.min(innerHeight - 100, 520), fontSize: 12, padding: 12, avatarSize: 48, ringSize: 76 },
-                    large: { width: 320, maxHeight: 580, fontSize: 12, padding: 14, avatarSize: 52, ringSize: 80 }
+                const { innerWidth: vw, innerHeight: vh } = window;
+                
+                // 面板宽度：视口宽度的一定比例，有最小最大值限制
+                // 基础宽度为视口宽度的18%，但限制在240-360px之间
+                const baseWidth = Math.round(vw * 0.18);
+                const width = Math.max(240, Math.min(360, baseWidth));
+                
+                // 面板最大高度：视口高度减去边距，确保不超出屏幕
+                // 顶部预留空间根据视口高度动态计算
+                const topMargin = Math.max(30, Math.round(vh * 0.06)); // 最小30px，或视口6%
+                const bottomMargin = 20; // 底部预留20px
+                const maxHeight = vh - topMargin - bottomMargin;
+                
+                // 字体大小：根据视口高度缩放，范围10-13px
+                const fontSize = Math.max(10, Math.min(13, Math.round(vh / 70)));
+                
+                // 内边距：根据宽度缩放，范围8-14px
+                const padding = Math.max(8, Math.min(14, Math.round(width / 24)));
+                
+                // 头像大小：根据宽度缩放，范围32-52px
+                const avatarSize = Math.max(32, Math.min(52, Math.round(width / 6.5)));
+                
+                // 环形图大小：根据高度缩放，范围55-85px
+                const ringSize = Math.max(55, Math.min(85, Math.round(vh / 11)));
+                
+                return {
+                    width,
+                    maxHeight,
+                    fontSize,
+                    padding,
+                    avatarSize,
+                    ringSize,
+                    top: topMargin,
+                    vw,
+                    vh
                 };
-                return configs[this.getSize()];
             }
         };
 
@@ -2962,15 +2983,15 @@
 
             _css(c) {
                 return `
-    #ldsp-panel{--dur-fast:120ms;--dur:200ms;--dur-slow:350ms;--ease:cubic-bezier(.22,1,.36,1);--ease-circ:cubic-bezier(.85,0,.15,1);--ease-spring:cubic-bezier(.175,.885,.32,1.275);--ease-out:cubic-bezier(0,.55,.45,1);--bg:#12131a;--bg-card:rgba(24,26,36,.92);--bg-hover:rgba(38,42,56,.95);--bg-el:rgba(32,35,48,.88);--bg-glass:rgba(255,255,255,.02);--txt:#e4e6ed;--txt-sec:#9499ad;--txt-mut:#5d6275;--accent:#6b8cef;--accent-light:#8aa4f4;--accent2:#5bb5a6;--accent2-light:#7cc9bc;--accent3:#e07a8d;--grad:linear-gradient(135deg,#5a7de0 0%,#4a6bc9 100%);--grad-accent:linear-gradient(135deg,#4a6bc9,#3d5aaa);--grad-warm:linear-gradient(135deg,#e07a8d,#c9606e);--grad-gold:linear-gradient(135deg,#d4a853 0%,#c49339 100%);--ok:#5bb5a6;--ok-light:#7cc9bc;--ok-bg:rgba(91,181,166,.12);--err:#e07a8d;--err-light:#ea9aa8;--err-bg:rgba(224,122,141,.12);--warn:#d4a853;--warn-bg:rgba(212,168,83,.12);--border:rgba(255,255,255,.06);--border2:rgba(255,255,255,.1);--border-accent:rgba(107,140,239,.3);--shadow:0 20px 50px rgba(0,0,0,.4),0 0 0 1px rgba(255,255,255,.04);--shadow-lg:0 25px 70px rgba(0,0,0,.5),0 0 30px rgba(107,140,239,.06);--shadow-glow:0 0 20px rgba(107,140,239,.15);--glow-accent:0 0 15px rgba(107,140,239,.2);--scrollbar:rgba(140,150,175,.5);--scrollbar-hover:rgba(140,150,175,.7);--r-xs:4px;--r-sm:8px;--r-md:12px;--r-lg:16px;--r-xl:20px;--w:${c.width}px;--h:${c.maxHeight}px;--fs:${c.fontSize}px;--pd:${c.padding}px;--av:${c.avatarSize}px;--ring:${c.ringSize}px;display:flex;flex-direction:column;position:fixed;left:12px;top:80px;right:auto;width:var(--w);background:var(--bg);border-radius:var(--r-lg);font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Noto Sans SC',sans-serif;font-size:var(--fs);color:var(--txt);box-shadow:var(--shadow);z-index:99999;overflow:hidden;border:1px solid var(--border);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+    #ldsp-panel{--dur-fast:120ms;--dur:200ms;--dur-slow:350ms;--ease:cubic-bezier(.22,1,.36,1);--ease-circ:cubic-bezier(.85,0,.15,1);--ease-spring:cubic-bezier(.175,.885,.32,1.275);--ease-out:cubic-bezier(0,.55,.45,1);--bg:#12131a;--bg-card:rgba(24,26,36,.92);--bg-hover:rgba(38,42,56,.95);--bg-el:rgba(32,35,48,.88);--bg-glass:rgba(255,255,255,.02);--txt:#e4e6ed;--txt-sec:#9499ad;--txt-mut:#5d6275;--accent:#6b8cef;--accent-light:#8aa4f4;--accent2:#5bb5a6;--accent2-light:#7cc9bc;--accent3:#e07a8d;--grad:linear-gradient(135deg,#5a7de0 0%,#4a6bc9 100%);--grad-accent:linear-gradient(135deg,#4a6bc9,#3d5aaa);--grad-warm:linear-gradient(135deg,#e07a8d,#c9606e);--grad-gold:linear-gradient(135deg,#d4a853 0%,#c49339 100%);--ok:#5bb5a6;--ok-light:#7cc9bc;--ok-bg:rgba(91,181,166,.12);--err:#e07a8d;--err-light:#ea9aa8;--err-bg:rgba(224,122,141,.12);--warn:#d4a853;--warn-bg:rgba(212,168,83,.12);--border:rgba(255,255,255,.06);--border2:rgba(255,255,255,.1);--border-accent:rgba(107,140,239,.3);--border-panel:rgba(0,0,0,.25);--shadow:0 1.25rem 3rem rgba(0,0,0,.4);--shadow-lg:0 1.5rem 4rem rgba(0,0,0,.5),0 0 2rem rgba(107,140,239,.06);--shadow-glow:0 0 1.25rem rgba(107,140,239,.15);--glow-accent:0 0 1rem rgba(107,140,239,.2);--scrollbar:rgba(140,150,175,.5);--scrollbar-hover:rgba(140,150,175,.7);--r-xs:0.25em;--r-sm:0.5em;--r-md:0.75em;--r-lg:1em;--r-xl:1.25em;--w:${c.width}px;--h:${c.maxHeight}px;--fs:${c.fontSize}px;--pd:${c.padding}px;--av:${c.avatarSize}px;--ring:${c.ringSize}px;--min-w:220px;--max-w:420px;--min-h:300px;display:flex;flex-direction:column;position:fixed;left:0.5vw;top:${c.top}px;right:auto;width:var(--w);max-height:var(--h);min-width:var(--min-w);max-width:var(--max-w);min-height:var(--min-h);background:var(--bg);border-radius:var(--r-lg);font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Noto Sans SC',sans-serif;font-size:var(--fs);color:var(--txt);box-shadow:var(--shadow);z-index:99999;overflow:hidden;border:none;backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
     #ldsp-panel,#ldsp-panel *{transition:opacity var(--dur) var(--ease),transform var(--dur) var(--ease);user-select:none;-webkit-font-smoothing:antialiased}
     #ldsp-panel{transform:translateZ(0);backface-visibility:hidden}
     #ldsp-panel input,#ldsp-panel textarea{cursor:text;user-select:text}
     #ldsp-panel [data-clickable],#ldsp-panel [data-clickable] *,#ldsp-panel button,#ldsp-panel a,#ldsp-panel .ldsp-tab,#ldsp-panel .ldsp-subtab,#ldsp-panel .ldsp-ring-lvl,#ldsp-panel .ldsp-rd-day-bar,#ldsp-panel .ldsp-year-cell:not(.empty),#ldsp-panel .ldsp-rank-item,#ldsp-panel .ldsp-ticket-item,#ldsp-panel .ldsp-ticket-type,#ldsp-panel .ldsp-ticket-tab,#ldsp-panel .ldsp-ticket-close,#ldsp-panel .ldsp-ticket-back,#ldsp-panel .ldsp-lb-refresh,#ldsp-panel .ldsp-modal-btn,#ldsp-panel .ldsp-lb-btn,#ldsp-panel .ldsp-update-bubble-close{cursor:pointer}
     #ldsp-panel.no-trans,#ldsp-panel.no-trans *{transition:none!important;animation-play-state:paused!important}
     #ldsp-panel.anim{transition:width var(--dur-slow) var(--ease),height var(--dur-slow) var(--ease),left var(--dur-slow) var(--ease),top var(--dur-slow) var(--ease)}
-    #ldsp-panel.light{--bg:rgba(250,251,254,.97);--bg-card:rgba(245,247,252,.94);--bg-hover:rgba(238,242,250,.96);--bg-el:rgba(255,255,255,.94);--bg-glass:rgba(0,0,0,.012);--txt:#1e2030;--txt-sec:#4a5068;--txt-mut:#8590a6;--accent:#5070d0;--accent-light:#6b8cef;--accent2:#4a9e8f;--accent2-light:#5bb5a6;--ok:#4a9e8f;--ok-light:#5bb5a6;--ok-bg:rgba(74,158,143,.08);--err:#d45d6e;--err-light:#e07a8d;--err-bg:rgba(212,93,110,.08);--warn:#c49339;--warn-bg:rgba(196,147,57,.08);--border:rgba(0,0,0,.05);--border2:rgba(0,0,0,.08);--border-accent:rgba(80,112,208,.2);--shadow:0 20px 50px rgba(0,0,0,.07),0 0 0 1px rgba(0,0,0,.04);--shadow-lg:0 25px 70px rgba(0,0,0,.1);--glow-accent:0 0 15px rgba(80,112,208,.1);--scrollbar:var(--accent);--scrollbar-hover:var(--accent-light)}
-    #ldsp-panel.collapsed{width:48px!important;height:48px!important;border-radius:var(--r-md);cursor:pointer;touch-action:none;background:linear-gradient(135deg,#7a9bf5 0%,#5a7de0 50%,#5bb5a6 100%);border:none;box-shadow:var(--shadow),0 0 20px rgba(107,140,239,.35)}
+    #ldsp-panel.light{--bg:rgba(250,251,254,.97);--bg-card:rgba(245,247,252,.94);--bg-hover:rgba(238,242,250,.96);--bg-el:rgba(255,255,255,.94);--bg-glass:rgba(0,0,0,.012);--txt:#1e2030;--txt-sec:#4a5068;--txt-mut:#8590a6;--accent:#5070d0;--accent-light:#6b8cef;--accent2:#4a9e8f;--accent2-light:#5bb5a6;--ok:#4a9e8f;--ok-light:#5bb5a6;--ok-bg:rgba(74,158,143,.08);--err:#d45d6e;--err-light:#e07a8d;--err-bg:rgba(212,93,110,.08);--warn:#c49339;--warn-bg:rgba(196,147,57,.08);--border:rgba(0,0,0,.08);--border2:rgba(0,0,0,.1);--border-accent:rgba(80,112,208,.2);--border-panel:rgba(0,0,0,.1);--shadow:0 1.25rem 3rem rgba(0,0,0,.08);--shadow-lg:0 1.5rem 4rem rgba(0,0,0,.12);--glow-accent:0 0 1rem rgba(80,112,208,.1);--scrollbar:var(--accent);--scrollbar-hover:var(--accent-light)}
+    #ldsp-panel.collapsed{width:48px!important;height:48px!important;min-width:48px!important;min-height:48px!important;max-height:48px!important;border-radius:var(--r-md);cursor:pointer;touch-action:none;background:linear-gradient(135deg,#7a9bf5 0%,#5a7de0 50%,#5bb5a6 100%);border:none;box-shadow:var(--shadow),0 0 20px rgba(107,140,239,.35)}
     #ldsp-panel.collapsed .ldsp-hdr{padding:0;justify-content:center;align-items:center;height:100%;background:0 0;min-height:0}
     #ldsp-panel.collapsed .ldsp-hdr-info{opacity:0;visibility:hidden;pointer-events:none;position:absolute;transform:translateX(-10px)}
     #ldsp-panel.collapsed .ldsp-body{display:none!important}
@@ -3081,14 +3102,16 @@
     .ldsp-reading.max .ldsp-reading-icon{animation:crown 2s ease-in-out infinite;will-change:transform}
     @keyframes crown{0%,100%{transform:rotate(-5deg) scale(1)}50%{transform:rotate(5deg) scale(1.1)}}
 
-    .ldsp-tabs{display:flex;padding:10px 12px;gap:8px;background:var(--bg);border-bottom:1px solid var(--border);flex-shrink:0}
-    .ldsp-tab{flex:1;padding:8px 12px;border:none;background:var(--bg-card);color:var(--txt-sec);border-radius:var(--r-sm);font-size:11px;font-weight:600;transition:background .15s,color .15s,border-color .15s,box-shadow .2s;border:1px solid transparent;white-space:nowrap;display:flex;align-items:center;justify-content:center;gap:4px;min-width:0}
-    .ldsp-tab .ldsp-tab-icon{flex-shrink:0}
-    .ldsp-tab .ldsp-tab-text{overflow:hidden;text-overflow:ellipsis}
+    .ldsp-tabs{display:flex;padding:8px 10px;gap:6px;background:var(--bg);border-bottom:1px solid var(--border);flex-shrink:0;container-type:inline-size}
+    .ldsp-tab{flex:1;padding:7px 8px;border:none;background:var(--bg-card);color:var(--txt-sec);border-radius:var(--r-sm);font-size:11px;font-weight:600;transition:background .15s,color .15s,border-color .15s,box-shadow .2s;border:1px solid transparent;white-space:nowrap;display:flex;align-items:center;justify-content:center;gap:4px;min-width:0;overflow:hidden}
+    .ldsp-tab .ldsp-tab-icon{flex-shrink:0;font-size:12px}
+    .ldsp-tab .ldsp-tab-text{overflow:hidden;text-overflow:ellipsis;min-width:1em}
     .ldsp-tab:hover{background:var(--bg-hover);color:var(--txt);border-color:var(--border2);transform:translateY(-1px)}
     .ldsp-tab.active{background:var(--grad);color:#fff;box-shadow:0 4px 15px rgba(107,140,239,.3);border-color:transparent}
-    @media (max-width:340px){.ldsp-tab{font-size:10px;padding:6px 8px;gap:3px}.ldsp-tab .ldsp-tab-icon{display:none}}
-    @media (max-width:280px){.ldsp-tab{font-size:9px;padding:5px 6px}}
+    @container (max-width:260px){.ldsp-tab{font-size:10px;padding:6px 5px;gap:2px}.ldsp-tab .ldsp-tab-icon{display:none}}
+    @container (max-width:200px){.ldsp-tab{font-size:9px;padding:5px 3px}}
+    @media (max-width:340px){.ldsp-tabs{padding:6px 8px;gap:4px}.ldsp-tab{font-size:10px;padding:6px 6px;gap:2px}.ldsp-tab .ldsp-tab-icon{display:none}}
+    @media (max-width:280px){.ldsp-tabs{padding:5px 6px;gap:3px}.ldsp-tab{font-size:9px;padding:5px 4px}}
     .ldsp-content{flex:1 1 auto;min-height:0;max-height:calc(var(--h) - 180px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:transparent transparent}
     .ldsp-content.scrolling{scrollbar-color:var(--scrollbar) transparent}
     .ldsp-content::-webkit-scrollbar{width:6px;background:transparent}
@@ -3373,20 +3396,37 @@
     .ldsp-join-prompt-title{font-size:14px;font-weight:700;margin-bottom:6px;letter-spacing:-.01em}
     .ldsp-join-prompt-desc{font-size:11px;color:var(--txt-mut);line-height:1.7;margin-bottom:16px;font-weight:500}
     .ldsp-privacy-note{font-size:9px;color:var(--txt-mut);margin-top:12px;display:flex;align-items:center;justify-content:center;gap:5px;font-weight:500}
+    /* 面板手动调整大小 - 仅桌面端 */
+    @media (hover:hover) and (pointer:fine){
+    #ldsp-panel:not(.collapsed){resize:none}
+    .ldsp-resize-handle{position:absolute;z-index:15;opacity:0;transition:opacity .2s}
+    #ldsp-panel:hover .ldsp-resize-handle{opacity:1}
+    .ldsp-resize-e{right:0;top:1em;bottom:1em;width:6px;cursor:e-resize}
+    .ldsp-resize-s{bottom:0;left:1em;right:1em;height:6px;cursor:s-resize}
+    .ldsp-resize-se{right:0;bottom:0;width:14px;height:14px;cursor:se-resize}
+    .ldsp-resize-se::before{content:'';position:absolute;right:3px;bottom:3px;width:8px;height:8px;border-right:2px solid var(--txt-mut);border-bottom:2px solid var(--txt-mut);opacity:.5;transition:opacity .2s}
+    #ldsp-panel:hover .ldsp-resize-se::before{opacity:.8}
+    .ldsp-resize-handle:hover::before{opacity:1}
+    #ldsp-panel.resizing .ldsp-resize-handle{opacity:1}
+    #ldsp-panel.resizing,#ldsp-panel.resizing *{transition:none!important;user-select:none!important}
+    }
     @media (prefers-reduced-motion:reduce){#ldsp-panel,#ldsp-panel *{animation:none!important;transition:none!important}#ldsp-panel .ldsp-spinner,#ldsp-panel .ldsp-mini-spin,#ldsp-panel .ldsp-lb-refresh.spinning{animation:spin 1.5s linear infinite!important}}
-    @media (min-width:1920px){#ldsp-panel{--w:340px;--fs:13px;--pd:16px;--av:50px;--ring:85px}}
-    @media (max-height:700px){#ldsp-panel{top:60px}.ldsp-content{max-height:calc(100vh - 240px)}}
-    @media (max-width:1200px){#ldsp-panel{left:10px;right:auto}}
-    @media (max-width:768px){#ldsp-panel{--w:280px;--fs:12px;--pd:11px;left:8px;right:auto;top:60px}#ldsp-panel.collapsed{width:42px!important;height:42px!important;border-radius:12px}#ldsp-panel.collapsed .ldsp-toggle{font-size:16px}#ldsp-panel.collapsed .ldsp-toggle-logo{width:22px;height:22px}.ldsp-hdr{padding:8px 10px;gap:6px;min-height:46px}.ldsp-hdr-info{gap:6px}.ldsp-hdr-text{gap:0}.ldsp-site-icon{width:22px;height:22px;border-radius:6px}.ldsp-site-ver{font-size:8px;padding:1px 4px}.ldsp-title{font-size:12px}.ldsp-ver{font-size:8px}.ldsp-app-name{font-size:9px}.ldsp-hdr-btns{gap:3px}.ldsp-hdr-btns button{width:24px;height:24px;font-size:11px}.ldsp-update-bubble{width:200px;padding:14px 16px}.ldsp-content{max-height:calc(100vh - 240px)}.ldsp-rank-item{padding:10px}.ldsp-rank-num{width:26px;height:26px}.ldsp-rank-avatar{width:30px;height:30px}.ldsp-learn-trust{font-size:9px}}
-    @media (max-width:480px){#ldsp-panel{--w:260px;--av:36px;--ring:68px;left:6px;right:auto;top:55px;border-radius:var(--r-md);max-height:70vh}#ldsp-panel.collapsed{width:38px!important;height:38px!important;border-radius:10px;max-height:none}#ldsp-panel.collapsed .ldsp-toggle{font-size:14px}#ldsp-panel.collapsed .ldsp-toggle-logo{width:20px;height:20px}.ldsp-hdr{padding:6px 8px;gap:4px;min-height:40px}.ldsp-hdr-info{gap:4px}.ldsp-hdr-text{gap:0}.ldsp-site-icon{width:18px;height:18px;border-radius:5px}.ldsp-site-ver{font-size:7px;padding:1px 3px}.ldsp-site-wrap::after{display:none}.ldsp-title{font-size:10px}.ldsp-ver{font-size:7px}.ldsp-app-name{font-size:8px}.ldsp-hdr-btns{gap:2px}.ldsp-hdr-btns button{width:22px;height:22px;font-size:10px;border-radius:5px}.ldsp-user{padding:8px 8px 20px;gap:8px}.ldsp-reading::after{bottom:-12px;font-size:7px}.ldsp-user-actions{gap:4px}.ldsp-action-btn{padding:4px 6px;font-size:9px;flex:0 1 calc(50% - 2px)}.ldsp-action-btn:only-child{flex:0 1 auto}.ldsp-reading{min-width:60px;padding:5px 8px}.ldsp-reading-icon{font-size:16px}.ldsp-reading-time{font-size:10px}.ldsp-reading-label{font-size:7px}.ldsp-tabs{padding:8px 10px;gap:6px}.ldsp-tab{padding:6px 10px;font-size:10px;border-radius:var(--r-sm)}.ldsp-section{padding:8px}.ldsp-content{max-height:none}.ldsp-rank-item{padding:8px 10px}.ldsp-rank-num{width:24px;height:24px;font-size:10px;border-radius:8px}.ldsp-rank-avatar{width:28px;height:28px;border-radius:8px}.ldsp-rank-display-name,.ldsp-rank-name-only{font-size:11px}.ldsp-rank-time{font-size:12px}.ldsp-my-rank{padding:10px}.ldsp-my-rank-val{font-size:16px}.ldsp-subtab{padding:5px 10px;font-size:9px}.ldsp-learn-trust{font-size:8px}}
-    @media (max-height:500px){#ldsp-panel{top:40px}.ldsp-content{max-height:calc(100vh - 180px)}.ldsp-user{padding:8px 8px 18px}.ldsp-user-actions{display:none}.ldsp-tabs{padding:6px 8px}.ldsp-section{padding:6px}}
+    /* 动态响应式布局 - 面板尺寸通过JS动态计算，CSS主要处理内部组件适配 */
+    /* 内容区使用CSS变量控制最大高度，确保不超出面板 */
+    .ldsp-content{max-height:calc(var(--h) - 160px)}
+    /* 小屏幕优化：当视口较小时隐藏部分非必要元素 */
+    @media (max-height:550px){.ldsp-user-actions{gap:4px;margin-top:0}.ldsp-action-btn{padding:4px 6px;font-size:9px}.ldsp-reading::after{font-size:7px;bottom:-10px}.ldsp-hdr{min-height:auto}}
+    @media (max-height:400px){.ldsp-user-actions{display:none}}
+    @media (max-height:450px){.ldsp-user{padding:5px var(--pd) 14px}.ldsp-tabs{padding:5px 8px}.ldsp-section{padding:5px}}
+    /* 窄屏幕优化 */
+    @media (max-width:360px){#ldsp-panel.collapsed{width:40px!important;height:40px!important;min-width:40px!important;min-height:40px!important;max-height:40px!important}.ldsp-hdr-info{gap:4px}.ldsp-site-icon{width:20px;height:20px}.ldsp-site-ver{font-size:7px}.ldsp-title{font-size:11px}.ldsp-hdr-btns button{width:24px;height:24px}.ldsp-user-actions{flex-direction:column}.ldsp-action-btn{flex:1 1 100%}}
     .ldsp-action-btn{display:inline-flex;align-items:center;gap:4px;padding:5px 10px;background:linear-gradient(135deg,rgba(107,140,239,.08),rgba(90,125,224,.12));border:1px solid rgba(107,140,239,.2);border-radius:8px;font-size:10px;color:var(--accent);transition:background .15s,border-color .15s,transform .15s,box-shadow .15s;font-weight:600;white-space:nowrap;flex:1 1 0;min-width:0;justify-content:center;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
     @media (hover:hover){.ldsp-action-btn:hover{background:linear-gradient(135deg,rgba(107,140,239,.15),rgba(90,125,224,.2));border-color:var(--accent);box-shadow:0 4px 12px rgba(107,140,239,.18)}}
     .ldsp-action-btn:active{background:linear-gradient(135deg,rgba(107,140,239,.18),rgba(90,125,224,.24));transform:scale(.97)}
     .ldsp-action-btn:only-child{flex:0 1 auto}
     .ldsp-action-btn .ldsp-action-icon{flex-shrink:0}
     .ldsp-action-btn .ldsp-action-text{overflow:hidden;text-overflow:ellipsis}
-    @media (max-width:320px){#ldsp-panel{--w:240px}#ldsp-panel.collapsed{width:34px!important;height:34px!important;border-radius:8px}#ldsp-panel.collapsed .ldsp-toggle-logo{width:18px;height:18px}.ldsp-hdr{padding:5px 6px;gap:3px;min-height:36px}.ldsp-hdr-info{gap:3px}.ldsp-site-icon{width:16px;height:16px;border-radius:4px;border-width:1px}.ldsp-site-ver{display:none}.ldsp-title{font-size:9px}.ldsp-app-name{display:none}.ldsp-hdr-btns{gap:2px}.ldsp-hdr-btns button{width:20px;height:20px;font-size:9px;border-radius:4px}.ldsp-user-actions{flex-direction:column}.ldsp-action-btn{flex:1 1 100%;min-width:0}}
+    @media (max-width:320px){#ldsp-panel{--w:240px}#ldsp-panel.collapsed{width:34px!important;height:34px!important;min-width:34px!important;min-height:34px!important;max-height:34px!important;border-radius:8px}#ldsp-panel.collapsed .ldsp-toggle-logo{width:18px;height:18px}.ldsp-hdr{padding:5px 6px;gap:3px;min-height:36px}.ldsp-hdr-info{gap:3px}.ldsp-site-icon{width:16px;height:16px;border-radius:4px;border-width:1px}.ldsp-site-ver{display:none}.ldsp-title{font-size:9px}.ldsp-app-name{display:none}.ldsp-hdr-btns{gap:2px}.ldsp-hdr-btns button{width:20px;height:20px;font-size:9px;border-radius:4px}.ldsp-user-actions{flex-direction:column}.ldsp-action-btn{flex:1 1 100%;min-width:0}}
     .ldsp-logout-btn,.ldsp-ticket-btn,.ldsp-melon-btn{flex:0 0 auto;min-width:auto;padding:5px 8px}
     .ldsp-logout-btn{background:linear-gradient(135deg,rgba(239,68,68,.06),rgba(220,38,38,.08));border-color:rgba(239,68,68,.15);color:rgba(239,68,68,.7)}
     .ldsp-logout-btn:hover{background:linear-gradient(135deg,rgba(239,68,68,.12),rgba(220,38,38,.16));border-color:rgba(239,68,68,.3);color:#ef4444}
@@ -7983,9 +8023,15 @@
                                 </div>
                             </div>
                         </div>
-                    </div>`;
+                    </div>
+                    <div class="ldsp-resize-handle ldsp-resize-e"></div>
+                    <div class="ldsp-resize-handle ldsp-resize-s"></div>
+                    <div class="ldsp-resize-handle ldsp-resize-se"></div>`;
 
                 document.body.appendChild(this.el);
+                
+                // 初始化resize功能（仅桌面端）
+                this._initResize();
                 
                 // 绑定自定义 Tooltip
                 Tooltip.bindToPanel(this.el);
@@ -8338,49 +8384,160 @@
             }
 
             _onResize() {
-                const cfg = Screen.getConfig();
-                ['width', 'maxHeight', 'fontSize', 'padding', 'avatarSize', 'ringSize'].forEach((k, i) => {
-                    const props = ['--w', '--h', '--fs', '--pd', '--av', '--ring'];
-                    this.el.style.setProperty(props[i], `${cfg[k]}px`);
-                });
+                if (this.el.classList.contains('collapsed')) return; // 折叠状态不处理
                 
-                // 检查面板是否超出视口边界，如果超出则调整位置
+                const cfg = Screen.getConfig();
+                const el = this.el;
+                
+                // 更新CSS变量
+                el.style.setProperty('--w', `${cfg.width}px`);
+                el.style.setProperty('--h', `${cfg.maxHeight}px`);
+                el.style.setProperty('--fs', `${cfg.fontSize}px`);
+                el.style.setProperty('--pd', `${cfg.padding}px`);
+                el.style.setProperty('--av', `${cfg.avatarSize}px`);
+                el.style.setProperty('--ring', `${cfg.ringSize}px`);
+                
+                // 确保面板宽度和最大高度不超出视口
+                el.style.width = `${cfg.width}px`;
+                el.style.maxHeight = `${cfg.maxHeight}px`;
+                
+                // 检查并修正面板位置，确保完全在视口内
                 this._clampPosition();
                 this._updateExpandDir();
             }
             
             // 确保面板位置在视口内
             _clampPosition() {
-                const rect = this.el.getBoundingClientRect();
+                const el = this.el;
+                const rect = el.getBoundingClientRect();
+                const { innerWidth: vw, innerHeight: vh } = window;
                 const margin = 8; // 最小边距
                 let needUpdate = false;
+                let newLeft = parseFloat(el.style.left) || rect.left;
+                let newTop = parseFloat(el.style.top) || rect.top;
                 
-                // 检查右边界
-                if (rect.right > innerWidth - margin) {
-                    this.el.style.left = Math.max(margin, innerWidth - rect.width - margin) + 'px';
-                    this.el.style.right = 'auto';
+                // 面板实际尺寸（考虑折叠状态）
+                const isCollapsed = el.classList.contains('collapsed');
+                const panelWidth = isCollapsed ? 48 : rect.width;
+                const panelHeight = isCollapsed ? 48 : rect.height;
+                
+                // 检查并修正水平位置
+                if (newLeft + panelWidth > vw - margin) {
+                    newLeft = Math.max(margin, vw - panelWidth - margin);
                     needUpdate = true;
                 }
-                // 检查左边界
-                if (rect.left < margin) {
-                    this.el.style.left = margin + 'px';
-                    this.el.style.right = 'auto';
-                    needUpdate = true;
-                }
-                // 检查下边界
-                if (rect.bottom > innerHeight - margin) {
-                    this.el.style.top = Math.max(margin, innerHeight - rect.height - margin) + 'px';
-                    needUpdate = true;
-                }
-                // 检查上边界
-                if (rect.top < margin) {
-                    this.el.style.top = margin + 'px';
+                if (newLeft < margin) {
+                    newLeft = margin;
                     needUpdate = true;
                 }
                 
-                // 如果位置有调整，保存新位置
+                // 检查并修正垂直位置
+                if (newTop + panelHeight > vh - margin) {
+                    newTop = Math.max(margin, vh - panelHeight - margin);
+                    needUpdate = true;
+                }
+                if (newTop < margin) {
+                    newTop = margin;
+                    needUpdate = true;
+                }
+                
+                // 应用修正后的位置
                 if (needUpdate) {
-                    this.storage.setGlobalNow('position', { left: this.el.style.left, top: this.el.style.top });
+                    el.style.left = `${newLeft}px`;
+                    el.style.top = `${newTop}px`;
+                    el.style.right = 'auto';
+                    this.storage.setGlobalNow('position', { left: el.style.left, top: el.style.top });
+                }
+            }
+
+            // 初始化面板手动调整大小功能（仅桌面端）
+            _initResize() {
+                // 检测是否为桌面端（有鼠标悬停能力且是精确指针）
+                if (!window.matchMedia('(hover:hover) and (pointer:fine)').matches) return;
+                
+                const el = this.el;
+                const handles = el.querySelectorAll('.ldsp-resize-handle');
+                if (!handles.length) return;
+                
+                let startX, startY, startW, startH, startLeft, startTop, direction;
+                const minW = 220, maxW = 420, minH = 300;
+                
+                const onMouseMove = (e) => {
+                    if (!direction) return;
+                    e.preventDefault();
+                    
+                    const dx = e.clientX - startX;
+                    const dy = e.clientY - startY;
+                    const { innerWidth: vw, innerHeight: vh } = window;
+                    
+                    // 根据方向调整尺寸
+                    if (direction.includes('e')) {
+                        const newW = Math.max(minW, Math.min(maxW, startW + dx));
+                        // 确保不超出右边界
+                        if (startLeft + newW <= vw - 8) {
+                            el.style.width = `${newW}px`;
+                            el.style.setProperty('--w', `${newW}px`);
+                        }
+                    }
+                    if (direction.includes('s')) {
+                        const newH = Math.max(minH, Math.min(vh - startTop - 20, startH + dy));
+                        el.style.maxHeight = `${newH}px`;
+                        el.style.setProperty('--h', `${newH}px`);
+                    }
+                };
+                
+                const onMouseUp = () => {
+                    if (!direction) return;
+                    direction = null;
+                    el.classList.remove('resizing');
+                    document.removeEventListener('mousemove', onMouseMove);
+                    document.removeEventListener('mouseup', onMouseUp);
+                    
+                    // 保存用户自定义的尺寸
+                    this.storage.setGlobalNow('customSize', {
+                        width: parseInt(el.style.width),
+                        height: parseInt(el.style.maxHeight)
+                    });
+                };
+                
+                handles.forEach(handle => {
+                    handle.addEventListener('mousedown', (e) => {
+                        if (el.classList.contains('collapsed')) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        
+                        // 判断调整方向
+                        if (handle.classList.contains('ldsp-resize-e')) direction = 'e';
+                        else if (handle.classList.contains('ldsp-resize-s')) direction = 's';
+                        else if (handle.classList.contains('ldsp-resize-se')) direction = 'se';
+                        
+                        const rect = el.getBoundingClientRect();
+                        startX = e.clientX;
+                        startY = e.clientY;
+                        startW = rect.width;
+                        startH = rect.height;
+                        startLeft = rect.left;
+                        startTop = rect.top;
+                        
+                        el.classList.add('resizing');
+                        document.addEventListener('mousemove', onMouseMove);
+                        document.addEventListener('mouseup', onMouseUp);
+                    });
+                });
+                
+                // 恢复用户自定义的尺寸
+                const customSize = this.storage.getGlobal('customSize');
+                if (customSize) {
+                    if (customSize.width >= minW && customSize.width <= maxW) {
+                        el.style.width = `${customSize.width}px`;
+                        el.style.setProperty('--w', `${customSize.width}px`);
+                    }
+                    if (customSize.height >= minH) {
+                        const maxH = window.innerHeight - 50;
+                        const h = Math.min(customSize.height, maxH);
+                        el.style.maxHeight = `${h}px`;
+                        el.style.setProperty('--h', `${h}px`);
+                    }
                 }
             }
 
