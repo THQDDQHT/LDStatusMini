@@ -1,7 +1,7 @@
 ﻿    // ==UserScript==
     // @name         LDStatus Pro
     // @namespace    http://tampermonkey.net/
-    // @version      3.5.0.1
+    // @version      3.5.0.4
     // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计、排行榜系统、我的活动查看。两站点均支持排行榜和云同步功能
     // @author       JackLiii
     // @license      MIT
@@ -19,7 +19,6 @@
     // @connect      idcflare.com
     // @connect      github.com
     // @connect      raw.githubusercontent.com
-    // @connect      ldstatus-pro-api.jackcai711.workers.dev
     // @connect      *.workers.dev
     // @updateURL    https://raw.githubusercontent.com/caigg188/LDStatusPro/main/LDStatusPro.user.js
     // @downloadURL  https://raw.githubusercontent.com/caigg188/LDStatusPro/main/LDStatusPro.user.js
@@ -3380,14 +3379,14 @@
     @media (max-width:768px){#ldsp-panel{--w:280px;--fs:12px;--pd:11px;left:8px;right:auto;top:60px}#ldsp-panel.collapsed{width:42px!important;height:42px!important;border-radius:12px}#ldsp-panel.collapsed .ldsp-toggle{font-size:16px}#ldsp-panel.collapsed .ldsp-toggle-logo{width:22px;height:22px}.ldsp-hdr{padding:8px 10px;gap:6px;min-height:46px}.ldsp-hdr-info{gap:6px}.ldsp-hdr-text{gap:0}.ldsp-site-icon{width:22px;height:22px;border-radius:6px}.ldsp-site-ver{font-size:8px;padding:1px 4px}.ldsp-title{font-size:12px}.ldsp-ver{font-size:8px}.ldsp-app-name{font-size:9px}.ldsp-hdr-btns{gap:3px}.ldsp-hdr-btns button{width:24px;height:24px;font-size:11px}.ldsp-update-bubble{width:200px;padding:14px 16px}.ldsp-content{max-height:calc(100vh - 240px)}.ldsp-rank-item{padding:10px}.ldsp-rank-num{width:26px;height:26px}.ldsp-rank-avatar{width:30px;height:30px}.ldsp-learn-trust{font-size:9px}}
     @media (max-width:480px){#ldsp-panel{--w:260px;--av:36px;--ring:68px;left:6px;right:auto;top:55px;border-radius:var(--r-md);max-height:70vh}#ldsp-panel.collapsed{width:38px!important;height:38px!important;border-radius:10px;max-height:none}#ldsp-panel.collapsed .ldsp-toggle{font-size:14px}#ldsp-panel.collapsed .ldsp-toggle-logo{width:20px;height:20px}.ldsp-hdr{padding:6px 8px;gap:4px;min-height:40px}.ldsp-hdr-info{gap:4px}.ldsp-hdr-text{gap:0}.ldsp-site-icon{width:18px;height:18px;border-radius:5px}.ldsp-site-ver{font-size:7px;padding:1px 3px}.ldsp-site-wrap::after{display:none}.ldsp-title{font-size:10px}.ldsp-ver{font-size:7px}.ldsp-app-name{font-size:8px}.ldsp-hdr-btns{gap:2px}.ldsp-hdr-btns button{width:22px;height:22px;font-size:10px;border-radius:5px}.ldsp-user{padding:8px 8px 20px;gap:8px}.ldsp-reading::after{bottom:-12px;font-size:7px}.ldsp-user-actions{gap:4px}.ldsp-action-btn{padding:4px 6px;font-size:9px;flex:0 1 calc(50% - 2px)}.ldsp-action-btn:only-child{flex:0 1 auto}.ldsp-reading{min-width:60px;padding:5px 8px}.ldsp-reading-icon{font-size:16px}.ldsp-reading-time{font-size:10px}.ldsp-reading-label{font-size:7px}.ldsp-tabs{padding:8px 10px;gap:6px}.ldsp-tab{padding:6px 10px;font-size:10px;border-radius:var(--r-sm)}.ldsp-section{padding:8px}.ldsp-content{max-height:none}.ldsp-rank-item{padding:8px 10px}.ldsp-rank-num{width:24px;height:24px;font-size:10px;border-radius:8px}.ldsp-rank-avatar{width:28px;height:28px;border-radius:8px}.ldsp-rank-display-name,.ldsp-rank-name-only{font-size:11px}.ldsp-rank-time{font-size:12px}.ldsp-my-rank{padding:10px}.ldsp-my-rank-val{font-size:16px}.ldsp-subtab{padding:5px 10px;font-size:9px}.ldsp-learn-trust{font-size:8px}}
     @media (max-height:500px){#ldsp-panel{top:40px}.ldsp-content{max-height:calc(100vh - 180px)}.ldsp-user{padding:8px 8px 18px}.ldsp-user-actions{display:none}.ldsp-tabs{padding:6px 8px}.ldsp-section{padding:6px}}
-    .ldsp-action-btn{display:inline-flex;align-items:center;gap:4px;padding:5px 10px;background:linear-gradient(135deg,rgba(107,140,239,.08),rgba(90,125,224,.12));border:1px solid rgba(107,140,239,.2);border-radius:8px;font-size:10px;color:var(--accent);transition:background .15s,border-color .15s,transform .15s,box-shadow .15s;font-weight:600;white-space:nowrap;flex:0 1 calc(50% - 3px);min-width:60px;justify-content:center;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+    .ldsp-action-btn{display:inline-flex;align-items:center;gap:4px;padding:5px 10px;background:linear-gradient(135deg,rgba(107,140,239,.08),rgba(90,125,224,.12));border:1px solid rgba(107,140,239,.2);border-radius:8px;font-size:10px;color:var(--accent);transition:background .15s,border-color .15s,transform .15s,box-shadow .15s;font-weight:600;white-space:nowrap;flex:1 1 0;min-width:0;justify-content:center;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
     @media (hover:hover){.ldsp-action-btn:hover{background:linear-gradient(135deg,rgba(107,140,239,.15),rgba(90,125,224,.2));border-color:var(--accent);box-shadow:0 4px 12px rgba(107,140,239,.18)}}
     .ldsp-action-btn:active{background:linear-gradient(135deg,rgba(107,140,239,.18),rgba(90,125,224,.24));transform:scale(.97)}
     .ldsp-action-btn:only-child{flex:0 1 auto}
     .ldsp-action-btn .ldsp-action-icon{flex-shrink:0}
     .ldsp-action-btn .ldsp-action-text{overflow:hidden;text-overflow:ellipsis}
     @media (max-width:320px){#ldsp-panel{--w:240px}#ldsp-panel.collapsed{width:34px!important;height:34px!important;border-radius:8px}#ldsp-panel.collapsed .ldsp-toggle-logo{width:18px;height:18px}.ldsp-hdr{padding:5px 6px;gap:3px;min-height:36px}.ldsp-hdr-info{gap:3px}.ldsp-site-icon{width:16px;height:16px;border-radius:4px;border-width:1px}.ldsp-site-ver{display:none}.ldsp-title{font-size:9px}.ldsp-app-name{display:none}.ldsp-hdr-btns{gap:2px}.ldsp-hdr-btns button{width:20px;height:20px;font-size:9px;border-radius:4px}.ldsp-user-actions{flex-direction:column}.ldsp-action-btn{flex:1 1 100%;min-width:0}}
-    .ldsp-logout-btn,.ldsp-ticket-btn{flex:0 0 auto;min-width:auto;padding:5px 8px}
+    .ldsp-logout-btn,.ldsp-ticket-btn,.ldsp-melon-btn{flex:0 0 auto;min-width:auto;padding:5px 8px}
     .ldsp-logout-btn{background:linear-gradient(135deg,rgba(239,68,68,.06),rgba(220,38,38,.08));border-color:rgba(239,68,68,.15);color:rgba(239,68,68,.7)}
     .ldsp-logout-btn:hover{background:linear-gradient(135deg,rgba(239,68,68,.12),rgba(220,38,38,.16));border-color:rgba(239,68,68,.3);color:#ef4444}
     .ldsp-login-btn{flex:1 1 100%;background:linear-gradient(135deg,rgba(212,168,83,.15),rgba(196,147,57,.2));border-color:rgba(212,168,83,.3);color:var(--warn);animation:login-pulse 2.5s ease-in-out infinite}
@@ -3459,6 +3458,240 @@
     .ldsp-ticket-reply-btn:hover{box-shadow:0 4px 12px rgba(107,140,239,.3)}
     .ldsp-ticket-reply-btn:disabled{opacity:.5;cursor:not-allowed}
     .ldsp-ticket-closed-hint{text-align:center;color:var(--txt-mut);font-size:10px;padding:10px}
+    /* 吃瓜助手样式 */
+    .ldsp-melon-btn{background:linear-gradient(135deg,rgba(74,222,128,.08),rgba(34,197,94,.12));border-color:rgba(74,222,128,.2);color:rgba(34,197,94,.85)}
+    .ldsp-melon-btn:hover{background:linear-gradient(135deg,rgba(74,222,128,.15),rgba(34,197,94,.2));border-color:rgba(74,222,128,.35);color:#22c55e}
+    .ldsp-melon-overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--bg);border-radius:0 0 var(--r-lg) var(--r-lg);z-index:10;display:none;flex-direction:column;overflow:hidden}
+    .ldsp-melon-overlay.show{display:flex}
+    .ldsp-melon-header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg-card);border-bottom:1px solid var(--border);flex-shrink:0}
+    .ldsp-melon-title{font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;color:var(--txt)}
+    .ldsp-melon-close{width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:var(--bg-el);border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--txt-sec);transition:background .15s,color .15s;cursor:pointer}
+    .ldsp-melon-close:hover{background:var(--err-bg);color:var(--err);border-color:var(--err)}
+    .ldsp-melon-tabs{display:flex;border-bottom:1px solid var(--border);padding:0 10px;background:var(--bg-card);flex-shrink:0}
+    .ldsp-melon-tab{padding:8px 12px;font-size:10px;font-weight:600;color:var(--txt-mut);border-bottom:2px solid transparent;transition:color .15s,border-color .15s;cursor:pointer}
+    .ldsp-melon-tab.active{color:var(--accent);border-color:var(--accent)}
+    .ldsp-melon-tab:hover:not(.active){color:var(--txt-sec)}
+    .ldsp-melon-body{flex:1;overflow-y:auto;padding:12px;background:var(--bg);display:flex;flex-direction:column;gap:10px}
+    .ldsp-melon-info{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px;font-size:11px}
+    .ldsp-melon-info-title{font-weight:600;color:var(--txt);margin-bottom:6px;display:flex;align-items:center;gap:5px}
+    .ldsp-melon-info-row{display:flex;align-items:center;gap:6px;color:var(--txt-sec);font-size:10px;margin-top:4px}
+    .ldsp-melon-info-label{color:var(--txt-mut);min-width:50px}
+    .ldsp-melon-info-value{color:var(--txt);font-weight:500}
+    .ldsp-melon-range{display:flex;align-items:center;gap:8px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px;flex-wrap:wrap}
+    .ldsp-melon-range-label{font-size:10px;color:var(--txt-sec);white-space:nowrap}
+    .ldsp-melon-range-input{width:70px;padding:5px 8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:11px;color:var(--txt);text-align:center}
+    .ldsp-melon-range-input:focus{border-color:var(--accent);outline:none}
+    .ldsp-melon-range-sep{color:var(--txt-mut);font-size:10px}
+    .ldsp-melon-range-hint{font-size:9px;color:var(--txt-mut);margin-left:auto}
+    /* 模式选择器 - 卡片式设计 */
+    .ldsp-melon-mode-selector{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px}
+    .ldsp-melon-mode-label{font-size:10px;color:var(--txt-sec);margin-bottom:8px;display:block}
+    .ldsp-melon-mode-cards{display:flex;gap:8px}
+    .ldsp-melon-mode-card{flex:1;display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-el);border:2px solid var(--border);border-radius:var(--r-md);cursor:pointer;transition:all .2s}
+    .ldsp-melon-mode-card:hover{border-color:var(--txt-mut);background:var(--bg)}
+    .ldsp-melon-mode-card.active{border-color:var(--accent);background:rgba(107,140,239,.08)}
+    .ldsp-melon-mode-card input{display:none}
+    .ldsp-melon-mode-card-icon{font-size:20px;flex-shrink:0}
+    .ldsp-melon-mode-card-content{flex:1;min-width:0}
+    .ldsp-melon-mode-card-title{font-size:11px;font-weight:600;color:var(--txt);margin-bottom:2px}
+    .ldsp-melon-mode-card-desc{font-size:9px;color:var(--txt-mut)}
+    .ldsp-melon-mode-card.active .ldsp-melon-mode-card-title{color:var(--accent)}
+    .ldsp-melon-actions{display:flex;gap:8px}
+    .ldsp-melon-btn-summarize{flex:1;padding:10px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;border:none;border-radius:var(--r-sm);font-size:12px;font-weight:600;cursor:pointer;transition:opacity .15s,transform .2s,box-shadow .2s;display:flex;align-items:center;justify-content:center;gap:6px}
+    .ldsp-melon-btn-summarize:hover{box-shadow:0 4px 16px rgba(34,197,94,.35);transform:translateY(-1px)}
+    .ldsp-melon-btn-summarize:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
+    .ldsp-melon-btn-summarize.loading{background:linear-gradient(135deg,#6b8cef,#5a7de0)}
+    /* 输出区域 */
+    .ldsp-melon-output-wrapper{display:flex;flex-direction:column;flex:1;min-height:0}
+    .ldsp-melon-output-header{display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:var(--bg-card);border:1px solid var(--border);border-bottom:none;border-radius:var(--r-md) var(--r-md) 0 0}
+    .ldsp-melon-output-title{font-size:10px;font-weight:600;color:var(--txt-sec)}
+    .ldsp-melon-output-actions{display:flex;gap:6px}
+    .ldsp-melon-resize-btn{display:flex;align-items:center;gap:4px;padding:4px 8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:10px;color:var(--txt-sec);cursor:pointer;transition:all .15s}
+    .ldsp-melon-resize-btn:hover{background:rgba(107,140,239,.1);border-color:var(--accent);color:var(--accent)}
+    .ldsp-melon-copy-btn{display:flex;align-items:center;gap:4px;padding:4px 8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:10px;color:var(--txt-sec);cursor:pointer;transition:all .15s}
+    .ldsp-melon-copy-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+    .ldsp-melon-output{flex:1;min-height:120px;max-height:200px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:12px;overflow-y:auto;font-size:11px;line-height:1.6;color:var(--txt);transition:max-height .3s ease}
+    .ldsp-melon-output.expanded{max-height:400px}
+    .ldsp-melon-output-header+.ldsp-melon-output{border-radius:0 0 var(--r-md) var(--r-md)}
+    .ldsp-melon-output:empty::before{content:'点击「立即吃瓜」获取帖子摘要...';color:var(--txt-mut);font-style:italic}
+    .ldsp-melon-output-content{min-height:20px}
+    .ldsp-melon-cursor{display:inline-block;color:var(--accent);animation:ldsp-blink 1s infinite}
+    @keyframes ldsp-blink{0%,50%{opacity:1}51%,100%{opacity:0}}
+    /* Markdown 渲染 */
+    .ldsp-melon-markdown{font-size:11px;line-height:1.7}
+    .ldsp-melon-markdown .ldsp-melon-p{margin:6px 0}
+    .ldsp-melon-markdown .ldsp-melon-h2,.ldsp-melon-markdown .ldsp-melon-h3{font-size:13px;font-weight:700;margin:12px 0 8px;color:var(--txt);border-bottom:1px solid var(--border);padding-bottom:4px}
+    .ldsp-melon-markdown .ldsp-melon-h4,.ldsp-melon-markdown .ldsp-melon-h5{font-size:12px;font-weight:600;margin:10px 0 6px;color:var(--txt)}
+    .ldsp-melon-markdown .ldsp-melon-ul,.ldsp-melon-markdown .ldsp-melon-ol{margin:6px 0;padding-left:18px}
+    .ldsp-melon-markdown .ldsp-melon-li,.ldsp-melon-markdown .ldsp-melon-oli{margin:3px 0}
+    .ldsp-melon-markdown .ldsp-melon-quote{margin:8px 0;padding:8px 12px;background:var(--bg-el);border-left:3px solid var(--accent);border-radius:0 var(--r-sm) var(--r-sm) 0;color:var(--txt-sec);font-style:italic}
+    .ldsp-melon-markdown strong{color:var(--accent);font-weight:600}
+    .ldsp-melon-markdown .ldsp-melon-inline-code{background:var(--bg-el);padding:2px 5px;border-radius:3px;font-family:monospace;font-size:10px}
+    .ldsp-melon-markdown .ldsp-melon-codeblock{background:var(--bg-el);padding:10px;border-radius:var(--r-sm);overflow-x:auto;margin:8px 0}
+    .ldsp-melon-markdown .ldsp-melon-codeblock code{background:none;padding:0;font-family:monospace;font-size:10px}
+    .ldsp-melon-markdown .ldsp-melon-hr{border:none;border-top:1px solid var(--border);margin:12px 0}
+    .ldsp-melon-markdown .ldsp-melon-link{color:var(--accent);text-decoration:none}
+    .ldsp-melon-markdown .ldsp-melon-link:hover{text-decoration:underline}
+    .ldsp-melon-output h1,.ldsp-melon-output h2,.ldsp-melon-output h3{font-size:13px;font-weight:700;margin:12px 0 8px;color:var(--txt);border-bottom:1px solid var(--border);padding-bottom:4px}
+    .ldsp-melon-output h1:first-child,.ldsp-melon-output h2:first-child,.ldsp-melon-output h3:first-child{margin-top:0}
+    .ldsp-melon-output h4,.ldsp-melon-output h5{font-size:12px;font-weight:600;margin:10px 0 6px;color:var(--txt)}
+    .ldsp-melon-output p{margin:6px 0}
+    .ldsp-melon-output ul,.ldsp-melon-output ol{margin:6px 0;padding-left:18px}
+    .ldsp-melon-output li{margin:3px 0}
+    .ldsp-melon-output blockquote{margin:8px 0;padding:8px 12px;background:var(--bg-el);border-left:3px solid var(--accent);border-radius:0 var(--r-sm) var(--r-sm) 0;color:var(--txt-sec);font-style:italic}
+    .ldsp-melon-output strong{color:var(--accent);font-weight:600}
+    .ldsp-melon-output code{background:var(--bg-el);padding:2px 5px;border-radius:3px;font-family:monospace;font-size:10px}
+    .ldsp-melon-output pre{background:var(--bg-el);padding:10px;border-radius:var(--r-sm);overflow-x:auto;margin:8px 0}
+    .ldsp-melon-output pre code{background:none;padding:0}
+    .ldsp-melon-output table{width:100%;border-collapse:collapse;margin:8px 0;font-size:10px}
+    .ldsp-melon-output th,.ldsp-melon-output td{border:1px solid var(--border);padding:6px 8px;text-align:left}
+    .ldsp-melon-output th{background:var(--bg-el);font-weight:600}
+    .ldsp-melon-output hr{border:none;border-top:1px solid var(--border);margin:12px 0}
+    .ldsp-melon-output a{color:var(--accent);text-decoration:none}
+    .ldsp-melon-output a:hover{text-decoration:underline}
+    .ldsp-melon-status{text-align:center;padding:20px;color:var(--txt-mut);font-size:11px}
+    .ldsp-melon-status-icon{font-size:24px;margin-bottom:8px}
+    .ldsp-melon-error{color:var(--err);background:var(--err-bg);padding:10px;border-radius:var(--r-sm);font-size:11px}
+    /* 历史记录 */
+    .ldsp-melon-history{display:flex;flex-direction:column;height:100%}
+    .ldsp-melon-history-header{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);margin-bottom:10px}
+    .ldsp-melon-history-header-left{display:flex;align-items:center;gap:8px}
+    .ldsp-melon-history-count{font-size:10px;color:var(--txt-mut)}
+    .ldsp-melon-history-storage-badge{font-size:9px;color:var(--txt-mut);background:var(--bg-el);padding:2px 6px;border-radius:10px}
+    .ldsp-melon-history-storage-hint{font-size:10px;color:var(--txt-mut);margin-top:8px}
+    .ldsp-melon-history-clear-all{padding:4px 8px;background:var(--err-bg);border:1px solid rgba(239,68,68,.2);border-radius:var(--r-sm);font-size:9px;color:var(--err);cursor:pointer;transition:all .15s}
+    .ldsp-melon-history-clear-all:hover{background:var(--err);color:#fff}
+    .ldsp-melon-history-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
+    .ldsp-melon-history-item{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px;transition:border-color .15s}
+    .ldsp-melon-history-item:hover{border-color:var(--accent)}
+    .ldsp-melon-history-item-header{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:6px}
+    .ldsp-melon-history-item-title{font-size:11px;font-weight:600;color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+    .ldsp-melon-history-item-meta{display:flex;align-items:center;gap:6px;flex-shrink:0}
+    .ldsp-melon-history-mode{font-size:9px;padding:2px 6px;border-radius:10px;font-weight:500}
+    .ldsp-melon-history-mode.brief{background:rgba(59,130,246,.1);color:#3b82f6}
+    .ldsp-melon-history-mode.detailed{background:rgba(34,197,94,.1);color:#22c55e}
+    .ldsp-melon-history-date{font-size:9px;color:var(--txt-mut)}
+    .ldsp-melon-history-item-preview{font-size:10px;color:var(--txt-sec);line-height:1.5;margin-bottom:8px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+    .ldsp-melon-history-item-actions{display:flex;gap:6px}
+    .ldsp-melon-history-btn{padding:4px 8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:9px;color:var(--txt-sec);cursor:pointer;transition:all .15s}
+    .ldsp-melon-history-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+    .ldsp-melon-history-delete:hover{background:var(--err);border-color:var(--err)}
+    .ldsp-melon-history-empty{text-align:center;padding:40px 20px;color:var(--txt-mut)}
+    .ldsp-melon-history-empty-icon{font-size:36px;margin-bottom:10px}
+    .ldsp-melon-history-empty-text{font-size:12px;font-weight:500;margin-bottom:4px}
+    .ldsp-melon-history-empty-hint{font-size:10px;color:var(--txt-mut)}
+    .ldsp-melon-history-detail{display:flex;flex-direction:column;height:100%}
+    .ldsp-melon-history-detail-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+    .ldsp-melon-history-detail-actions{display:flex;gap:6px}
+    .ldsp-melon-history-back{padding:6px 12px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:10px;color:var(--txt-sec);cursor:pointer;transition:all .15s}
+    .ldsp-melon-history-back:hover{background:var(--bg-card);border-color:var(--accent);color:var(--accent)}
+    .ldsp-melon-history-expand-btn{padding:6px 12px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:10px;color:var(--accent);cursor:pointer;transition:all .15s}
+    .ldsp-melon-history-expand-btn:hover{background:rgba(107,140,239,.1);border-color:var(--accent)}
+    .ldsp-melon-history-copy-all{padding:6px 12px;background:var(--accent);border:none;border-radius:var(--r-sm);font-size:10px;color:#fff;cursor:pointer;transition:opacity .15s}
+    .ldsp-melon-history-copy-all:hover{opacity:.85}
+    .ldsp-melon-history-detail-info{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px;margin-bottom:10px}
+    .ldsp-melon-history-detail-title{font-size:12px;font-weight:600;color:var(--txt);margin-bottom:4px}
+    .ldsp-melon-history-detail-meta{font-size:10px;color:var(--txt-mut)}
+    .ldsp-melon-history-detail-content{flex:1;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:12px;overflow-y:auto;font-size:11px;line-height:1.6}
+    /* 设置页 */
+    .ldsp-melon-settings{display:flex;flex-direction:column;gap:12px}
+    .ldsp-melon-setting-group{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:12px}
+    .ldsp-melon-setting-title{font-size:11px;font-weight:600;color:var(--txt);margin-bottom:10px;display:flex;align-items:center;gap:5px}
+    .ldsp-melon-setting-row{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+    .ldsp-melon-setting-row:last-child{margin-bottom:0}
+    .ldsp-melon-setting-label{font-size:10px;color:var(--txt-sec)}
+    .ldsp-melon-setting-input{padding:8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:11px;color:var(--txt)}
+    .ldsp-melon-setting-input:focus{border-color:var(--accent);outline:none}
+    .ldsp-melon-setting-input::placeholder{color:var(--txt-mut)}
+    .ldsp-melon-setting-input:disabled{background:var(--bg);color:var(--txt-mut);cursor:not-allowed}
+    .ldsp-melon-setting-actions{display:flex;gap:8px}
+    .ldsp-melon-setting-btn{flex:1;padding:10px 12px;background:var(--grad);color:#fff;border:none;border-radius:var(--r-sm);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s}
+    .ldsp-melon-setting-btn:hover{box-shadow:0 4px 12px rgba(107,140,239,.3);transform:translateY(-1px)}
+    .ldsp-melon-btn-edit{background:linear-gradient(135deg,#6b8cef,#5a7de0)}
+    .ldsp-melon-btn-save{background:linear-gradient(135deg,#22c55e,#16a34a)}
+    .ldsp-melon-btn-save:hover{box-shadow:0 4px 12px rgba(34,197,94,.35)}
+    .ldsp-melon-btn-prompt{background:linear-gradient(135deg,#6b8cef,#5a7de0)}
+    .ldsp-melon-setting-textarea{width:100%;padding:8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:10px;color:var(--txt);resize:vertical;min-height:60px;font-family:monospace;line-height:1.5}
+    .ldsp-melon-setting-textarea:focus{border-color:var(--accent);outline:none}
+    .ldsp-melon-setting-textarea::placeholder{color:var(--txt-mut);font-size:9px;white-space:pre-wrap}
+    .ldsp-melon-prompt-reset{margin-left:6px;cursor:pointer;color:var(--err);font-size:10px;opacity:.6;transition:all .15s}
+    .ldsp-melon-prompt-reset:hover{opacity:1;color:var(--err)}
+    .ldsp-melon-setting-prompt-actions{display:flex;gap:8px;margin-top:8px}
+    .ldsp-melon-setting-security{display:flex;align-items:flex-start;gap:10px;margin-top:12px;padding:12px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:var(--r-md)}
+    .ldsp-melon-setting-security-icon{font-size:18px;flex-shrink:0}
+    .ldsp-melon-setting-security-text{font-size:10px;color:var(--txt-sec);line-height:1.5}
+    .ldsp-melon-setting-security-text strong{color:var(--ok);font-weight:600}
+    .ldsp-melon-setting-hint{font-size:9px;color:var(--txt-mut);margin-top:2px}
+    .ldsp-melon-setting-danger{background:var(--err-bg);border-color:rgba(239,68,68,.2);text-align:center}
+    .ldsp-melon-setting-danger .ldsp-melon-setting-title{color:var(--err)}
+    .ldsp-melon-setting-danger-desc{font-size:10px;color:var(--txt-sec);margin-bottom:10px}
+    .ldsp-melon-setting-danger .ldsp-melon-setting-btn{display:inline-block;flex:none;min-width:160px}
+    .ldsp-melon-btn-danger{background:linear-gradient(135deg,#ef4444,#dc2626) !important}
+    .ldsp-melon-btn-danger:hover{box-shadow:0 4px 12px rgba(239,68,68,.35) !important}
+    .ldsp-melon-warning{background:rgba(212,168,83,.1);border:1px solid rgba(212,168,83,.3);border-radius:var(--r-sm);padding:8px 10px;font-size:10px;color:var(--warn);margin-bottom:8px}
+    .ldsp-melon-not-topic{text-align:center;padding:40px 20px;color:var(--txt-mut)}
+    .ldsp-melon-not-topic-icon{font-size:36px;margin-bottom:10px}
+    .ldsp-melon-not-topic-text{font-size:12px;line-height:1.6}
+    .ldsp-melon-not-topic-hint{font-size:10px;color:var(--txt-mut);opacity:.7;margin-top:8px}
+    /* 全屏展开查看弹窗 - 独立的变量定义以支持body级挂载 */
+    .ldsp-melon-viewer-overlay{--bg:#12131a;--bg-card:rgba(24,26,36,.98);--bg-hover:rgba(38,42,56,.95);--bg-el:rgba(32,35,48,.88);--txt:#e4e6ed;--txt-sec:#9499ad;--txt-mut:#5d6275;--accent:#6b8cef;--border:rgba(255,255,255,.06);--r-sm:6px;--r-md:10px;--r-lg:14px;--err:#e07a8d;--err-bg:rgba(224,122,141,.12);position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:99999;display:flex;align-items:center;justify-content:center;animation:ldsp-viewer-fade-in .2s}
+    .ldsp-melon-viewer-overlay.light{--bg:rgba(250,251,254,.97);--bg-card:rgba(255,255,255,.98);--bg-hover:rgba(238,242,250,.96);--bg-el:rgba(245,247,252,.94);--txt:#1e2030;--txt-sec:#4a5068;--txt-mut:#8590a6;--accent:#5070d0;--border:rgba(0,0,0,.08);--err:#d45d6e;--err-bg:rgba(212,93,110,.08)}
+    @keyframes ldsp-viewer-fade-in{from{opacity:0}to{opacity:1}}
+    @keyframes ldsp-viewer-scale-in{from{transform:scale(.9);opacity:0}to{transform:scale(1);opacity:1}}
+    .ldsp-melon-viewer{position:absolute;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:0 20px 60px rgba(0,0,0,.5);display:flex;flex-direction:column;min-width:320px;min-height:240px;max-width:95vw;max-height:90vh;overflow:hidden;animation:ldsp-viewer-scale-in .2s}
+    .ldsp-melon-viewer-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:var(--bg);border-bottom:1px solid var(--border);cursor:move;user-select:none;flex-shrink:0}
+    .ldsp-melon-viewer-title{font-size:13px;font-weight:700;color:var(--txt);display:flex;align-items:center;gap:8px}
+    .ldsp-melon-viewer-title-icon{font-size:16px}
+    .ldsp-melon-viewer-actions{display:flex;gap:6px}
+    .ldsp-melon-viewer-btn{width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:12px;color:var(--txt-sec);cursor:pointer;transition:all .15s}
+    .ldsp-melon-viewer-btn:hover{background:var(--bg-hover);border-color:var(--accent);color:var(--accent)}
+    .ldsp-melon-viewer-close:hover{background:var(--err-bg);border-color:var(--err);color:var(--err)}
+    .ldsp-melon-viewer-body{flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--bg-card)}
+    .ldsp-melon-viewer-info{padding:12px 16px;background:var(--bg-el);border-bottom:1px solid var(--border);flex-shrink:0}
+    .ldsp-melon-viewer-topic-title{font-size:14px;font-weight:700;color:var(--txt);line-height:1.4;margin-bottom:6px}
+    .ldsp-melon-viewer-meta{display:flex;align-items:center;gap:8px;font-size:10px;color:var(--txt-mut)}
+    .ldsp-melon-viewer-mode{padding:2px 6px;border-radius:8px;font-weight:600;font-size:9px}
+    .ldsp-melon-viewer-mode.brief{background:rgba(34,197,94,.15);color:#22c55e}
+    .ldsp-melon-viewer-mode.detailed{background:rgba(107,140,239,.15);color:#6b8cef}
+    .ldsp-melon-viewer-content{flex:1;overflow-y:auto;padding:16px;background:var(--bg-card);color:var(--txt)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown{font-size:13px;line-height:1.7;color:var(--txt)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-p{color:var(--txt)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown strong{color:var(--accent)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-h2,.ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-h3,.ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-h4{color:var(--txt);border-color:var(--border)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-quote{background:var(--bg-el);border-left-color:var(--accent);color:var(--txt-sec)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-inline-code{background:var(--bg-el);color:var(--txt)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-codeblock{background:var(--bg);border:1px solid var(--border);color:var(--txt);padding:10px;border-radius:6px;overflow-x:auto}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-ul,.ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-ol{margin:8px 0;padding-left:20px}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-li,.ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-oli{margin:4px 0;color:var(--txt)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-hr{border:none;border-top:1px solid var(--border);margin:12px 0}
+    .ldsp-melon-viewer-content::-webkit-scrollbar{width:6px}
+    .ldsp-melon-viewer-content::-webkit-scrollbar-track{background:var(--bg)}
+    .ldsp-melon-viewer-content::-webkit-scrollbar-thumb{background:var(--txt-mut);border-radius:3px}
+    .ldsp-melon-viewer-content::-webkit-scrollbar-thumb:hover{background:var(--txt-sec)}
+    /* 调整大小手柄 */
+    .ldsp-melon-resize-handle{position:absolute;background:transparent}
+    .ldsp-melon-resize-handle-e{top:10px;right:0;width:6px;height:calc(100% - 20px);cursor:e-resize}
+    .ldsp-melon-resize-handle-s{bottom:0;left:10px;width:calc(100% - 20px);height:6px;cursor:s-resize}
+    .ldsp-melon-resize-handle-se{bottom:0;right:0;width:16px;height:16px;cursor:se-resize}
+    .ldsp-melon-resize-handle-se::before{content:'';position:absolute;right:3px;bottom:3px;width:8px;height:8px;border-right:2px solid var(--txt-mut);border-bottom:2px solid var(--txt-mut);opacity:.5}
+    .ldsp-melon-resize-handle-w{top:10px;left:0;width:6px;height:calc(100% - 20px);cursor:w-resize}
+    .ldsp-melon-resize-handle-n{top:0;left:10px;width:calc(100% - 20px);height:6px;cursor:n-resize}
+    .ldsp-melon-resize-handle-nw{top:0;left:0;width:16px;height:16px;cursor:nw-resize}
+    .ldsp-melon-resize-handle-ne{top:0;right:0;width:16px;height:16px;cursor:ne-resize}
+    .ldsp-melon-resize-handle-sw{bottom:0;left:0;width:16px;height:16px;cursor:sw-resize}
+    /* 自定义确认对话框 */
+    .ldsp-melon-confirm-dialog{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:100;animation:ldsp-fade-in .15s}
+    .ldsp-melon-confirm-content{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-lg);padding:20px;width:85%;max-width:280px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.2);animation:ldsp-scale-in .2s}
+    @keyframes ldsp-fade-in{from{opacity:0}to{opacity:1}}
+    @keyframes ldsp-scale-in{from{transform:scale(.9);opacity:0}to{transform:scale(1);opacity:1}}
+    .ldsp-melon-confirm-icon{font-size:32px;margin-bottom:12px}
+    .ldsp-melon-confirm-message{font-size:12px;color:var(--txt);line-height:1.6;margin-bottom:16px}
+    .ldsp-melon-confirm-actions{display:flex;gap:10px}
+    .ldsp-melon-confirm-btn{flex:1;padding:10px 16px;border:none;border-radius:var(--r-sm);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s}
+    .ldsp-melon-confirm-cancel{background:var(--bg-el);color:var(--txt-sec);border:1px solid var(--border)}
+    .ldsp-melon-confirm-cancel:hover{background:var(--bg);border-color:var(--txt-mut)}
+    .ldsp-melon-confirm-ok{background:var(--err);color:#fff}
+    .ldsp-melon-confirm-ok:hover{background:#dc2626;box-shadow:0 4px 12px rgba(239,68,68,.3)}
     .ldsp-user-meta{display:flex;align-items:center;flex-wrap:wrap;margin-top:2px}
     .ldsp-follow-stats{display:flex;gap:6px;padding:2px 0}
     .ldsp-follow-combined{display:inline-flex;align-items:center;gap:3px;padding:2px 0;font-size:10px;color:var(--txt-mut)}
@@ -4262,6 +4495,1396 @@
                     this.overlay.remove();
                     this.overlay = null;
                 }
+            }
+        }
+
+        // ==================== 吃瓜助手 ====================
+        class MelonHelper {
+            static STORAGE_KEY = 'ldsp_melon_config';
+            static HISTORY_KEY = 'ldsp_melon_history';
+            
+            // 简略总结提示词
+            static PROMPT_BRIEF = `用简洁的方式总结以下论坛讨论：`;
+
+            // 详细总结提示词
+            static PROMPT_DETAILED = `详细分析和总结以下论坛讨论：`;
+
+            constructor(panelBody, renderer) {
+                this.panelBody = panelBody;
+                this.renderer = renderer;
+                this.overlay = null;
+                this.config = this._loadConfig();
+                this.history = this._loadHistory();
+                this._abortController = null;
+                this._isEditing = false;
+                this._topicCache = null;
+                this._currentOutput = '';  // 当前输出的原始文本
+                this._summaryMode = 'detailed';  // 默认详细模式
+                this._lastUrl = location.href;  // 上次URL
+                this._urlCheckInterval = null;  // URL检测定时器
+            }
+
+            _loadConfig() {
+                try {
+                    const saved = GM_getValue(MelonHelper.STORAGE_KEY, null);
+                    const defaultConfig = {
+                        apiUrl: '',
+                        apiKey: '',
+                        model: 'gpt-4o-mini',
+                        promptBrief: '',
+                        promptDetailed: ''
+                    };
+                    return saved ? { ...defaultConfig, ...JSON.parse(saved) } : defaultConfig;
+                } catch {
+                    return { apiUrl: '', apiKey: '', model: 'gpt-4o-mini', promptBrief: '', promptDetailed: '' };
+                }
+            }
+
+            _saveConfig() {
+                try {
+                    GM_setValue(MelonHelper.STORAGE_KEY, JSON.stringify(this.config));
+                } catch (e) {
+                    Logger.error('[MelonHelper] Save config failed:', e);
+                }
+            }
+
+            _loadHistory() {
+                try {
+                    const saved = GM_getValue(MelonHelper.HISTORY_KEY, null);
+                    return saved ? JSON.parse(saved) : [];
+                } catch {
+                    return [];
+                }
+            }
+
+            _saveHistory() {
+                try {
+                    GM_setValue(MelonHelper.HISTORY_KEY, JSON.stringify(this.history));
+                } catch (e) {
+                    Logger.error('[MelonHelper] Save history failed:', e);
+                }
+            }
+
+            _addToHistory(topicId, title, summary, mode) {
+                // 以 topicId + mode 为主键，同一话题的简略和详细版可以同时存在
+                const historyKey = `${topicId}_${mode}`;
+                const existingIndex = this.history.findIndex(h => `${h.topicId}_${h.mode}` === historyKey);
+                const record = {
+                    topicId,
+                    title,
+                    summary,
+                    mode,
+                    timestamp: Date.now()
+                };
+                if (existingIndex >= 0) {
+                    this.history[existingIndex] = record;
+                } else {
+                    this.history.unshift(record);
+                }
+                // 最多保留 100 条
+                if (this.history.length > 100) {
+                    this.history = this.history.slice(0, 100);
+                }
+                this._saveHistory();
+            }
+
+            _clearHistory() {
+                this.history = [];
+                this._saveHistory();
+            }
+
+            init() {
+                this._createOverlay();
+            }
+
+            _createOverlay() {
+                this.overlay = document.createElement('div');
+                this.overlay.className = 'ldsp-melon-overlay';
+                this.overlay.innerHTML = `
+                    <div class="ldsp-melon-header">
+                        <div class="ldsp-melon-title">🍉 吃瓜助手</div>
+                        <div class="ldsp-melon-close">×</div>
+                    </div>
+                    <div class="ldsp-melon-tabs">
+                        <div class="ldsp-melon-tab active" data-tab="home">首页</div>
+                        <div class="ldsp-melon-tab" data-tab="history">历史</div>
+                        <div class="ldsp-melon-tab" data-tab="settings">设置</div>
+                    </div>
+                    <div class="ldsp-melon-body"></div>`;
+                if (this.panelBody) {
+                    this.panelBody.appendChild(this.overlay);
+                }
+                this._bindEvents();
+            }
+
+            _bindEvents() {
+                this.overlay.querySelector('.ldsp-melon-close').addEventListener('click', () => this.hide());
+                document.addEventListener('keydown', e => {
+                    if (e.key === 'Escape' && this.overlay.classList.contains('show')) this.hide();
+                });
+                this.overlay.querySelectorAll('.ldsp-melon-tab').forEach(tab => {
+                    tab.addEventListener('click', () => {
+                        this.overlay.querySelectorAll('.ldsp-melon-tab').forEach(t => t.classList.remove('active'));
+                        tab.classList.add('active');
+                        const tabName = tab.dataset.tab;
+                        if (tabName === 'home') {
+                            this._renderHome();
+                        } else if (tabName === 'history') {
+                            this._renderHistory();
+                        } else if (tabName === 'settings') {
+                            this._renderSettings();
+                        }
+                    });
+                });
+                
+            }
+            
+            // URL 监听 - 仅在面板打开且非话题页时启动
+            _startUrlWatch() {
+                if (this._urlCheckInterval) return;
+                this._urlCheckInterval = setInterval(() => {
+                    const currentUrl = location.href;
+                    if (currentUrl !== this._lastUrl) {
+                        this._lastUrl = currentUrl;
+                        this._topicCache = null;  // 清空话题缓存
+                        
+                        // 如果面板打开且在首页，检测到话题 ID 有变化时刷新
+                        if (this.overlay.classList.contains('show')) {
+                            const activeTab = this.overlay.querySelector('.ldsp-melon-tab.active');
+                            if (activeTab?.dataset.tab === 'home') {
+                                const newTopicId = this._getTopicId();
+                                // 只有当进入新话题时才刷新（从非话题页进入话题页）
+                                if (newTopicId) {
+                                    this._renderHome();
+                                    // 成功进入话题后停止轮询，避免频繁刷新
+                                    this._stopUrlWatch();
+                                }
+                            }
+                        }
+                    }
+                }, 800);  // 降低检测频率
+            }
+            
+            _stopUrlWatch() {
+                if (this._urlCheckInterval) {
+                    clearInterval(this._urlCheckInterval);
+                    this._urlCheckInterval = null;
+                }
+            }
+
+            show() {
+                // 更新 URL 记录
+                this._lastUrl = location.href;
+                
+                // 检查是否切换了话题，如果是则清空缓存
+                const currentTopicId = this._getTopicId();
+                if (this._topicCache && this._topicCache.id !== currentTopicId) {
+                    this._topicCache = null;
+                    Logger.log('[MelonHelper] Topic changed, clearing cache');
+                }
+                
+                this.overlay.classList.add('show');
+                const activeTab = this.overlay.querySelector('.ldsp-melon-tab.active');
+                if (activeTab?.dataset.tab === 'settings') {
+                    this._renderSettings();
+                } else {
+                    this._renderHome();
+                }
+            }
+
+            hide() {
+                // 停止 URL 监听
+                this._stopUrlWatch();
+                // 中止正在进行的请求
+                if (this._abortController) {
+                    this._abortController.abort();
+                    this._abortController = null;
+                }
+                this.overlay.classList.remove('show');
+            }
+
+            _getTopicId() {
+                return window.location.href.match(/\/t(?:opic)?\/[^\/]+\/(\d+)/)?.[1] || 
+                       window.location.href.match(/\/t(?:opic)?\/(\d+)/)?.[1];
+            }
+
+            _getReplyCount() {
+                const el = document.querySelector('.timeline-replies');
+                if (!el) return 0;
+                const txt = el.textContent.trim();
+                return parseInt(txt.includes('/') ? txt.split('/')[1] : txt) || 0;
+            }
+
+            async _getTopicInfo(forceRefresh = false) {
+                const topicId = this._getTopicId();
+                if (!topicId) return null;
+                
+                // 使用缓存（同一话题不重复请求）
+                if (!forceRefresh && this._topicCache && this._topicCache.id === topicId) {
+                    Logger.log('[MelonHelper] Using cached topic info');
+                    return this._topicCache;
+                }
+                
+                try {
+                    Logger.log('[MelonHelper] Fetching topic info for:', topicId);
+                    const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
+                    const response = await fetch(`${location.origin}/t/${topicId}.json`, {
+                        headers: {
+                            'x-csrf-token': csrf,
+                            'x-requested-with': 'XMLHttpRequest'
+                        }
+                    });
+                    if (!response.ok) {
+                        Logger.warn('[MelonHelper] Topic API response not ok:', response.status);
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    const data = await response.json();
+                    Logger.log('[MelonHelper] Topic data received:', { title: data.title, posts_count: data.posts_count });
+                    
+                    this._topicCache = {
+                        id: topicId,
+                        title: data.title || '未知标题',
+                        category: data.category_id ? (document.querySelector('.category-name')?.textContent || '') : '',
+                        postsCount: data.posts_count || 1,
+                        replyCount: Math.max(0, (data.posts_count || 1) - 1),
+                        views: data.views || 0,
+                        likeCount: data.like_count || 0,
+                        createdAt: data.created_at,
+                        lastPostedAt: data.last_posted_at
+                    };
+                    return this._topicCache;
+                } catch (e) {
+                    Logger.error('[MelonHelper] Get topic info failed:', e);
+                    // 降级：从页面 DOM 获取
+                    const fallbackInfo = {
+                        id: topicId,
+                        title: document.querySelector('.fancy-title, .topic-title')?.textContent?.trim() || '当前话题',
+                        replyCount: this._getReplyCount(),
+                        postsCount: Math.max(1, this._getReplyCount() + 1),
+                        views: 0
+                    };
+                    Logger.log('[MelonHelper] Using fallback info:', fallbackInfo);
+                    return fallbackInfo;
+                }
+            }
+
+            async _fetchDialogues(topicId, start, end, progressCallback) {
+                Logger.log('[MelonHelper] Fetching dialogues:', { topicId, start, end });
+                const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
+                const opts = {
+                    headers: {
+                        'x-csrf-token': csrf,
+                        'x-requested-with': 'XMLHttpRequest'
+                    }
+                };
+
+                // 获取帖子ID列表
+                progressCallback?.('正在获取帖子列表...');
+                const idRes = await fetch(`${location.origin}/t/${topicId}/post_ids.json?post_number=0&limit=99999`, opts);
+                if (!idRes.ok) throw new Error(`获取帖子列表失败 (${idRes.status})`);
+                const idData = await idRes.json();
+                Logger.log('[MelonHelper] Total post IDs:', idData.post_ids?.length);
+                
+                let pIds = idData.post_ids.slice(Math.max(0, start - 1), end);
+                Logger.log('[MelonHelper] Selected post IDs count:', pIds.length);
+
+                // 如果包含第1楼，获取主帖信息确保第一楼ID正确
+                if (start <= 1 && pIds.length > 0) {
+                    const mainRes = await fetch(`${location.origin}/t/${topicId}.json`, opts);
+                    if (mainRes.ok) {
+                        const mainData = await mainRes.json();
+                        const firstId = mainData.post_stream?.posts?.[0]?.id;
+                        if (firstId && !pIds.includes(firstId)) {
+                            pIds.unshift(firstId);
+                            Logger.log('[MelonHelper] Added first post ID:', firstId);
+                        }
+                    }
+                }
+
+                if (pIds.length === 0) {
+                    throw new Error('没有找到帖子内容');
+                }
+
+                let text = '';
+                const totalBatches = Math.ceil(pIds.length / 200);
+                
+                // 分批获取帖子详情（每批200条）
+                for (let i = 0; i < pIds.length; i += 200) {
+                    const batchNum = Math.floor(i / 200) + 1;
+                    progressCallback?.(`正在获取帖子内容 (${batchNum}/${totalBatches})...`);
+                    
+                    const chunk = pIds.slice(i, i + 200);
+                    const q = chunk.map(id => `post_ids[]=${id}`).join('&');
+                    const res = await fetch(`${location.origin}/t/${topicId}/posts.json?${q}&include_suggested=false`, opts);
+                    if (!res.ok) throw new Error(`获取帖子详情失败 (${res.status})`);
+                    const data = await res.json();
+                    
+                    Logger.log('[MelonHelper] Batch', batchNum, 'posts count:', data.post_stream?.posts?.length);
+
+                    text += data.post_stream.posts.map(p => {
+                        let content = p.cooked || '';
+
+                        // 处理图片
+                        content = content.replace(
+                            /<div class="lightbox-wrapper">\s*<a class="lightbox" href="([^"]+)"(?:\s+data-download-href="([^"]+)")?[^>]*title="([^"]*)"[^>]*>[\s\S]*?<\/a>\s*<\/div>/gi,
+                            (match, hrefUrl, downloadHref, title) => {
+                                let imgUrl = hrefUrl || `${location.origin}${downloadHref || ''}`;
+                                const filename = title || '图片';
+                                return `\n[图片: ${filename}](${imgUrl})\n`;
+                            }
+                        );
+
+                        // 处理附件
+                        content = content.replace(
+                            /<a class="attachment" href="([^"]+)"[^>]*>([^<]+)<\/a>/gi,
+                            (match, url, name) => `\n[附件: ${name.trim()}](${url})\n`
+                        );
+
+                        // 处理emoji
+                        content = content.replace(
+                            /<img[^>]+class="emoji[^>]*alt="([^"]*)"[^>]*>/gi,
+                            '$1 '
+                        );
+
+                        // 处理引用块
+                        content = content.replace(
+                            /<aside class="quote(?:-modified)?[^>]*>[\s\S]*?<blockquote>([\s\S]*?)<\/blockquote>[\s\S]*?<\/aside>/gi,
+                            (match, quoteInner) => {
+                                let cleanQuote = quoteInner.replace(/<[^>]+>/g, '').trim();
+                                return `\n[引用]\n${cleanQuote}\n[/引用]\n`;
+                            }
+                        );
+
+                        // 移除所有HTML标签
+                        content = content.replace(/<[^>]+>/g, '').trim();
+
+                        // 格式化输出
+                        const userName = p.name || p.username;
+                        const userPart = `${userName}（${p.username}）`;
+                        let replyPart = '';
+
+                        if (p.reply_to_post_number && p.reply_to_user) {
+                            const replyToName = p.reply_to_user.name || p.reply_to_user.username;
+                            const replyToUsername = p.reply_to_user.username;
+                            replyPart = `-回复[${p.reply_to_post_number}楼] ${replyToName}（${replyToUsername}）`;
+                        }
+
+                        return `[${p.post_number}楼] ${userPart}${replyPart}:\n${content}`;
+                    }).join('\n\n');
+                }
+
+                return text;
+            }
+
+            _renderHome() {
+                const body = this.overlay.querySelector('.ldsp-melon-body');
+                const topicId = this._getTopicId();
+
+                if (!topicId) {
+                    // 非话题页，启动 URL 监听等待用户进入话题
+                    this._startUrlWatch();
+                    body.innerHTML = `
+                        <div class="ldsp-melon-not-topic">
+                            <div class="ldsp-melon-not-topic-icon">🍈</div>
+                            <div class="ldsp-melon-not-topic-text">请先进入一个话题帖子<br>才能使用吃瓜助手哦~</div>
+                            <div class="ldsp-melon-not-topic-hint">进入话题后会自动刷新</div>
+                        </div>`;
+                    return;
+                }
+
+                // 已在话题页，停止 URL 监听
+                this._stopUrlWatch();
+
+                // 先显示加载状态
+                body.innerHTML = `<div class="ldsp-melon-status"><div class="ldsp-melon-status-icon">⏳</div>正在获取话题信息...</div>`;
+
+                this._getTopicInfo().then(info => {
+                    if (!info) {
+                        body.innerHTML = `<div class="ldsp-melon-error">❌ 获取话题信息失败，请刷新页面后重试</div>`;
+                        return;
+                    }
+
+                    const totalPosts = info.postsCount || 1;
+                    const defaultEnd = totalPosts;
+                    const rangeHint = totalPosts > 100 ? `共${totalPosts}楼，内容较多可能需要较长时间` : `共${totalPosts}楼`;
+
+                    // 检查是否已配置 API
+                    const hasConfig = this.config.apiUrl && this.config.apiKey;
+
+                    body.innerHTML = `
+                        <div class="ldsp-melon-info">
+                            <div class="ldsp-melon-info-title">📋 ${Utils.escapeHtml(info.title)}</div>
+                            <div class="ldsp-melon-info-row">
+                                <span class="ldsp-melon-info-label">总楼层</span>
+                                <span class="ldsp-melon-info-value">${totalPosts} 楼</span>
+                            </div>
+                            ${info.views ? `<div class="ldsp-melon-info-row">
+                                <span class="ldsp-melon-info-label">浏览量</span>
+                                <span class="ldsp-melon-info-value">${info.views.toLocaleString()}</span>
+                            </div>` : ''}
+                            ${info.likeCount ? `<div class="ldsp-melon-info-row">
+                                <span class="ldsp-melon-info-label">点赞数</span>
+                                <span class="ldsp-melon-info-value">${info.likeCount}</span>
+                            </div>` : ''}
+                        </div>
+                        ${!hasConfig ? `<div class="ldsp-melon-warning">⚠️ 请先在「设置」中配置 API 信息</div>` : ''}
+                        <div class="ldsp-melon-range">
+                            <span class="ldsp-melon-range-label">楼层范围</span>
+                            <input type="number" class="ldsp-melon-range-input" id="melon-start" value="1" min="1" max="${totalPosts}">
+                            <span class="ldsp-melon-range-sep">~</span>
+                            <input type="number" class="ldsp-melon-range-input" id="melon-end" value="${defaultEnd}" min="1" max="${totalPosts}">
+                            <span class="ldsp-melon-range-hint">${rangeHint}</span>
+                        </div>
+                        <div class="ldsp-melon-mode-selector">
+                            <span class="ldsp-melon-mode-label">总结模式</span>
+                            <div class="ldsp-melon-mode-cards">
+                                <label class="ldsp-melon-mode-card ${this._summaryMode === 'brief' ? 'active' : ''}">
+                                    <input type="radio" name="melon-mode" value="brief" ${this._summaryMode === 'brief' ? 'checked' : ''}>
+                                    <div class="ldsp-melon-mode-card-icon">⚡</div>
+                                    <div class="ldsp-melon-mode-card-content">
+                                        <div class="ldsp-melon-mode-card-title">简略模式</div>
+                                        <div class="ldsp-melon-mode-card-desc">~150字快速概要</div>
+                                    </div>
+                                </label>
+                                <label class="ldsp-melon-mode-card ${this._summaryMode === 'detailed' ? 'active' : ''}">
+                                    <input type="radio" name="melon-mode" value="detailed" ${this._summaryMode === 'detailed' ? 'checked' : ''}>
+                                    <div class="ldsp-melon-mode-card-icon">📊</div>
+                                    <div class="ldsp-melon-mode-card-content">
+                                        <div class="ldsp-melon-mode-card-title">详细模式</div>
+                                        <div class="ldsp-melon-mode-card-desc">完整结构化分析</div>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="ldsp-melon-actions">
+                            <button class="ldsp-melon-btn-summarize" id="melon-summarize" ${!hasConfig ? 'disabled' : ''}>
+                                <span>🍉</span>
+                                <span>立即吃瓜</span>
+                            </button>
+                        </div>
+                        <div class="ldsp-melon-output-wrapper">
+                            <div class="ldsp-melon-output-header" style="display:none;">
+                                <span class="ldsp-melon-output-title">📝 总结结果</span>
+                                <div class="ldsp-melon-output-actions">
+                                    <button class="ldsp-melon-resize-btn" id="melon-expand" title="在新窗口中展开查看">
+                                        <span>🔍</span>
+                                        <span>展开</span>
+                                    </button>
+                                    <button class="ldsp-melon-copy-btn" id="melon-copy" title="复制到剪贴板">
+                                        <span>📋</span>
+                                        <span>复制</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="ldsp-melon-output" id="melon-output"></div>
+                        </div>`;
+
+                    // 绑定模式选择
+                    body.querySelectorAll('input[name="melon-mode"]').forEach(radio => {
+                        radio.addEventListener('change', (e) => {
+                            this._summaryMode = e.target.value;
+                            // 更新卡片active状态
+                            body.querySelectorAll('.ldsp-melon-mode-card').forEach(card => {
+                                card.classList.toggle('active', card.querySelector('input').value === e.target.value);
+                            });
+                        });
+                    });
+
+                    // 绑定复制按钮
+                    body.querySelector('#melon-copy').addEventListener('click', () => this._copyOutput());
+                    
+                    // 绑定展开按钮 - 打开独立大窗口
+                    body.querySelector('#melon-expand').addEventListener('click', () => {
+                        if (this._currentOutput) {
+                            this._showViewer({
+                                title: info.title,
+                                summary: this._currentOutput,
+                                mode: this._summaryMode,
+                                topicId: info.id
+                            });
+                        }
+                    });
+
+                    body.querySelector('#melon-summarize').addEventListener('click', () => this._doSummarize(info));
+                }).catch(e => {
+                    Logger.error('[MelonHelper] Render home error:', e);
+                    body.innerHTML = `<div class="ldsp-melon-error">❌ 获取话题信息失败: ${Utils.escapeHtml(e.message)}</div>`;
+                });
+            }
+
+            async _copyOutput() {
+                if (!this._currentOutput) {
+                    return;
+                }
+                try {
+                    await navigator.clipboard.writeText(this._currentOutput);
+                    const copyBtn = this.overlay.querySelector('#melon-copy');
+                    if (copyBtn) {
+                        const originalText = copyBtn.innerHTML;
+                        copyBtn.innerHTML = '<span>✅</span><span>已复制</span>';
+                        setTimeout(() => {
+                            copyBtn.innerHTML = originalText;
+                        }, 1500);
+                    }
+                } catch (e) {
+                    Logger.error('[MelonHelper] Copy failed:', e);
+                }
+            }
+
+            async _doSummarize(topicInfo) {
+                const body = this.overlay.querySelector('.ldsp-melon-body');
+                const btn = body.querySelector('#melon-summarize');
+                const output = body.querySelector('#melon-output');
+                const outputHeader = body.querySelector('.ldsp-melon-output-header');
+                const startInput = body.querySelector('#melon-start');
+                const endInput = body.querySelector('#melon-end');
+
+                const start = parseInt(startInput.value) || 1;
+                const end = parseInt(endInput.value) || topicInfo.postsCount;
+
+                Logger.log('[MelonHelper] Starting summarize:', { topicId: topicInfo.id, start, end, mode: this._summaryMode });
+
+                if (start > end) {
+                    output.innerHTML = '<div class="ldsp-melon-error">❌ 起始楼层不能大于结束楼层</div>';
+                    return;
+                }
+
+                if (start < 1) {
+                    output.innerHTML = '<div class="ldsp-melon-error">❌ 起始楼层不能小于1</div>';
+                    return;
+                }
+
+                if (!this.config.apiUrl || !this.config.apiKey) {
+                    output.innerHTML = '<div class="ldsp-melon-error">❌ 请先在「设置」中配置 API 地址和密钥</div>';
+                    return;
+                }
+
+                btn.disabled = true;
+                btn.classList.add('loading');
+                this._currentOutput = '';  // 清空当前输出
+                outputHeader.style.display = 'none';  // 隐藏复制按钮
+                
+                const updateStatus = (msg) => {
+                    btn.innerHTML = `<span>⏳</span><span>${msg}</span>`;
+                };
+                
+                updateStatus('获取帖子内容...');
+                output.innerHTML = '<div class="ldsp-melon-status"><div class="ldsp-melon-status-icon">🔄</div>正在获取帖子内容...</div>';
+
+                try {
+                    // 1. 获取帖子内容
+                    const dialogues = await this._fetchDialogues(topicInfo.id, start, end, updateStatus);
+                    
+                    Logger.log('[MelonHelper] Dialogues length:', dialogues?.length);
+                    
+                    if (!dialogues || dialogues.trim().length < 20) {
+                        throw new Error('获取帖子内容失败或内容为空');
+                    }
+
+                    updateStatus('AI 分析中...');
+                    output.innerHTML = '<div class="ldsp-melon-output-content"></div><div class="ldsp-melon-cursor">▌</div>';
+
+                    // 2. 根据模式选择提示词（优先使用自定义提示词）
+                    const prompt = this._summaryMode === 'brief' 
+                        ? (this.config.promptBrief || MelonHelper.PROMPT_BRIEF)
+                        : (this.config.promptDetailed || MelonHelper.PROMPT_DETAILED);
+                    const userContent = `话题标题: ${topicInfo.title}\n\n帖子内容 (第${start}楼 ~ 第${end}楼):\n${dialogues}`;
+
+                    Logger.log('[MelonHelper] Calling AI, content length:', userContent.length, 'mode:', this._summaryMode);
+                    this._abortController = new AbortController();
+
+                    // 3. 流式调用 AI 接口
+                    await this._callAIStream(prompt, userContent, this._abortController.signal, (chunk) => {
+                        // 增量更新
+                        this._currentOutput += chunk;
+                        const contentDiv = output.querySelector('.ldsp-melon-output-content');
+                        if (contentDiv) {
+                            contentDiv.innerHTML = this._renderMarkdown(this._currentOutput);
+                            // 自动滚动到底部
+                            output.scrollTop = output.scrollHeight;
+                        }
+                    });
+                    
+                    // 移除光标
+                    const cursor = output.querySelector('.ldsp-melon-cursor');
+                    if (cursor) cursor.remove();
+                    
+                    Logger.log('[MelonHelper] AI response complete, length:', this._currentOutput?.length);
+                    
+                    // 显示复制按钮
+                    outputHeader.style.display = 'flex';
+
+                    // 保存到历史
+                    this._addToHistory(topicInfo.id, topicInfo.title, this._currentOutput, this._summaryMode);
+                    
+                    this.renderer?.showToast('✅ 吃瓜完成！');
+
+                } catch (e) {
+                    Logger.error('[MelonHelper] Summarize error:', e);
+                    // 移除光标
+                    const cursor = output.querySelector('.ldsp-melon-cursor');
+                    if (cursor) cursor.remove();
+                    
+                    if (e.name === 'AbortError') {
+                        output.innerHTML = '<div class="ldsp-melon-status"><div class="ldsp-melon-status-icon">⏹️</div>已取消</div>';
+                    } else {
+                        output.innerHTML = `<div class="ldsp-melon-error">❌ ${Utils.escapeHtml(e.message || '请求失败')}</div>`;
+                    }
+                } finally {
+                    btn.disabled = false;
+                    btn.classList.remove('loading');
+                    btn.innerHTML = '<span>🍉</span><span>立即吃瓜</span>';
+                    this._abortController = null;
+                }
+            }
+
+            async _callAIStream(systemPrompt, userContent, signal, onChunk) {
+                const { apiUrl, apiKey, model } = this.config;
+                
+                // 构建流式请求体
+                const requestBody = {
+                    model: model || 'gpt-4o-mini',
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: userContent }
+                    ],
+                    max_tokens: 4096,
+                    temperature: 0.7,
+                    stream: true  // 启用流式输出
+                };
+
+                Logger.log('[MelonHelper] Calling AI API (stream):', apiUrl);
+
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${apiKey}`
+                        },
+                        body: JSON.stringify(requestBody),
+                        signal: signal
+                    });
+
+                    Logger.log('[MelonHelper] API response status:', response.status);
+
+                    if (!response.ok) {
+                        let errMsg = `请求失败 (${response.status})`;
+                        try {
+                            const errData = await response.json();
+                            errMsg = errData.error?.message || errMsg;
+                            Logger.error('[MelonHelper] API error response:', errData);
+                        } catch {}
+                        throw new Error(errMsg);
+                    }
+
+                    // 处理 SSE 流式响应
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || '';  // 保留未完成的行
+
+                        for (const line of lines) {
+                            const trimmed = line.trim();
+                            if (!trimmed || trimmed === 'data: [DONE]') continue;
+                            if (!trimmed.startsWith('data: ')) continue;
+
+                            try {
+                                const json = JSON.parse(trimmed.slice(6));
+                                const content = json.choices?.[0]?.delta?.content;
+                                if (content) {
+                                    onChunk(content);
+                                }
+                            } catch (e) {
+                                // 忽略解析错误
+                                Logger.log('[MelonHelper] SSE parse skip:', trimmed);
+                            }
+                        }
+                    }
+
+                    Logger.log('[MelonHelper] Stream complete');
+                } catch (e) {
+                    if (e.name === 'AbortError') {
+                        throw e;
+                    }
+                    Logger.error('[MelonHelper] Stream fetch error:', e);
+                    if (e.message === 'Failed to fetch' || e.name === 'TypeError') {
+                        throw new Error('网络请求失败，请检查 API 地址是否正确，或该 API 是否支持跨域请求');
+                    }
+                    throw e;
+                }
+            }
+
+            _renderMarkdown(md) {
+                if (!md) return '';
+                
+                let html = md;
+                
+                // 1. 保护代码块，先提取出来
+                const codeBlocks = [];
+                html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
+                    const placeholder = `%%CODEBLOCK_${codeBlocks.length}%%`;
+                    codeBlocks.push(`<pre class="ldsp-melon-codeblock"><code>${Utils.escapeHtml(code.trim())}</code></pre>`);
+                    return placeholder;
+                });
+                
+                // 2. 行内代码
+                const inlineCodes = [];
+                html = html.replace(/`([^`\n]+)`/g, (match, code) => {
+                    const placeholder = `%%INLINECODE_${inlineCodes.length}%%`;
+                    inlineCodes.push(`<code class="ldsp-melon-inline-code">${Utils.escapeHtml(code)}</code>`);
+                    return placeholder;
+                });
+                
+                // 3. 标题 - 支持 emoji 开头的标题
+                html = html.replace(/^#### (.+)$/gm, '<h5 class="ldsp-melon-h5">$1</h5>');
+                html = html.replace(/^### (.+)$/gm, '<h4 class="ldsp-melon-h4">$1</h4>');
+                html = html.replace(/^## (.+)$/gm, '<h3 class="ldsp-melon-h3">$1</h3>');
+                html = html.replace(/^# (.+)$/gm, '<h2 class="ldsp-melon-h2">$1</h2>');
+                
+                // 4. 粗体 - 修复跨行和 emoji 后的情况
+                html = html.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');
+                html = html.replace(/__([^_]+?)__/g, '<strong>$1</strong>');
+                
+                // 5. 斜体
+                html = html.replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, '<em>$1</em>');
+                html = html.replace(/(?<!_)_([^_\n]+?)_(?!_)/g, '<em>$1</em>');
+                
+                // 6. 引用块
+                html = html.replace(/^> (.+)$/gm, '<blockquote class="ldsp-melon-quote">$1</blockquote>');
+                html = html.replace(/<\/blockquote>\n<blockquote class="ldsp-melon-quote">/g, '<br>');
+                
+                // 7. 无序列表
+                html = html.replace(/^[-*] (.+)$/gm, '<li class="ldsp-melon-li">$1</li>');
+                html = html.replace(/((?:<li class="ldsp-melon-li">[^<]*<\/li>\n?)+)/g, '<ul class="ldsp-melon-ul">$1</ul>');
+                
+                // 8. 有序列表
+                html = html.replace(/^\d+\. (.+)$/gm, '<li class="ldsp-melon-oli">$1</li>');
+                html = html.replace(/((?:<li class="ldsp-melon-oli">[^<]*<\/li>\n?)+)/g, '<ol class="ldsp-melon-ol">$1</ol>');
+                
+                // 9. 链接
+                html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" class="ldsp-melon-link">$1</a>');
+                
+                // 10. 分隔线
+                html = html.replace(/^---+$/gm, '<hr class="ldsp-melon-hr">');
+                html = html.replace(/^\*\*\*+$/gm, '<hr class="ldsp-melon-hr">');
+                
+                // 11. 段落处理
+                html = html.replace(/\n\n+/g, '</p><p class="ldsp-melon-p">');
+                html = html.replace(/\n/g, '<br>');
+                
+                // 12. 清理
+                html = html.replace(/<p class="ldsp-melon-p"><\/p>/g, '');
+                html = html.replace(/<p class="ldsp-melon-p">(<h[2-5])/g, '$1');
+                html = html.replace(/(<\/h[2-5]>)<\/p>/g, '$1');
+                html = html.replace(/<p class="ldsp-melon-p">(<ul)/g, '$1');
+                html = html.replace(/(<\/ul>)<\/p>/g, '$1');
+                html = html.replace(/<p class="ldsp-melon-p">(<ol)/g, '$1');
+                html = html.replace(/(<\/ol>)<\/p>/g, '$1');
+                html = html.replace(/<p class="ldsp-melon-p">(<blockquote)/g, '$1');
+                html = html.replace(/(<\/blockquote>)<\/p>/g, '$1');
+                html = html.replace(/<p class="ldsp-melon-p">(<pre)/g, '$1');
+                html = html.replace(/(<\/pre>)<\/p>/g, '$1');
+                html = html.replace(/<br><(h[2-5]|ul|ol|blockquote|pre)/g, '<$1');
+                html = html.replace(/<\/(h[2-5]|ul|ol|blockquote|pre)><br>/g, '</$1>');
+                
+                // 13. 恢复代码块
+                codeBlocks.forEach((block, i) => {
+                    html = html.replace(`%%CODEBLOCK_${i}%%`, block);
+                });
+                inlineCodes.forEach((code, i) => {
+                    html = html.replace(`%%INLINECODE_${i}%%`, code);
+                });
+                
+                return `<div class="ldsp-melon-markdown"><p class="ldsp-melon-p">${html}</p></div>`;
+            }
+
+            _renderSettings() {
+                const body = this.overlay.querySelector('.ldsp-melon-body');
+                const hasConfig = this.config.apiUrl && this.config.apiKey;
+                // 如果已有配置，默认不可编辑状态
+                const isEditing = !hasConfig || this._isEditing;
+                
+                body.innerHTML = `
+                    <div class="ldsp-melon-settings">
+                        <div class="ldsp-melon-setting-group">
+                            <div class="ldsp-melon-setting-title">🔑 API 配置</div>
+                            <div class="ldsp-melon-setting-row">
+                                <label class="ldsp-melon-setting-label">API 地址 <span style="color:var(--err)">*</span></label>
+                                <input type="text" class="ldsp-melon-setting-input" id="melon-api-url" 
+                                    placeholder="https://api.openai.com/v1/chat/completions" 
+                                    value="${Utils.escapeHtml(this.config.apiUrl || '')}"
+                                    ${!isEditing ? 'disabled' : ''}>
+                                <div class="ldsp-melon-setting-hint">支持 OpenAI 兼容格式的 API（如 OpenRouter、DeepSeek、Claude 等）</div>
+                            </div>
+                            <div class="ldsp-melon-setting-row">
+                                <label class="ldsp-melon-setting-label">API Key <span style="color:var(--err)">*</span></label>
+                                <input type="${isEditing ? 'text' : 'password'}" class="ldsp-melon-setting-input" id="melon-api-key" 
+                                    placeholder="sk-..." 
+                                    value="${Utils.escapeHtml(this.config.apiKey || '')}"
+                                    ${!isEditing ? 'disabled' : ''}>
+                            </div>
+                            <div class="ldsp-melon-setting-row">
+                                <label class="ldsp-melon-setting-label">模型名称</label>
+                                <input type="text" class="ldsp-melon-setting-input" id="melon-model" 
+                                    placeholder="gpt-4o-mini" 
+                                    value="${Utils.escapeHtml(this.config.model || 'gpt-4o-mini')}"
+                                    ${!isEditing ? 'disabled' : ''}>
+                                <div class="ldsp-melon-setting-hint">推荐: gpt-4o-mini, deepseek-chat, claude-3-haiku-20240307 等</div>
+                            </div>
+                        </div>
+                        <div class="ldsp-melon-setting-actions">
+                            ${isEditing ? `
+                                <button class="ldsp-melon-setting-btn ldsp-melon-btn-save" id="melon-save-settings">💾 保存设置</button>
+                            ` : `
+                                <button class="ldsp-melon-setting-btn ldsp-melon-btn-edit" id="melon-edit-settings">✏️ 编辑设置</button>
+                            `}
+                        </div>
+                        <div class="ldsp-melon-setting-group">
+                            <div class="ldsp-melon-setting-title">📝 自定义提示词</div>
+                            <div class="ldsp-melon-setting-hint" style="margin-bottom:10px">自定义 AI 总结的提示词，留空则使用默认提示词</div>
+                            <div class="ldsp-melon-setting-row">
+                                <label class="ldsp-melon-setting-label">
+                                    简略模式提示词
+                                    <span class="ldsp-melon-prompt-reset" data-prompt="brief" title="清空并恢复默认">🗑️</span>
+                                </label>
+                                <textarea class="ldsp-melon-setting-textarea" id="melon-prompt-brief" 
+                                    placeholder="${Utils.escapeHtml(MelonHelper.PROMPT_BRIEF.trim())}"
+                                    rows="5">${Utils.escapeHtml(this.config.promptBrief || '')}</textarea>
+                                <div class="ldsp-melon-setting-hint">${this.config.promptBrief ? '✅ 已自定义' : '💡 使用默认提示词'}</div>
+                            </div>
+                            <div class="ldsp-melon-setting-row">
+                                <label class="ldsp-melon-setting-label">
+                                    详细模式提示词
+                                    <span class="ldsp-melon-prompt-reset" data-prompt="detailed" title="清空并恢复默认">🗑️</span>
+                                </label>
+                                <textarea class="ldsp-melon-setting-textarea" id="melon-prompt-detailed" 
+                                    placeholder="${Utils.escapeHtml(MelonHelper.PROMPT_DETAILED.trim())}"
+                                    rows="8">${Utils.escapeHtml(this.config.promptDetailed || '')}</textarea>
+                                <div class="ldsp-melon-setting-hint">${this.config.promptDetailed ? '✅ 已自定义' : '💡 使用默认提示词'}</div>
+                            </div>
+                            <div class="ldsp-melon-setting-prompt-actions">
+                                <button class="ldsp-melon-setting-btn ldsp-melon-btn-prompt" id="melon-save-prompts">💾 保存提示词</button>
+                            </div>
+                        </div>
+                        <div class="ldsp-melon-setting-security">
+                            <div class="ldsp-melon-setting-security-icon">🔒</div>
+                            <div class="ldsp-melon-setting-security-text">
+                                <strong>数据安全说明</strong><br>
+                                您的 API Key 等配置信息仅保存在浏览器本地存储中，不会上传到任何服务器。请放心使用。
+                            </div>
+                        </div>
+                        <div class="ldsp-melon-setting-group ldsp-melon-setting-danger">
+                            <div class="ldsp-melon-setting-title">🗑️ 数据清理</div>
+                            <div class="ldsp-melon-setting-danger-desc">清空所有本地存储的数据，包括 API 配置和历史记录</div>
+                            <button class="ldsp-melon-setting-btn ldsp-melon-btn-danger" id="melon-clear-all-data">🗑️ 清空所有数据</button>
+                        </div>
+                    </div>`;
+
+                if (isEditing) {
+                    body.querySelector('#melon-save-settings').addEventListener('click', () => {
+                        const apiUrl = body.querySelector('#melon-api-url').value.trim();
+                        const apiKey = body.querySelector('#melon-api-key').value.trim();
+                        const model = body.querySelector('#melon-model').value.trim() || 'gpt-4o-mini';
+                        
+                        // 验证必填项
+                        if (!apiUrl) {
+                            this.renderer?.showToast('⚠️ 请输入 API 地址');
+                            return;
+                        }
+                        if (!apiKey) {
+                            this.renderer?.showToast('⚠️ 请输入 API Key');
+                            return;
+                        }
+                        
+                        // 简单验证 URL 格式
+                        if (!apiUrl.startsWith('http://') && !apiUrl.startsWith('https://')) {
+                            this.renderer?.showToast('⚠️ API 地址格式不正确');
+                            return;
+                        }
+                        
+                        this.config.apiUrl = apiUrl;
+                        this.config.apiKey = apiKey;
+                        this.config.model = model;
+                        this._saveConfig();
+                        this._isEditing = false;
+                        this.renderer?.showToast('✅ 设置已保存');
+                        this._renderSettings();  // 重新渲染为不可编辑状态
+                    });
+                } else {
+                    body.querySelector('#melon-edit-settings').addEventListener('click', () => {
+                        this._isEditing = true;
+                        this._renderSettings();  // 重新渲染为可编辑状态
+                    });
+                }
+                
+                // 保存提示词按钮
+                body.querySelector('#melon-save-prompts')?.addEventListener('click', () => {
+                    const promptBrief = body.querySelector('#melon-prompt-brief').value.trim();
+                    const promptDetailed = body.querySelector('#melon-prompt-detailed').value.trim();
+                    this.config.promptBrief = promptBrief;
+                    this.config.promptDetailed = promptDetailed;
+                    this._saveConfig();
+                    this.renderer?.showToast('✅ 提示词已保存');
+                    // 更新状态提示
+                    const hintBrief = body.querySelector('#melon-prompt-brief')?.parentElement?.querySelector('.ldsp-melon-setting-hint');
+                    const hintDetailed = body.querySelector('#melon-prompt-detailed')?.parentElement?.querySelector('.ldsp-melon-setting-hint');
+                    if (hintBrief) hintBrief.textContent = promptBrief ? '✅ 已自定义' : '💡 使用默认提示词';
+                    if (hintDetailed) hintDetailed.textContent = promptDetailed ? '✅ 已自定义' : '💡 使用默认提示词';
+                });
+                
+                // 恢复默认提示词
+                body.querySelectorAll('.ldsp-melon-prompt-reset').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const type = btn.dataset.prompt;
+                        if (type === 'brief') {
+                            body.querySelector('#melon-prompt-brief').value = '';
+                            this.config.promptBrief = '';
+                        } else {
+                            body.querySelector('#melon-prompt-detailed').value = '';
+                            this.config.promptDetailed = '';
+                        }
+                        this._saveConfig();
+                        this.renderer?.showToast('✅ 已恢复默认提示词');
+                    });
+                });
+                
+                // 清空数据按钮
+                body.querySelector('#melon-clear-all-data')?.addEventListener('click', () => {
+                    this._showConfirm('确定要清空所有数据吗？<br>包括 API 配置、提示词和历史记录，此操作不可撤销。', () => {
+                        // 清空配置
+                        this.config = { apiUrl: '', apiKey: '', model: 'gpt-4o-mini', promptBrief: '', promptDetailed: '' };
+                        this._saveConfig();
+                        // 清空历史
+                        this._clearHistory();
+                        this._isEditing = false;
+                        this.renderer?.showToast('✅ 所有数据已清空');
+                        this._renderSettings();
+                    });
+                });
+            }
+
+            _renderHistory() {
+                const body = this.overlay.querySelector('.ldsp-melon-body');
+                
+                if (this.history.length === 0) {
+                    body.innerHTML = `
+                        <div class="ldsp-melon-history-empty">
+                            <div class="ldsp-melon-history-empty-icon">📭</div>
+                            <div class="ldsp-melon-history-empty-text">暂无历史记录</div>
+                            <div class="ldsp-melon-history-empty-hint">使用吃瓜助手总结话题后会自动保存到这里</div>
+                            <div class="ldsp-melon-history-storage-hint">💾 数据仅存储在浏览器本地</div>
+                        </div>`;
+                    return;
+                }
+                
+                const historyHtml = this.history.map((h, idx) => {
+                    const date = new Date(h.timestamp);
+                    const dateStr = `${date.getMonth() + 1}/${date.getDate()} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+                    const modeLabel = h.mode === 'brief' ? '简略' : '详细';
+                    const previewText = h.summary.slice(0, 100).replace(/\n/g, ' ') + (h.summary.length > 100 ? '...' : '');
+                    
+                    return `
+                        <div class="ldsp-melon-history-item" data-index="${idx}">
+                            <div class="ldsp-melon-history-item-header">
+                                <span class="ldsp-melon-history-item-title" title="${Utils.escapeHtml(h.title)}">${Utils.escapeHtml(h.title)}</span>
+                                <span class="ldsp-melon-history-item-meta">
+                                    <span class="ldsp-melon-history-mode ${h.mode}">${modeLabel}</span>
+                                    <span class="ldsp-melon-history-date">${dateStr}</span>
+                                </span>
+                            </div>
+                            <div class="ldsp-melon-history-item-preview">${Utils.escapeHtml(previewText)}</div>
+                            <div class="ldsp-melon-history-item-actions">
+                                <button class="ldsp-melon-history-btn ldsp-melon-history-view" data-idx="${idx}" title="查看完整内容">👁️ 查看</button>
+                                <button class="ldsp-melon-history-btn ldsp-melon-history-expand" data-idx="${idx}" title="展开大窗口查看">🔍 展开</button>
+                                <button class="ldsp-melon-history-btn ldsp-melon-history-copy" data-idx="${idx}" title="复制到剪贴板">📋 复制</button>
+                                <button class="ldsp-melon-history-btn ldsp-melon-history-goto" data-topic="${h.topicId}" title="跳转到话题">🔗 话题</button>
+                                <button class="ldsp-melon-history-btn ldsp-melon-history-delete" data-idx="${idx}" title="删除此记录">🗑️</button>
+                            </div>
+                        </div>`;
+                }).join('');
+                
+                body.innerHTML = `
+                    <div class="ldsp-melon-history">
+                        <div class="ldsp-melon-history-header">
+                            <div class="ldsp-melon-history-header-left">
+                                <span class="ldsp-melon-history-count">共 ${this.history.length} 条记录</span>
+                                <span class="ldsp-melon-history-storage-badge">💾 本地存储</span>
+                            </div>
+                            <button class="ldsp-melon-history-clear-all" id="melon-clear-history">🗑️ 清空全部</button>
+                        </div>
+                        <div class="ldsp-melon-history-list">
+                            ${historyHtml}
+                        </div>
+                    </div>`;
+                
+                // 绑定事件 - 使用自定义确认框
+                body.querySelector('#melon-clear-history').addEventListener('click', () => {
+                    this._showConfirm('确定要清空所有历史记录吗？<br>此操作不可撤销。', () => {
+                        this._clearHistory();
+                        this.renderer?.showToast('✅ 历史记录已清空');
+                        this._renderHistory();
+                    });
+                });
+                
+                body.querySelectorAll('.ldsp-melon-history-view').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const idx = parseInt(btn.dataset.idx);
+                        this._showHistoryDetail(idx);
+                    });
+                });
+                
+                body.querySelectorAll('.ldsp-melon-history-copy').forEach(btn => {
+                    btn.addEventListener('click', async () => {
+                        const idx = parseInt(btn.dataset.idx);
+                        const record = this.history[idx];
+                        if (record) {
+                            try {
+                                await navigator.clipboard.writeText(record.summary);
+                                btn.textContent = '✅ 已复制';
+                                setTimeout(() => { btn.innerHTML = '📋 复制'; }, 1500);
+                            } catch (e) {
+                                Logger.error('[MelonHelper] Copy history failed:', e);
+                            }
+                        }
+                    });
+                });
+                
+                body.querySelectorAll('.ldsp-melon-history-goto').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const topicId = btn.dataset.topic;
+                        window.open(`${location.origin}/t/${topicId}`, '_blank');
+                    });
+                });
+                
+                body.querySelectorAll('.ldsp-melon-history-delete').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const idx = parseInt(btn.dataset.idx);
+                        this.history.splice(idx, 1);
+                        this._saveHistory();
+                        this.renderer?.showToast('✅ 已删除');
+                        this._renderHistory();
+                    });
+                });
+                
+                // 绑定展开按钮 - 打开独立大窗口
+                body.querySelectorAll('.ldsp-melon-history-expand').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const idx = parseInt(btn.dataset.idx);
+                        const record = this.history[idx];
+                        if (record) {
+                            this._showViewer({
+                                title: record.title,
+                                summary: record.summary,
+                                mode: record.mode,
+                                topicId: record.topicId,
+                                timestamp: record.timestamp
+                            });
+                        }
+                    });
+                });
+            }
+
+            _showHistoryDetail(idx) {
+                const record = this.history[idx];
+                if (!record) return;
+                
+                const body = this.overlay.querySelector('.ldsp-melon-body');
+                const date = new Date(record.timestamp);
+                const dateStr = `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+                const modeLabel = record.mode === 'brief' ? '简略模式' : '详细模式';
+                
+                body.innerHTML = `
+                    <div class="ldsp-melon-history-detail">
+                        <div class="ldsp-melon-history-detail-header">
+                            <button class="ldsp-melon-history-back" id="melon-history-back">← 返回列表</button>
+                            <div class="ldsp-melon-history-detail-actions">
+                                <button class="ldsp-melon-history-expand-btn" id="melon-history-expand">🔍 展开</button>
+                                <button class="ldsp-melon-history-copy-all" id="melon-history-copy-all">📋 复制</button>
+                            </div>
+                        </div>
+                        <div class="ldsp-melon-history-detail-info">
+                            <div class="ldsp-melon-history-detail-title">${Utils.escapeHtml(record.title)}</div>
+                            <div class="ldsp-melon-history-detail-meta">${modeLabel} · ${dateStr}</div>
+                        </div>
+                        <div class="ldsp-melon-history-detail-content">
+                            ${this._renderMarkdown(record.summary)}
+                        </div>
+                    </div>`;
+                
+                body.querySelector('#melon-history-back').addEventListener('click', () => {
+                    this._renderHistory();
+                });
+                
+                // 展开查看按钮
+                body.querySelector('#melon-history-expand').addEventListener('click', () => {
+                    this._showViewer({
+                        title: record.title,
+                        summary: record.summary,
+                        mode: record.mode,
+                        topicId: record.topicId,
+                        timestamp: record.timestamp
+                    });
+                });
+                
+                body.querySelector('#melon-history-copy-all').addEventListener('click', async () => {
+                    try {
+                        await navigator.clipboard.writeText(record.summary);
+                        const btn = body.querySelector('#melon-history-copy-all');
+                        btn.textContent = '✅ 已复制';
+                        setTimeout(() => { btn.innerHTML = '📋 复制'; }, 1500);
+                    } catch (e) {
+                        Logger.error('[MelonHelper] Copy detail failed:', e);
+                    }
+                });
+            }
+
+            destroy() {
+                this._stopUrlWatch();
+                this._closeViewer();
+                if (this._abortController) {
+                    this._abortController.abort();
+                    this._abortController = null;
+                }
+                if (this.overlay) {
+                    this.overlay.remove();
+                    this.overlay = null;
+                }
+            }
+            
+            // 显示全屏可调整大小的查看器
+            _showViewer(data) {
+                // 移除已存在的 viewer
+                this._closeViewer();
+                
+                const dateStr = data.timestamp 
+                    ? new Date(data.timestamp).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+                    : '刚刚';
+                const modeLabel = data.mode === 'brief' ? '简略' : '详细';
+                
+                // 检测当前主题
+                const isLightTheme = document.querySelector('#ldsp-panel.light') !== null;
+                
+                const overlay = document.createElement('div');
+                overlay.className = 'ldsp-melon-viewer-overlay' + (isLightTheme ? ' light' : '');
+                overlay.innerHTML = `
+                    <div class="ldsp-melon-viewer" style="width:700px;height:500px;">
+                        <div class="ldsp-melon-viewer-header">
+                            <div class="ldsp-melon-viewer-title">
+                                <span class="ldsp-melon-viewer-title-icon">🍈</span>
+                                <span>吃瓜详情</span>
+                            </div>
+                            <div class="ldsp-melon-viewer-actions">
+                                <button class="ldsp-melon-viewer-btn" id="viewer-copy" title="复制内容">📋</button>
+                                <button class="ldsp-melon-viewer-btn" id="viewer-goto" title="跳转到话题">🔗</button>
+                                <button class="ldsp-melon-viewer-btn ldsp-melon-viewer-close" id="viewer-close" title="关闭">✕</button>
+                            </div>
+                        </div>
+                        <div class="ldsp-melon-viewer-body">
+                            <div class="ldsp-melon-viewer-info">
+                                <div class="ldsp-melon-viewer-topic-title">${Utils.escapeHtml(data.title)}</div>
+                                <div class="ldsp-melon-viewer-meta">
+                                    <span class="ldsp-melon-viewer-mode ${data.mode}">${modeLabel}模式</span>
+                                    <span>${dateStr}</span>
+                                </div>
+                            </div>
+                            <div class="ldsp-melon-viewer-content">
+                                ${this._renderMarkdown(data.summary)}
+                            </div>
+                        </div>
+                        <div class="ldsp-melon-resize-handle ldsp-melon-resize-handle-e"></div>
+                        <div class="ldsp-melon-resize-handle ldsp-melon-resize-handle-s"></div>
+                        <div class="ldsp-melon-resize-handle ldsp-melon-resize-handle-se"></div>
+                        <div class="ldsp-melon-resize-handle ldsp-melon-resize-handle-w"></div>
+                        <div class="ldsp-melon-resize-handle ldsp-melon-resize-handle-n"></div>
+                        <div class="ldsp-melon-resize-handle ldsp-melon-resize-handle-nw"></div>
+                        <div class="ldsp-melon-resize-handle ldsp-melon-resize-handle-ne"></div>
+                        <div class="ldsp-melon-resize-handle ldsp-melon-resize-handle-sw"></div>
+                    </div>`;
+                
+                document.body.appendChild(overlay);
+                this._viewerOverlay = overlay;
+                
+                const viewer = overlay.querySelector('.ldsp-melon-viewer');
+                const header = overlay.querySelector('.ldsp-melon-viewer-header');
+                
+                // 关闭按钮
+                overlay.querySelector('#viewer-close').addEventListener('click', () => this._closeViewer());
+                overlay.addEventListener('click', (e) => {
+                    if (e.target === overlay) this._closeViewer();
+                });
+                
+                // ESC 关闭
+                this._viewerEscHandler = (e) => {
+                    if (e.key === 'Escape') this._closeViewer();
+                };
+                document.addEventListener('keydown', this._viewerEscHandler);
+                
+                // 复制按钮
+                overlay.querySelector('#viewer-copy').addEventListener('click', async () => {
+                    try {
+                        await navigator.clipboard.writeText(data.summary);
+                        const btn = overlay.querySelector('#viewer-copy');
+                        btn.textContent = '✅';
+                        setTimeout(() => { btn.textContent = '📋'; }, 1500);
+                    } catch (e) {
+                        Logger.error('[MelonHelper] Copy viewer content failed:', e);
+                    }
+                });
+                
+                // 跳转按钮
+                overlay.querySelector('#viewer-goto').addEventListener('click', () => {
+                    if (data.topicId) {
+                        window.open(`${location.origin}/t/${data.topicId}`, '_blank');
+                    }
+                });
+                
+                // 拖拽移动
+                let isDragging = false;
+                let startX, startY, startLeft, startTop;
+                
+                header.addEventListener('mousedown', (e) => {
+                    if (e.target.closest('.ldsp-melon-viewer-btn')) return;
+                    isDragging = true;
+                    startX = e.clientX;
+                    startY = e.clientY;
+                    const rect = viewer.getBoundingClientRect();
+                    startLeft = rect.left;
+                    startTop = rect.top;
+                    viewer.style.position = 'fixed';
+                    viewer.style.left = `${startLeft}px`;
+                    viewer.style.top = `${startTop}px`;
+                    viewer.style.transform = 'none';
+                    e.preventDefault();
+                });
+                
+                document.addEventListener('mousemove', this._viewerMoveHandler = (e) => {
+                    if (!isDragging) return;
+                    const dx = e.clientX - startX;
+                    const dy = e.clientY - startY;
+                    viewer.style.left = `${startLeft + dx}px`;
+                    viewer.style.top = `${startTop + dy}px`;
+                });
+                
+                document.addEventListener('mouseup', this._viewerUpHandler = () => {
+                    isDragging = false;
+                });
+                
+                // 调整大小
+                let isResizing = false;
+                let resizeDir = '';
+                let resizeStartX, resizeStartY, resizeStartW, resizeStartH, resizeStartL, resizeStartT;
+                
+                overlay.querySelectorAll('.ldsp-melon-resize-handle').forEach(handle => {
+                    handle.addEventListener('mousedown', (e) => {
+                        isResizing = true;
+                        resizeDir = handle.className.replace('ldsp-melon-resize-handle ldsp-melon-resize-handle-', '');
+                        resizeStartX = e.clientX;
+                        resizeStartY = e.clientY;
+                        const rect = viewer.getBoundingClientRect();
+                        resizeStartW = rect.width;
+                        resizeStartH = rect.height;
+                        resizeStartL = rect.left;
+                        resizeStartT = rect.top;
+                        viewer.style.position = 'fixed';
+                        viewer.style.left = `${resizeStartL}px`;
+                        viewer.style.top = `${resizeStartT}px`;
+                        viewer.style.transform = 'none';
+                        e.preventDefault();
+                        e.stopPropagation();
+                    });
+                });
+                
+                document.addEventListener('mousemove', this._viewerResizeHandler = (e) => {
+                    if (!isResizing) return;
+                    const dx = e.clientX - resizeStartX;
+                    const dy = e.clientY - resizeStartY;
+                    let newW = resizeStartW, newH = resizeStartH;
+                    let newL = resizeStartL, newT = resizeStartT;
+                    
+                    if (resizeDir.includes('e')) newW = Math.max(320, resizeStartW + dx);
+                    if (resizeDir.includes('w')) {
+                        newW = Math.max(320, resizeStartW - dx);
+                        newL = resizeStartL + (resizeStartW - newW);
+                    }
+                    if (resizeDir.includes('s')) newH = Math.max(240, resizeStartH + dy);
+                    if (resizeDir.includes('n')) {
+                        newH = Math.max(240, resizeStartH - dy);
+                        newT = resizeStartT + (resizeStartH - newH);
+                    }
+                    
+                    viewer.style.width = `${newW}px`;
+                    viewer.style.height = `${newH}px`;
+                    viewer.style.left = `${newL}px`;
+                    viewer.style.top = `${newT}px`;
+                });
+                
+                document.addEventListener('mouseup', this._viewerResizeUpHandler = () => {
+                    isResizing = false;
+                });
+            }
+            
+            _closeViewer() {
+                if (this._viewerOverlay) {
+                    this._viewerOverlay.remove();
+                    this._viewerOverlay = null;
+                }
+                if (this._viewerEscHandler) {
+                    document.removeEventListener('keydown', this._viewerEscHandler);
+                    this._viewerEscHandler = null;
+                }
+                if (this._viewerMoveHandler) {
+                    document.removeEventListener('mousemove', this._viewerMoveHandler);
+                    this._viewerMoveHandler = null;
+                }
+                if (this._viewerUpHandler) {
+                    document.removeEventListener('mouseup', this._viewerUpHandler);
+                    this._viewerUpHandler = null;
+                }
+                if (this._viewerResizeHandler) {
+                    document.removeEventListener('mousemove', this._viewerResizeHandler);
+                    this._viewerResizeHandler = null;
+                }
+                if (this._viewerResizeUpHandler) {
+                    document.removeEventListener('mouseup', this._viewerResizeUpHandler);
+                    this._viewerResizeUpHandler = null;
+                }
+            }
+            
+            // 显示自定义确认对话框
+            _showConfirm(message, onConfirm) {
+                const existingDialog = this.overlay.querySelector('.ldsp-melon-confirm-dialog');
+                if (existingDialog) existingDialog.remove();
+                
+                const dialog = document.createElement('div');
+                dialog.className = 'ldsp-melon-confirm-dialog';
+                dialog.innerHTML = `
+                    <div class="ldsp-melon-confirm-content">
+                        <div class="ldsp-melon-confirm-icon">⚠️</div>
+                        <div class="ldsp-melon-confirm-message">${message}</div>
+                        <div class="ldsp-melon-confirm-actions">
+                            <button class="ldsp-melon-confirm-btn ldsp-melon-confirm-cancel">取消</button>
+                            <button class="ldsp-melon-confirm-btn ldsp-melon-confirm-ok">确认</button>
+                        </div>
+                    </div>`;
+                
+                dialog.querySelector('.ldsp-melon-confirm-cancel').addEventListener('click', () => dialog.remove());
+                dialog.querySelector('.ldsp-melon-confirm-ok').addEventListener('click', () => {
+                    dialog.remove();
+                    onConfirm();
+                });
+                dialog.addEventListener('click', (e) => {
+                    if (e.target === dialog) dialog.remove();
+                });
+                
+                this.overlay.appendChild(dialog);
             }
         }
 
@@ -6149,6 +7772,10 @@
                     this.ticketManager = new TicketManager(this.oauth, this.$.panelBody);
                     this.ticketManager.init().catch(e => Logger.warn('TicketManager init error:', e));
                 }
+
+                // 吃瓜助手初始化
+                this.melonHelper = new MelonHelper(this.$.panelBody, this.renderer);
+                this.melonHelper.init();
                 
                 // 关注/粉丝管理器初始化（包含头像缓存）
                 this.followManager = new FollowManager(this.network, this.storage, this.$.panelBody, this.renderer);
@@ -6322,6 +7949,7 @@
                                     <div class="ldsp-action-btn ldsp-login-btn" data-clickable title="点击登录"><span class="ldsp-action-icon">🔑</span><span class="ldsp-action-text">点击登录</span></div>
                                     <div class="ldsp-action-btn ldsp-logout-btn" data-clickable title="注销登录"><span class="ldsp-action-icon">⏻</span><span class="ldsp-action-text">注销</span></div>
                                     <div class="ldsp-action-btn ldsp-ticket-btn" data-clickable title="工单系统"><span class="ldsp-action-icon">📪</span><span class="ldsp-action-text">工单</span></div>
+                                    <div class="ldsp-action-btn ldsp-melon-btn" data-clickable title="AI 帖子总结"><span class="ldsp-action-icon">🍉</span><span class="ldsp-action-text">总结</span></div>
                                 </div>
                             </div>
                             <div class="ldsp-reading" data-clickable title="点击访问 LDStatus Pro 官网">
@@ -6369,6 +7997,7 @@
                     userDisplayName: this.el.querySelector('.ldsp-user-display-name'),
                     userHandle: this.el.querySelector('.ldsp-user-handle'),
                     ticketBtn: this.el.querySelector('.ldsp-ticket-btn'),
+                    melonBtn: this.el.querySelector('.ldsp-melon-btn'),
                     logoutBtn: this.el.querySelector('.ldsp-logout-btn'),
                     loginBtn: this.el.querySelector('.ldsp-login-btn'),
                     confirmOverlay: this.el.querySelector('.ldsp-confirm-overlay'),
@@ -6553,6 +8182,14 @@
                     }
                     if (this.ticketManager) {
                         this.ticketManager.show();
+                    }
+                });
+
+                // 吃瓜助手按钮
+                this.$.melonBtn?.addEventListener('click', e => {
+                    e.stopPropagation();
+                    if (this.melonHelper) {
+                        this.melonHelper.show();
                     }
                 });
                 
@@ -8736,6 +10373,9 @@
                 
                 // 清理工单管理器
                 this.ticketManager?.destroy();
+
+                // 清理吃瓜助手
+                this.melonHelper?.destroy();
                 
                 // 清理关注/粉丝管理器
                 this.followManager?.destroy();
