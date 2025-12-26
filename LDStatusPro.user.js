@@ -1,7 +1,7 @@
 ﻿    // ==UserScript==
     // @name         LDStatus Pro
     // @namespace    http://tampermonkey.net/
-    // @version      3.5.1.0
+    // @version      3.5.1.1
     // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计、排行榜系统、我的活动查看。两站点均支持排行榜和云同步功能
     // @author       JackLiii
     // @license      MIT
@@ -3759,33 +3759,60 @@
     .ldsp-ldc-support-title{font-size:15px;font-weight:700;color:var(--txt);margin-bottom:6px;display:flex;align-items:center;justify-content:center;gap:8px}
     .ldsp-ldc-support-desc{font-size:11px;color:var(--txt-sec);line-height:1.6}
     .ldsp-ldc-support-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-    .ldsp-ldc-support-card{display:flex;flex-direction:column;align-items:center;padding:16px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);cursor:pointer;transition:all .35s cubic-bezier(.4,0,.2,1);text-decoration:none!important;position:relative;overflow:hidden}
-    .ldsp-ldc-support-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--card-accent,var(--border));transition:all .35s cubic-bezier(.4,0,.2,1)}
-    .ldsp-ldc-support-card::after{content:'';position:absolute;inset:0;background:linear-gradient(135deg,var(--card-accent,transparent),transparent);opacity:0;transition:opacity .35s cubic-bezier(.4,0,.2,1)}
-    .ldsp-ldc-support-card:hover{border-color:var(--card-accent,var(--accent));transform:translateY(-3px);box-shadow:0 8px 24px rgba(0,0,0,.12),0 0 0 1px var(--card-accent,var(--accent))}
-    .ldsp-ldc-support-card:hover::before{height:4px}
-    .ldsp-ldc-support-card:hover::after{opacity:.06}
-    .ldsp-ldc-support-card:active{transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.1)}
-    .ldsp-ldc-support-card.tier-1{--card-accent:#10b981;--card-glow:rgba(16,185,129,.2)}
-    .ldsp-ldc-support-card.tier-2{--card-accent:#3b82f6;--card-glow:rgba(59,130,246,.2)}
-    .ldsp-ldc-support-card.tier-3{--card-accent:#f59e0b;--card-glow:rgba(245,158,11,.2)}
-    .ldsp-ldc-support-card.tier-4{--card-accent:#ef4444;--card-glow:rgba(239,68,68,.2);background:linear-gradient(135deg,rgba(239,68,68,.04),rgba(249,115,22,.03))}
-    .ldsp-ldc-support-card.tier-1:hover{box-shadow:0 8px 24px var(--card-glow),0 0 0 1px var(--card-accent)}
-    .ldsp-ldc-support-card.tier-2:hover{box-shadow:0 8px 24px var(--card-glow),0 0 0 1px var(--card-accent)}
-    .ldsp-ldc-support-card.tier-3:hover{box-shadow:0 8px 24px var(--card-glow),0 0 0 1px var(--card-accent)}
-    .ldsp-ldc-support-card.tier-4:hover{box-shadow:0 8px 24px var(--card-glow),0 0 0 1px var(--card-accent)}
-    .ldsp-ldc-support-icon{font-size:32px;margin-bottom:10px;filter:drop-shadow(0 2px 6px rgba(0,0,0,.1));transition:transform .35s cubic-bezier(.4,0,.2,1)}
-    .ldsp-ldc-support-card:hover .ldsp-ldc-support-icon{transform:scale(1.1)}
-    .ldsp-ldc-support-name{font-size:12px;font-weight:600;color:var(--txt);margin-bottom:6px;transition:color .35s}
+    .ldsp-ldc-support-card{display:flex;flex-direction:column;align-items:center;padding:18px 14px 16px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);cursor:pointer;transition:all .3s cubic-bezier(.4,0,.2,1);text-decoration:none!important;position:relative;overflow:hidden}
+    .ldsp-ldc-support-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,transparent,var(--card-accent,var(--border)),transparent);transition:all .3s cubic-bezier(.4,0,.2,1)}
+    .ldsp-ldc-support-card::after{content:'';position:absolute;inset:0;background:radial-gradient(circle at 50% 0%,var(--card-accent,transparent) 0%,transparent 70%);opacity:0;transition:opacity .3s}
+    .ldsp-ldc-support-card:hover{border-color:var(--card-accent,var(--accent));transform:translateY(-4px) scale(1.02);box-shadow:0 12px 28px var(--card-glow,rgba(0,0,0,.15))}
+    .ldsp-ldc-support-card:hover::before{height:4px;background:var(--card-accent,var(--accent))}
+    .ldsp-ldc-support-card:hover::after{opacity:.08}
+    .ldsp-ldc-support-card:active{transform:translateY(-2px) scale(1.01);transition-duration:.1s}
+    .ldsp-ldc-support-card.tier-1{--card-accent:#10b981;--card-glow:rgba(16,185,129,.25)}
+    .ldsp-ldc-support-card.tier-2{--card-accent:#3b82f6;--card-glow:rgba(59,130,246,.25)}
+    .ldsp-ldc-support-card.tier-3{--card-accent:#f59e0b;--card-glow:rgba(245,158,11,.28)}
+    .ldsp-ldc-support-card.tier-4{--card-accent:#ef4444;--card-glow:rgba(239,68,68,.28);background:linear-gradient(145deg,var(--bg-card),rgba(239,68,68,.05))}
+    .ldsp-ldc-support-card.tier-3::before,.ldsp-ldc-support-card.tier-4::before{animation:ldsp-shimmer 2s ease-in-out infinite}
+    @keyframes ldsp-shimmer{0%,100%{opacity:.8}50%{opacity:1}}
+    .ldsp-ldc-support-icon{font-size:34px;margin-bottom:10px;filter:drop-shadow(0 3px 8px var(--card-glow,rgba(0,0,0,.1)));transition:transform .3s cubic-bezier(.4,0,.2,1),filter .3s;will-change:transform}
+    .ldsp-ldc-support-card:hover .ldsp-ldc-support-icon{animation:ldsp-icon-breath 1.8s cubic-bezier(.45,.05,.55,.95) infinite}
+    @keyframes ldsp-icon-breath{0%,100%{transform:scale(1.12) translateY(-2px)}50%{transform:scale(1.18) translateY(-4px)}}
+    .ldsp-ldc-support-name{font-size:12px;font-weight:600;color:var(--txt);margin-bottom:8px;transition:color .3s;letter-spacing:.3px}
     .ldsp-ldc-support-card:hover .ldsp-ldc-support-name{color:var(--card-accent,var(--txt))}
-    .ldsp-ldc-support-amount{font-size:18px;font-weight:700;color:var(--card-accent,var(--accent));display:flex;align-items:baseline;gap:3px}
-    .ldsp-ldc-support-amount span{font-size:11px;font-weight:500;color:var(--txt-mut)}
-    .ldsp-ldc-support-badge{position:absolute;top:8px;right:8px;padding:3px 8px;background:linear-gradient(135deg,var(--card-accent,var(--accent)),color-mix(in srgb,var(--card-accent,var(--accent)) 80%,#000));color:#fff;font-size:9px;font-weight:600;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.15)}
+    .ldsp-ldc-support-amount{font-size:20px;font-weight:700;color:var(--card-accent,var(--accent));display:flex;align-items:baseline;gap:4px;text-shadow:0 1px 2px var(--card-glow,transparent)}
+    .ldsp-ldc-support-amount span{font-size:11px;font-weight:500;color:var(--txt-mut);text-shadow:none}
+    .ldsp-ldc-support-badge{position:absolute;top:8px;right:8px;padding:3px 8px;background:linear-gradient(135deg,var(--card-accent,var(--accent)),color-mix(in srgb,var(--card-accent,var(--accent)) 70%,#000));color:#fff;font-size:9px;font-weight:600;border-radius:10px;box-shadow:0 2px 8px var(--card-glow,rgba(0,0,0,.2));animation:ldsp-badge-float 3s ease-in-out infinite;transform-origin:center center;transition:all .2s cubic-bezier(.4,0,.2,1)}
+    .ldsp-ldc-support-card:hover .ldsp-ldc-support-badge{animation:ldsp-badge-wiggle .5s ease-in-out;transform:scale(1.1);box-shadow:0 4px 12px var(--card-glow,rgba(0,0,0,.3))}
+    @keyframes ldsp-badge-float{0%,100%{transform:translateY(0) rotate(0deg)}25%{transform:translateY(-2px) rotate(2deg)}75%{transform:translateY(1px) rotate(-1deg)}}
+    @keyframes ldsp-badge-wiggle{0%{transform:scale(1.1) rotate(0deg)}15%{transform:scale(1.15) rotate(-12deg)}30%{transform:scale(1.12) rotate(10deg)}45%{transform:scale(1.15) rotate(-8deg)}60%{transform:scale(1.12) rotate(6deg)}75%{transform:scale(1.13) rotate(-3deg)}100%{transform:scale(1.1) rotate(0deg)}}
     .ldsp-ldc-support-footer{text-align:center;padding:12px;background:linear-gradient(135deg,var(--bg-card),var(--bg-el));border:1px solid var(--border);border-radius:var(--r-md)}
     .ldsp-ldc-support-footer-text{font-size:10px;color:var(--txt-mut);line-height:1.7}
     .ldsp-ldc-support-footer-text em{font-style:normal;color:var(--accent);font-weight:600}
     .ldsp-ldc-support-heart{display:inline-block;animation:ldsp-heartbeat 1.2s ease-in-out infinite;filter:drop-shadow(0 0 4px rgba(239,68,68,.4))}
     @keyframes ldsp-heartbeat{0%,100%{transform:scale(1)}14%{transform:scale(1.2)}28%{transform:scale(1)}42%{transform:scale(1.15)}70%{transform:scale(1)}}
+    /* GitHub Star 卡片 - 深色模式（默认） */
+    .ldsp-github-star-card{display:flex;align-items:center;gap:14px;padding:14px 16px;background:linear-gradient(135deg,#161b22 0%,#0d1117 100%);border:1px solid #30363d;border-radius:var(--r-md);cursor:pointer;text-decoration:none;transition:all .25s cubic-bezier(.4,0,.2,1);position:relative;overflow:hidden}
+    .ldsp-github-star-card::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,rgba(88,166,255,.1) 0%,rgba(255,215,0,.1) 100%);opacity:0;transition:opacity .25s}
+    .ldsp-github-star-card:hover{border-color:#58a6ff;transform:translateY(-2px);box-shadow:0 8px 24px rgba(88,166,255,.2)}
+    .ldsp-github-star-card:hover::before{opacity:1}
+    .ldsp-github-star-card:hover .ldsp-github-icon{transform:rotate(-8deg) scale(1.08)}
+    .ldsp-github-star-card:hover .ldsp-github-star-icon{animation:ldsp-star-bounce .6s ease-in-out}
+    .ldsp-github-icon-wrap{flex-shrink:0;width:36px;height:36px;display:flex;align-items:center;justify-content:center}
+    .ldsp-github-icon{width:32px;height:32px;fill:#f0f6fc;transition:all .25s}
+    .ldsp-github-star-icon{font-size:16px;line-height:1;filter:drop-shadow(0 0 4px rgba(255,215,0,.4))}
+    .ldsp-github-content{flex:1;min-width:0;position:relative;z-index:1}
+    .ldsp-github-title{font-size:13px;font-weight:600;color:#f0f6fc;margin-bottom:3px;display:flex;align-items:center;gap:6px}
+    .ldsp-github-desc{font-size:10px;color:#8b949e;line-height:1.5}
+    .ldsp-github-arrow{flex-shrink:0;font-size:16px;color:#58a6ff;transition:all .25s;opacity:.7}
+    .ldsp-github-star-card:hover .ldsp-github-arrow{transform:translateX(4px);opacity:1}
+    @keyframes ldsp-star-bounce{0%,100%{transform:scale(1) rotate(0deg)}25%{transform:scale(1.3) rotate(-15deg)}50%{transform:scale(1) rotate(10deg)}75%{transform:scale(1.15) rotate(-5deg)}}
+    /* GitHub Star 卡片 - 浅色模式 */
+    #ldsp-panel.light .ldsp-github-star-card{background:linear-gradient(135deg,#ffffff 0%,#f6f8fa 100%);border-color:#d0d7de}
+    #ldsp-panel.light .ldsp-github-star-card:hover{border-color:#0969da;box-shadow:0 8px 24px rgba(9,105,218,.15)}
+    #ldsp-panel.light .ldsp-github-star-card::before{background:linear-gradient(135deg,rgba(88,166,255,.08) 0%,rgba(255,215,0,.08) 100%)}
+    #ldsp-panel.light .ldsp-github-icon{fill:#24292f}
+    #ldsp-panel.light .ldsp-github-title{color:#24292f}
+    #ldsp-panel.light .ldsp-github-desc{color:#656d76}
+    #ldsp-panel.light .ldsp-github-arrow{color:#0969da}
+    #ldsp-panel.light .ldsp-github-star-icon{filter:drop-shadow(0 1px 2px rgba(0,0,0,.1))}
     /* 交易记录 */
     /* 交易筛选器 */
     .ldsp-ldc-filter-section{display:flex;flex-direction:column;gap:8px;padding-bottom:10px;border-bottom:1px solid var(--border)}
@@ -5732,6 +5759,7 @@
                 this._activeTab = 'overview'; // overview | transactions
                 this._transactionData = { orders: [], page: 1, total: 0, hasMore: false };
                 this._selectedOrder = null; // 当前选中的交易详情
+                this._userId = null; // 当前用户的 LDC user_id
                 // 筛选条件
                 this._transFilter = {
                     timeRange: '7days', // today | 7days | 30days | all
@@ -5932,6 +5960,9 @@
                         return;
                     }
 
+                    // 保存用户ID用于判断交易记录的收入/支出
+                    this._userId = userInfo.id || userInfo.user_id || null;
+                    
                     const data = {
                         username: userInfo.nickname || userInfo.username || 'User',
                         avatarUrl: userInfo.avatar_url || '',
@@ -6294,11 +6325,13 @@
                         </div>`;
                 } else {
                     const listHtml = orders.map(order => {
-                        // 判断是收入还是支出
+                        // 判断是收入还是支出：根据当前用户是 payee（收款方）还是 payer（付款方）
                         const typeInfo = LDCManager.TRANS_TYPES.find(t => t.id === order.type) || { icon: '📋', label: order.type, id: '' };
-                        const isIncome = order.type === 'receive' || order.type === 'community' || 
-                            (order.payer_user_id === 0) || // 系统发放
-                            (order.payee_user_id !== order.payer_user_id && order.remark?.includes('注册'));
+                        // 如果当前用户是 payee（收款方），则为收入；如果是 payer（付款方），则为支出
+                        const isIncome = this._userId ? 
+                            (order.payee_user_id === this._userId) : 
+                            // 回退方案：如果没有 userId，通过 type 和 payer_user_id 判断
+                            (order.type === 'receive' || order.type === 'community' || order.payer_user_id === 0);
                         const amount = parseFloat(order.amount) || 0;
                         const time = this._formatTime(order.trade_time || order.created_at);
                         const orderName = order.order_name || order.app_name || '未知';
@@ -6422,6 +6455,19 @@
                                 您的支持是我持续开发的动力
                             </div>
                         </div>
+                        <a href="https://github.com/caigg188/LDStatusPro" target="_blank" rel="noopener" class="ldsp-github-star-card">
+                            <div class="ldsp-github-icon-wrap">
+                                <svg class="ldsp-github-icon" viewBox="0 0 98 96" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M48.854 0C21.839 0 0 22 0 49.217c0 21.756 13.993 40.172 33.405 46.69 2.427.49 3.316-1.059 3.316-2.362 0-1.141-.08-5.052-.08-9.127-13.59 2.934-16.42-5.867-16.42-5.867-2.184-5.704-5.42-7.17-5.42-7.17-4.448-3.015.324-3.015.324-3.015 4.934.326 7.523 5.052 7.523 5.052 4.367 7.496 11.404 5.378 14.235 4.074.404-3.178 1.699-5.378 3.074-6.6-10.839-1.141-22.243-5.378-22.243-24.283 0-5.378 1.94-9.778 5.014-13.2-.485-1.222-2.184-6.275.486-13.038 0 0 4.125-1.304 13.426 5.052a46.97 46.97 0 0 1 12.214-1.63c4.125 0 8.33.571 12.213 1.63 9.302-6.356 13.427-5.052 13.427-5.052 2.67 6.763.97 11.816.485 13.038 3.155 3.422 5.015 7.822 5.015 13.2 0 18.905-11.404 23.06-22.324 24.283 1.78 1.548 3.316 4.481 3.316 9.126 0 6.6-.08 11.897-.08 13.526 0 1.304.89 2.853 3.316 2.364 19.412-6.52 33.405-24.935 33.405-46.691C97.707 22 75.788 0 48.854 0z"/></svg>
+                            </div>
+                            <div class="ldsp-github-content">
+                                <div class="ldsp-github-title">
+                                    在 GitHub 上 Star 一下
+                                    <span class="ldsp-github-star-icon">⭐</span>
+                                </div>
+                                <div class="ldsp-github-desc">您的 Star 是对作者最好的鼓励</div>
+                            </div>
+                            <span class="ldsp-github-arrow">→</span>
+                        </a>
                         <div class="ldsp-ldc-support-grid">
                             ${tiersHtml}
                         </div>
@@ -6441,8 +6487,10 @@
                 const time = this._formatTime(order.trade_time || order.created_at, true);
                 const typeInfo = LDCManager.TRANS_TYPES.find(t => t.id === order.type) || { icon: '📋', label: order.type };
                 const typeClass = order.type ? `type-${order.type}` : 'type-default';
-                const isIncome = order.type === 'receive' || order.type === 'community' || 
-                    (order.payer_user_id === 0) || (order.remark?.includes('注册'));
+                // 判断是收入还是支出：根据当前用户是 payee（收款方）还是 payer（付款方）
+                const isIncome = this._userId ? 
+                    (order.payee_user_id === this._userId) : 
+                    (order.type === 'receive' || order.type === 'community' || order.payer_user_id === 0);
                 
                 body.innerHTML = `
                     <div class="ldsp-ldc-detail">
