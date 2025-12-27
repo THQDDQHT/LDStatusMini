@@ -1,0 +1,9804 @@
+﻿    // ==UserScript==
+    // @name         LDStatus mini
+    // @namespace    http://tampermonkey.net/
+    // @version      4.0.0.0
+    // @description  在 Linux.do 和 IDCFlare 页面显示信任级别进度，支持历史趋势、里程碑通知、阅读时间统计、排行榜系统、我的活动查看。两站点均支持排行榜和云同步功能
+    // @author       JackLiii
+    // @license      MIT
+    // @match        https://linux.do/*
+    // @match        https://idcflare.com/*
+    // @run-at       document-start
+    // @grant        GM_xmlhttpRequest
+    // @grant        GM_setValue    
+    // @grant        GM_getValue
+    // @grant        GM_info
+    // @grant        GM_notification
+    // @connect      connect.linux.do
+    // @connect      linux.do
+    // @connect      credit.linux.do
+    // @connect      connect.idcflare.com
+    // @connect      idcflare.com
+    // @connect      github.com
+    // @connect      raw.githubusercontent.com
+    // @connect      ldstatus-pro-api.jackcai711.workers.dev
+    // @connect      *.workers.dev
+    // @updateURL    https://raw.githubusercontent.com/THQDDQHT/LDStatusMini/main/LDStatusMini.user.js
+    // @downloadURL  https://raw.githubusercontent.com/THQDDQHT/LDStatusMini/main/LDStatusMini.user.js
+    // @icon         https://linux.do/uploads/default/optimized/4X/6/a/6/6a6affc7b1ce8140279e959d32671304db06d5ab_2_180x180.png
+    // ==/UserScript==
+
+    (function() {
+        'use strict';
+
+        // ==================== 尽早捕获 OAuth 登录结果 =====================
+        // 由于 Discourse 路由可能会处理掉 URL hash，需要在脚本最开始就提取
+        let _pendingOAuthData = null;
+        try {
+            const hash = window.location.hash;
+            console.log('[OAuth] Initial hash check:', hash ? hash.substring(0, 100) + '...' : '(empty)');
+            if (hash) {
+                const match = hash.match(/ldsp_oauth=([^&]+)/);
+                if (match) {
+                    console.log('[OAuth] Found ldsp_oauth in hash, decoding...');
+                    const encoded = match[1];
+                    const decoded = JSON.parse(decodeURIComponent(atob(encoded)));
+                    console.log('[OAuth] Decoded data:', { hasToken: !!decoded.t, hasUser: !!decoded.u, ts: decoded.ts });
+                    // 检查时效性（5分钟内有效）
+                    if (decoded.ts && Date.now() - decoded.ts < 5 * 60 * 1000) {
+                        _pendingOAuthData = {
+                            success: true,
+                            token: decoded.t,
+                            user: decoded.u,
+                            isJoined: decoded.j === 1
+                        };
+                        console.log('[OAuth] ✅ Captured login data from URL hash, user:', decoded.u?.username);
+                    } else {
+                        console.log('[OAuth] ⚠️ Login data expired, age:', Date.now() - decoded.ts, 'ms');
+                    }
+                    // 立即清除 URL 中的登录参数
+                    let newHash = hash.replace(/[#&]?ldsp_oauth=[^&]*/, '').replace(/^[#&]+/, '').replace(/[#&]+$/, '');
+                    const newUrl = window.location.pathname + window.location.search + (newHash ? '#' + newHash : '');
+                    history.replaceState(null, '', newUrl);
+                }
+            }
+        } catch (e) {
+            console.warn('[OAuth] Failed to capture OAuth data:', e);
+        }
+
+        // ==================== 浏览器兼容性检查 ====================
+        // 检测必需的 API 是否存在
+        if (typeof Map === 'undefined' || typeof Set === 'undefined' || typeof Promise === 'undefined') {
+            console.error('[LDStatus Mini] 浏览器版本过低，请升级浏览器');
+            return;
+        }
+
+        // 兼容性：requestIdleCallback polyfill（Firefox 和旧版浏览器）
+        const requestIdleCallback = window.requestIdleCallback || function(cb) {
+            const start = Date.now();
+            return setTimeout(() => cb({ didTimeout: false, timeRemaining: () => Math.max(0, 50 - (Date.now() - start)) }), 1);
+        };
+        const cancelIdleCallback = window.cancelIdleCallback || clearTimeout;
+
+        // ==================== 网站配置 ====================
+        const SITE_CONFIGS = {
+            'linux.do': {
+                name: 'Linux.do',
+                icon: 'https://linux.do/uploads/default/optimized/4X/6/a/6/6a6affc7b1ce8140279e959d32671304db06d5ab_2_180x180.png',
+                apiUrl: 'https://connect.linux.do'
+            },
+            'idcflare.com': {
+                name: 'IDCFlare',
+                icon: 'https://idcflare.com/uploads/default/optimized/1X/8746f94a48ddc8140e8c7a52084742f38d3f5085_2_180x180.png',
+                apiUrl: 'https://connect.idcflare.com'
+            }
+        };
+
+        const CURRENT_SITE = (() => {
+            const hostname = window.location.hostname;
+            for (const [domain, config] of Object.entries(SITE_CONFIGS)) {
+                if (hostname === domain || hostname.endsWith(`.${domain}`)) {
+                    return { domain, prefix: domain.replace('.', '_'), ...config };
+                }
+            }
+            return null;
+        })();
+
+        if (!CURRENT_SITE) {
+            console.warn('[LDStatus Mini] 不支持的网站');
+            return;
+        }
+
+        // ==================== 事件总线（跨模块通信） ====================
+        const EventBus = {
+            _listeners: new Map(),
+            
+            // 订阅事件
+            on(event, callback) {
+                if (!this._listeners.has(event)) {
+                    this._listeners.set(event, new Set());
+                }
+                this._listeners.get(event).add(callback);
+                // 返回取消订阅函数
+                return () => this.off(event, callback);
+            },
+            
+            // 取消订阅
+            off(event, callback) {
+                this._listeners.get(event)?.delete(callback);
+            },
+            
+            // 发布事件
+            emit(event, data) {
+                this._listeners.get(event)?.forEach(cb => {
+                    try { cb(data); } catch (e) { /* 静默失败 */ }
+                });
+            },
+            
+            // 一次性订阅
+            once(event, callback) {
+                const wrapper = (data) => {
+                    this.off(event, wrapper);
+                    callback(data);
+                };
+                return this.on(event, wrapper);
+            },
+            
+            // 清理所有监听器
+            clear() {
+                this._listeners.clear();
+            }
+        };
+
+        // ==================== 跨标签页领导者管理器（全局单例） ====================
+        // 确保同一时间只有一个标签页执行定时任务（阅读计时、同步、刷新等）
+        const TabLeader = {
+            LEADER_KEY: `ldsp_tab_leader_${CURRENT_SITE.prefix}`,
+            HEARTBEAT: 5000,    // 5秒心跳
+            TIMEOUT: 10000,     // 10秒超时（减少陈旧数据导致的等待时间）
+            _tabId: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+            _isLeader: false,
+            _initialized: false,
+            _interval: null,
+            _callbacks: [],     // 领导者状态变化回调
+            
+            init() {
+                if (this._initialized) return;
+                this._initialized = true;
+                
+                this._tryBecomeLeader();
+                this._interval = setInterval(() => this._tryBecomeLeader(), this.HEARTBEAT);
+                
+                // 监听其他标签页的变化
+                this._storageHandler = (e) => {
+                    if (e.key === this.LEADER_KEY) this._tryBecomeLeader();
+                };
+                window.addEventListener('storage', this._storageHandler);
+                
+                // 页面卸载时释放领导者
+                this._unloadHandler = () => this._release();
+                window.addEventListener('beforeunload', this._unloadHandler);
+            },
+            
+            _tryBecomeLeader() {
+                const now = Date.now();
+                let data = {};
+                
+                // 检查 localStorage 是否可用（隐私模式、存储满等情况）
+                if (!this._storageAvailable) {
+                    if (this._storageAvailable === undefined) {
+                        try {
+                            const testKey = '__ldsp_test__';
+                            localStorage.setItem(testKey, '1');
+                            localStorage.removeItem(testKey);
+                            this._storageAvailable = true;
+                        } catch (e) {
+                            this._storageAvailable = false;
+                            Logger.log('localStorage not available, becoming sole leader');
+                        }
+                    }
+                    // localStorage 不可用，直接成为领导者
+                    if (!this._storageAvailable) {
+                        if (!this._isLeader) {
+                            this._isLeader = true;
+                            this._notifyCallbacks(true);
+                            EventBus.emit('leader:change', { isLeader: true, tabId: this._tabId });
+                        }
+                        return;
+                    }
+                }
+                
+                try {
+                    const stored = localStorage.getItem(this.LEADER_KEY);
+                    if (stored) data = JSON.parse(stored);
+                } catch (e) { /* 解析失败视为无数据 */ }
+                
+                const expired = !data.timestamp || (now - data.timestamp) > this.TIMEOUT;
+                const iAmLeader = data.tabId === this._tabId;
+                
+                if (expired || iAmLeader) {
+                    const wasLeader = this._isLeader;
+                    this._isLeader = true;
+                    try {
+                        localStorage.setItem(this.LEADER_KEY, JSON.stringify({
+                            tabId: this._tabId,
+                            timestamp: now
+                        }));
+                    } catch (e) { /* 存储失败不影响逻辑 */ }
+                    if (!wasLeader) {
+                        this._notifyCallbacks(true);
+                        EventBus.emit('leader:change', { isLeader: true, tabId: this._tabId });
+                    }
+                } else if (this._isLeader) {
+                    this._isLeader = false;
+                    this._notifyCallbacks(false);
+                    EventBus.emit('leader:change', { isLeader: false, tabId: this._tabId });
+                }
+            },
+            
+            _release() {
+                if (this._isLeader) {
+                    try {
+                        const stored = localStorage.getItem(this.LEADER_KEY);
+                        if (stored) {
+                            const data = JSON.parse(stored);
+                            if (data.tabId === this._tabId) {
+                                localStorage.removeItem(this.LEADER_KEY);
+                            }
+                        }
+                    } catch (e) { /* 静默失败 */ }
+                }
+            },
+            
+            _notifyCallbacks(isLeader) {
+                this._callbacks.forEach(cb => {
+                    try { cb(isLeader); } catch (e) { /* 静默失败 */ }
+                });
+            },
+            
+            // 公开方法：检查是否是领导者
+            isLeader() {
+                return this._isLeader;
+            },
+            
+            // 公开方法：获取当前标签页 ID
+            getTabId() {
+                return this._tabId;
+            },
+            
+            // 公开方法：注册领导者状态变化回调
+            onLeaderChange(callback) {
+                if (typeof callback === 'function') {
+                    this._callbacks.push(callback);
+                }
+            },
+            
+            // 公开方法：销毁
+            destroy() {
+                if (this._interval) {
+                    clearInterval(this._interval);
+                    this._interval = null;
+                }
+                if (this._storageHandler) {
+                    window.removeEventListener('storage', this._storageHandler);
+                }
+                if (this._unloadHandler) {
+                    window.removeEventListener('beforeunload', this._unloadHandler);
+                }
+                this._release();
+                this._callbacks = [];
+                this._initialized = false;
+            }
+        };
+
+        // ==================== 常量配置 ====================
+        const CONFIG = {
+            // 时间间隔（毫秒）- 优化版：减少请求频率
+            INTERVALS: {
+                REFRESH: 300000,           // 数据刷新间隔
+                READING_TRACK: 10000,      // 阅读追踪间隔
+                READING_SAVE: 30000,       // 阅读保存间隔
+                READING_IDLE: 60000,       // 空闲阈值
+                STORAGE_DEBOUNCE: 1000,    // 存储防抖
+                READING_UPDATE: 2000,      // 阅读时间UI更新（2秒，减少更新频率避免动画闪烁）
+                CLOUD_UPLOAD: 3600000,     // 云同步上传（60分钟，原30分钟）
+                CLOUD_DOWNLOAD: 43200000,  // 云同步下载（12小时，原6小时）
+                CLOUD_CHECK: 600000,       // 云同步检查（10分钟，原5分钟）
+                REQ_SYNC_INCREMENTAL: 3600000, // 升级要求增量同步（1小时）
+                REQ_SYNC_FULL: 43200000,   // 升级要求全量同步（12小时，与reading同步间隔一致）
+                SYNC_RETRY_DELAY: 60000    // 同步失败后重试延迟（1分钟）
+            },
+            // 缓存配置
+            CACHE: {
+                MAX_HISTORY_DAYS: 365,
+                LRU_SIZE: 50,
+                VALUE_TTL: 5000,
+                SCREEN_TTL: 100,
+                YEAR_DATA_TTL: 5000,
+                HISTORY_TTL: 1000
+            },
+            // 网络配置
+            NETWORK: {
+                RETRY_COUNT: 3,
+                RETRY_DELAY: 1000,
+                TIMEOUT: 15000
+            },
+            // 里程碑配置
+            MILESTONES: {
+                '浏览话题': [100, 500, 1000, 2000, 5000],
+                '已读帖子': [500, 1000, 5000, 10000, 20000],
+                '获赞': [10, 50, 100, 500, 1000],
+                '送出赞': [50, 100, 500, 1000, 2000],
+                '回复': [10, 50, 100, 500, 1000]
+            },
+            // 趋势字段配置
+            TREND_FIELDS: [
+                { key: '浏览话题', search: '浏览的话题', label: '浏览话题' },
+                { key: '已读帖子', search: '已读帖子', label: '已读帖子' },
+                { key: '点赞', search: '送出赞', label: '点赞' },
+                { key: '回复', search: '回复', label: '回复' },
+                { key: '获赞', search: '获赞', label: '获赞' }
+            ],
+            // 阅读等级预设样式（图标、颜色、背景色固定，按索引匹配，共10级）
+            READING_LEVEL_PRESETS: [
+                { icon: '🌱', color: '#94a3b8', bg: 'rgba(148,163,184,0.15)' },  // 0: 灰色 - 刚起步
+                { icon: '📖', color: '#60a5fa', bg: 'rgba(96,165,250,0.15)' },  // 1: 蓝色 - 热身中
+                { icon: '📚', color: '#34d399', bg: 'rgba(52,211,153,0.15)' },  // 2: 绿色 - 渐入佳境
+                { icon: '🔥', color: '#fbbf24', bg: 'rgba(251,191,36,0.15)' },  // 3: 黄色 - 沉浸阅读
+                { icon: '⚡', color: '#f97316', bg: 'rgba(249,115,22,0.15)' },  // 4: 橙色 - 深度学习
+                { icon: '🏆', color: '#a855f7', bg: 'rgba(168,85,247,0.15)' },  // 5: 紫色 - LD达人
+                { icon: '👑', color: '#ec4899', bg: 'rgba(236,72,153,0.15)' },  // 6: 粉色 - 超级水怪
+                { icon: '💎', color: '#06b6d4', bg: 'rgba(6,182,212,0.15)' },   // 7: 青色 - 钻石级
+                { icon: '🌟', color: '#eab308', bg: 'rgba(234,179,8,0.15)' },   // 8: 金色 - 传奇级
+                { icon: '🚀', color: '#ef4444', bg: 'rgba(239,68,68,0.15)' }    // 9: 红色 - 神话级
+            ],
+            // 阅读等级默认阈值和标签（与 PRESETS 索引对应）
+            READING_LEVELS_DEFAULT: [
+                { min: 0, label: '刚起步' },
+                { min: 30, label: '热身中' },
+                { min: 90, label: '渐入佳境' },
+                { min: 180, label: '沉浸阅读' },
+                { min: 300, label: '深度学习' },
+                { min: 450, label: 'LD达人' },
+                { min: 600, label: '超级水怪' }
+            ],
+            // 动态阅读等级配置（运行时从服务器加载）
+            READING_LEVELS: null,
+            // 阅读等级配置刷新间隔（24小时）
+            READING_LEVELS_REFRESH: 24 * 60 * 60 * 1000,
+            // 名称替换映射
+            NAME_MAP: new Map([
+                ['已读帖子（所有时间）', '已读帖子'],
+                ['浏览的话题（所有时间）', '浏览话题'],
+                ['获赞：点赞用户数量', '点赞用户'],
+                ['获赞：单日最高数量', '获赞天数'],
+                ['被禁言（过去 6 个月）', '禁言'],
+                ['被封禁（过去 6 个月）', '封禁'],
+                ['发帖数量', '发帖'],
+                ['回复数量', '回复'],
+                ['被举报的帖子（过去 6 个月）', '被举报帖子'],
+                ['发起举报的用户（过去 6 个月）', '发起举报']
+            ]),
+            // 存储键
+            STORAGE_KEYS: {
+                position: 'position', collapsed: 'collapsed', theme: 'theme',
+                trendTab: 'trend_tab', history: 'history', milestones: 'milestones',
+                lastNotify: 'last_notify', lastVisit: 'last_visit', todayData: 'today_data',
+                userAvatar: 'user_avatar', readingTime: 'reading_time', currentUser: 'current_user',
+                lastCloudSync: 'last_cloud_sync', lastDownloadSync: 'last_download_sync',
+                lastUploadHash: 'last_upload_hash', leaderboardToken: 'leaderboard_token',
+                leaderboardUser: 'leaderboard_user', leaderboardJoined: 'leaderboard_joined',
+                readingLevels: 'reading_levels', readingLevelsTime: 'reading_levels_time',
+                websiteUrl: 'website_url', websiteUrlDate: 'website_url_date'
+            },
+            // 用户特定的存储键
+            USER_KEYS: new Set(['history', 'milestones', 'lastVisit', 'todayData', 'userAvatar', 'readingTime']),
+            // 周和月名称
+            WEEKDAYS: ['周日', '周一', '周二', '周三', '周四', '周五', '周六'],
+            MONTHS: ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'],
+            // API地址
+            LEADERBOARD_API: 'https://ldstatus-pro-api.jackcai711.workers.dev'
+        };
+
+        // 预编译正则
+        const PATTERNS = {
+            REVERSE: /被举报|发起举报|禁言|封禁/,
+            USERNAME: /\/u\/([^/]+)/,
+            TRUST_LEVEL: /(.*) - 信任级别 (\d+)/,
+            TRUST_LEVEL_H1: /你好，.*?\(([^)]+)\)\s*(\d+)级用户/,  // 匹配 h1 中的 "你好，XX (username) X级用户"
+            VERSION: /@version\s+([\d.]+)/,
+            AVATAR_SIZE: /\/\d+\//,
+            NUMBER: /(\d+)/
+        };
+
+        // ==================== 调试与日志 ====================
+        const Logger = {
+            _enabled: false,  // 生产环境默认关闭详细日志
+            _prefix: '[LDSP]',
+            
+            enable() { this._enabled = true; },
+            disable() { this._enabled = false; },
+            
+            log(...args) {
+                if (this._enabled) console.log(this._prefix, ...args);
+            },
+            warn(...args) {
+                console.warn(this._prefix, ...args);
+            },
+            error(...args) {
+                console.error(this._prefix, ...args);
+            },
+            // 带标签的日志（用于追踪特定模块）
+            tag(tag) {
+                return {
+                    log: (...args) => this._enabled && console.log(`${this._prefix}[${tag}]`, ...args),
+                    warn: (...args) => console.warn(`${this._prefix}[${tag}]`, ...args),
+                    error: (...args) => console.error(`${this._prefix}[${tag}]`, ...args)
+                };
+            }
+        };
+
+        // ==================== 工具函数 ====================
+        const Utils = {
+            _nameCache: new Map(),
+            _htmlEntities: { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#x27;' },
+
+            // HTML 转义（防止 XSS）
+            escapeHtml(str) {
+                if (!str || typeof str !== 'string') return '';
+                return str.replace(/[&<>"']/g, c => this._htmlEntities[c]);
+            },
+
+            // 清理用户输入（移除控制字符，限制长度）
+            sanitize(str, maxLen = 100) {
+                if (!str || typeof str !== 'string') return '';
+                return str.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '').substring(0, maxLen).trim();
+            },
+            
+            // 安全的数值转换（防止 NaN 和 Infinity）
+            toSafeNumber(val, defaultVal = 0) {
+                const num = Number(val);
+                return Number.isFinite(num) ? num : defaultVal;
+            },
+            
+            // 安全的整数转换
+            toSafeInt(val, defaultVal = 0) {
+                const num = parseInt(val, 10);
+                return Number.isFinite(num) ? num : defaultVal;
+            },
+            
+            // 深度冻结对象（防止意外修改）
+            deepFreeze(obj) {
+                if (obj && typeof obj === 'object') {
+                    Object.keys(obj).forEach(key => this.deepFreeze(obj[key]));
+                    return Object.freeze(obj);
+                }
+                return obj;
+            },
+
+            // 版本比较
+            compareVersion(v1, v2) {
+                if (!v1 || !v2) return 0;
+                const [p1, p2] = [v1, v2].map(v => String(v).split('.').map(n => this.toSafeInt(n)));
+                const len = Math.max(p1.length, p2.length);
+                for (let i = 0; i < len; i++) {
+                    const diff = (p1[i] || 0) - (p2[i] || 0);
+                    if (diff !== 0) return diff > 0 ? 1 : -1;
+                }
+                return 0;
+            },
+
+            // 简化名称
+            simplifyName(name) {
+                if (this._nameCache.has(name)) return this._nameCache.get(name);
+                let result = CONFIG.NAME_MAP.get(name);
+                if (!result) {
+                    for (const [from, to] of CONFIG.NAME_MAP) {
+                        if (name.includes(from.split('（')[0])) {
+                            result = name.replace(from, to);
+                            break;
+                        }
+                    }
+                }
+                result = result || name;
+                this._nameCache.set(name, result);
+                return result;
+            },
+
+            // 格式化日期
+            formatDate(ts, format = 'short') {
+                const d = new Date(ts);
+                const [m, day] = [d.getMonth() + 1, d.getDate()];
+                if (format === 'short') return `${m}/${day}`;
+                if (format === 'time') return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+                return `${m}月${day}日`;
+            },
+
+            // 格式化相对时间（将UTC时间转为本地时间并显示为xx前）
+            formatRelativeTime(utcStr) {
+                if (!utcStr) return '';
+                const d = new Date(utcStr); // 自动转换UTC到本地时区
+                const now = new Date();
+                const diff = (now - d) / 1000;
+                if (diff < 60) return '刚刚';
+                if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`;
+                if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`;
+                if (diff < 2592000) return `${Math.floor(diff / 86400)}天前`;
+                if (diff < 31536000) return `${d.getMonth() + 1}月${d.getDate()}日`;
+                return `${d.getFullYear()}年${d.getMonth() + 1}月`;
+            },
+
+            // 格式化完整日期时间（年月日时分）
+            formatDateTime(utcStr) {
+                if (!utcStr) return '';
+                const d = new Date(utcStr);
+                const year = d.getFullYear();
+                const month = String(d.getMonth() + 1).padStart(2, '0');
+                const day = String(d.getDate()).padStart(2, '0');
+                const hour = String(d.getHours()).padStart(2, '0');
+                const minute = String(d.getMinutes()).padStart(2, '0');
+                return `${year}-${month}-${day} ${hour}:${minute}`;
+            },
+
+            // 获取今日键
+            getTodayKey: () => new Date().toDateString(),
+
+            // 格式化阅读时间
+            formatReadingTime(minutes) {
+                if (minutes < 1) return '< 1分钟';
+                if (minutes < 60) return `${Math.round(minutes)}分钟`;
+                const h = Math.floor(minutes / 60);
+                const m = Math.round(minutes % 60);
+                return m > 0 ? `${h}小时${m}分` : `${h}小时`;
+            },
+
+            // 获取阅读等级（合并服务端配置和预设样式）
+            getReadingLevel(minutes) {
+                const levels = CONFIG.READING_LEVELS || CONFIG.READING_LEVELS_DEFAULT;
+                const presets = CONFIG.READING_LEVEL_PRESETS;
+                
+                for (let i = levels.length - 1; i >= 0; i--) {
+                    if (minutes >= levels[i].min) {
+                        const level = levels[i];
+                        const preset = presets[i] || presets[presets.length - 1];
+                        // 合并：使用服务端的 min/label，预设的 icon/color/bg
+                        return {
+                            min: level.min,
+                            label: level.label,
+                            icon: preset.icon,
+                            color: preset.color,
+                            bg: preset.bg
+                        };
+                    }
+                }
+                const first = levels[0];
+                const preset = presets[0];
+                return {
+                    min: first.min,
+                    label: first.label,
+                    icon: preset.icon,
+                    color: preset.color,
+                    bg: preset.bg
+                };
+            },
+
+            // 获取热力图等级
+            getHeatmapLevel(minutes) {
+                if (minutes < 1) return 0;
+                if (minutes < 60) return 1;
+                if (minutes < 180) return 2;
+                if (minutes < 300) return 3;
+                return 4;
+            },
+
+            // 重排需求项（将举报相关项移到禁言前）
+            reorderRequirements(reqs) {
+                const reports = [], others = [];
+                reqs.forEach(r => {
+                    (r.name.includes('被举报') || r.name.includes('发起举报') ? reports : others).push(r);
+                });
+                const banIdx = others.findIndex(r => r.name.includes('禁言'));
+                if (banIdx >= 0) others.splice(banIdx, 0, ...reports);
+                else others.push(...reports);
+                return others;
+            },
+
+            // 防抖（带取消功能）
+            debounce(fn, wait) {
+                let timer = null;
+                const debounced = function(...args) {
+                    if (timer !== null) clearTimeout(timer);
+                    timer = setTimeout(() => {
+                        timer = null;
+                        fn.apply(this, args);
+                    }, wait);
+                };
+                debounced.cancel = () => {
+                    if (timer !== null) {
+                        clearTimeout(timer);
+                        timer = null;
+                    }
+                };
+                return debounced;
+            },
+
+            // 节流（保证首次立即执行，后续按间隔执行）
+            throttle(fn, limit) {
+                let lastTime = 0;
+                return function(...args) {
+                    const now = Date.now();
+                    if (now - lastTime >= limit) {
+                        lastTime = now;
+                        fn.apply(this, args);
+                    }
+                };
+            },
+
+            // 安全执行（捕获异常）
+            safeCall(fn, fallback = null) {
+                try {
+                    return fn();
+                } catch (e) {
+                    return fallback;
+                }
+            },
+            
+            // 安全的异步执行（捕获 Promise 异常）
+            async safeAsync(fn, fallback = null) {
+                try {
+                    return await fn();
+                } catch (e) {
+                    Logger.warn('Async operation failed:', e.message);
+                    return fallback;
+                }
+            },
+            
+            // 生成唯一 ID
+            uid() {
+                return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+            },
+            
+            // 检查是否为有效的 URL
+            isValidUrl(str) {
+                if (!str || typeof str !== 'string') return false;
+                try {
+                    const url = new URL(str);
+                    return url.protocol === 'http:' || url.protocol === 'https:';
+                } catch {
+                    return false;
+                }
+            },
+            
+            // 安全获取嵌套对象属性
+            get(obj, path, defaultVal = undefined) {
+                if (!obj || typeof path !== 'string') return defaultVal;
+                const keys = path.split('.');
+                let result = obj;
+                for (const key of keys) {
+                    if (result == null || typeof result !== 'object') return defaultVal;
+                    result = result[key];
+                }
+                return result !== undefined ? result : defaultVal;
+            },
+            
+            // 克隆对象（浅拷贝，用于配置等）
+            clone(obj) {
+                if (!obj || typeof obj !== 'object') return obj;
+                return Array.isArray(obj) ? [...obj] : { ...obj };
+            }
+        };
+
+        // ==================== 屏幕工具 ====================
+        const Screen = {
+            _cache: null,
+            _cacheTime: 0,
+
+            // 动态计算面板配置 - 基于视口尺寸的相对计算
+            // 确保面板始终在窗口内显示，针对移动设备优化
+            getConfig() {
+                const { innerWidth: vw, innerHeight: vh } = window;
+                const isMobile = vw < 500 || vh < 700;
+                const isVerySmall = vw < 360 || vh < 500;
+                
+                // 面板宽度：移动设备使用更小的基础宽度
+                // 桌面: 视口宽度的18%，限制在260-360px
+                // 移动: 视口宽度的65%，限制在220-280px
+                let width;
+                if (isVerySmall) {
+                    width = Math.max(200, Math.min(240, Math.round(vw * 0.7)));
+                } else if (isMobile) {
+                    width = Math.max(220, Math.min(280, Math.round(vw * 0.65)));
+                } else {
+                    width = Math.max(260, Math.min(360, Math.round(vw * 0.18)));
+                }
+                
+                // 面板最大高度：视口高度减去边距
+                // 移动设备预留更小的边距以获得更多显示空间
+                const topMargin = isMobile 
+                    ? Math.max(15, Math.round(vh * 0.03))
+                    : Math.max(30, Math.round(vh * 0.06));
+                const bottomMargin = isMobile ? 10 : 20;
+                const maxHeight = vh - topMargin - bottomMargin;
+                
+                // 字体大小：移动设备使用较小字号
+                // 桌面: 10-13px，移动: 9-11px
+                const fontSize = isMobile
+                    ? Math.max(9, Math.min(11, Math.round(vh / 70)))
+                    : Math.max(10, Math.min(13, Math.round(vh / 70)));
+                
+                // 内边距：根据宽度缩放
+                // 桌面: 10-14px，移动: 6-10px
+                const padding = isMobile
+                    ? Math.max(6, Math.min(10, Math.round(width / 28)))
+                    : Math.max(10, Math.min(14, Math.round(width / 24)));
+                
+                // 头像大小：移动设备使用较小头像
+                // 桌面: 40-52px，移动: 32-42px
+                const avatarSize = isMobile
+                    ? Math.max(32, Math.min(42, Math.round(width / 7)))
+                    : Math.max(40, Math.min(52, Math.round(width / 6.5)));
+                
+                // 环形图大小：根据高度缩放
+                // 桌面: 65-85px，移动: 50-65px
+                const ringSize = isMobile
+                    ? Math.max(50, Math.min(65, Math.round(vh / 12)))
+                    : Math.max(65, Math.min(85, Math.round(vh / 11)));
+                
+                return {
+                    width,
+                    maxHeight,
+                    fontSize,
+                    padding,
+                    avatarSize,
+                    ringSize,
+                    top: topMargin,
+                    vw,
+                    vh,
+                    isMobile,
+                    isVerySmall
+                };
+            }
+        };
+
+        // ==================== LRU 缓存 ====================
+        class LRUCache {
+            constructor(maxSize = CONFIG.CACHE.LRU_SIZE) {
+                this.maxSize = maxSize;
+                this.cache = new Map();
+            }
+
+            get(key) {
+                if (!this.cache.has(key)) return undefined;
+                const value = this.cache.get(key);
+                this.cache.delete(key);
+                this.cache.set(key, value);
+                return value;
+            }
+
+            set(key, value) {
+                this.cache.has(key) && this.cache.delete(key);
+                if (this.cache.size >= this.maxSize) {
+                    this.cache.delete(this.cache.keys().next().value);
+                }
+                this.cache.set(key, value);
+            }
+
+            has(key) { return this.cache.has(key); }
+            clear() { this.cache.clear(); }
+        }
+
+        // ==================== 存储管理器 ====================
+        class Storage {
+            constructor() {
+                this._pending = new Map();
+                this._timer = null;
+                this._user = null;
+                this._keyCache = new Map();
+                this._valueCache = new Map();
+                this._valueCacheTime = new Map();
+            }
+
+            // 获取当前用户
+            getUser() {
+                if (this._user) return this._user;
+                const link = document.querySelector('.current-user a[href^="/u/"]');
+                if (link) {
+                    const match = link.getAttribute('href').match(PATTERNS.USERNAME);
+                    if (match) {
+                        this._user = match[1];
+                        GM_setValue(this._globalKey('currentUser'), this._user);
+                        return this._user;
+                    }
+                }
+                return this._user = GM_getValue(this._globalKey('currentUser'), null);
+            }
+
+            setUser(username) {
+                if (this._user !== username) {
+                    this._user = username;
+                    this._keyCache.clear();  // 用户变化时清除 key 缓存
+                    GM_setValue(this._globalKey('currentUser'), username);
+                }
+            }
+
+            // 生成全局键
+            _globalKey(key) {
+                return `ldsp_${CURRENT_SITE.prefix}_${CONFIG.STORAGE_KEYS[key] || key}`;
+            }
+
+            // 生成用户键
+            _userKey(key) {
+                const cacheKey = `${key}_${this._user || ''}`;
+                if (this._keyCache.has(cacheKey)) return this._keyCache.get(cacheKey);
+                
+                const base = CONFIG.STORAGE_KEYS[key] || key;
+                const user = this.getUser();
+                const result = user && CONFIG.USER_KEYS.has(key) 
+                    ? `ldsp_${CURRENT_SITE.prefix}_${base}_${user}`
+                    : `ldsp_${CURRENT_SITE.prefix}_${base}`;
+                
+                this._keyCache.set(cacheKey, result);
+                return result;
+            }
+
+            // 获取用户数据
+            get(key, defaultValue = null) {
+                const storageKey = this._userKey(key);
+                const now = Date.now();
+                
+                if (this._valueCache.has(storageKey)) {
+                    const cacheTime = this._valueCacheTime.get(storageKey);
+                    if ((now - cacheTime) < CONFIG.CACHE.VALUE_TTL) {
+                        return this._valueCache.get(storageKey);
+                    }
+                }
+                
+                const value = GM_getValue(storageKey, defaultValue);
+                this._valueCache.set(storageKey, value);
+                this._valueCacheTime.set(storageKey, now);
+                return value;
+            }
+
+            // 设置用户数据（带防抖）
+            set(key, value) {
+                const storageKey = this._userKey(key);
+                this._valueCache.set(storageKey, value);
+                this._valueCacheTime.set(storageKey, Date.now());
+                this._pending.set(storageKey, value);
+                this._scheduleWrite();
+            }
+
+            // 立即设置用户数据
+            setNow(key, value) {
+                const storageKey = this._userKey(key);
+                this._valueCache.set(storageKey, value);
+                this._valueCacheTime.set(storageKey, Date.now());
+                GM_setValue(storageKey, value);
+            }
+
+            // 获取全局数据
+            getGlobal(key, defaultValue = null) {
+                return GM_getValue(this._globalKey(key), defaultValue);
+            }
+
+            // 设置全局数据（带防抖）
+            setGlobal(key, value) {
+                this._pending.set(this._globalKey(key), value);
+                this._scheduleWrite();
+            }
+
+            // 立即设置全局数据
+            setGlobalNow(key, value) {
+                GM_setValue(this._globalKey(key), value);
+            }
+
+            // 调度写入
+            _scheduleWrite() {
+                if (this._timer) return;
+                this._timer = setTimeout(() => {
+                    this.flush();
+                    this._timer = null;
+                }, CONFIG.INTERVALS.STORAGE_DEBOUNCE);
+            }
+
+            // 刷新所有待写入数据
+            flush() {
+                this._pending.forEach((value, key) => {
+                    try { GM_setValue(key, value); } catch (e) { console.error('[Storage]', key, e); }
+                });
+                this._pending.clear();
+            }
+
+            // 清除缓存
+            invalidateCache(key) {
+                if (key) {
+                    const storageKey = this._userKey(key);
+                    this._valueCache.delete(storageKey);
+                    this._valueCacheTime.delete(storageKey);
+                } else {
+                    this._valueCache.clear();
+                    this._valueCacheTime.clear();
+                }
+            }
+
+            // 迁移旧数据
+            migrate(username) {
+                const flag = `ldsp_migrated_v3_${username}`;
+                if (GM_getValue(flag, false)) return;
+
+                CONFIG.USER_KEYS.forEach(key => {
+                    const oldKey = CONFIG.STORAGE_KEYS[key];
+                    const newKey = `ldsp_${CURRENT_SITE.prefix}_${oldKey}_${username}`;
+                    const oldData = GM_getValue(oldKey, null);
+                    if (oldData !== null && GM_getValue(newKey, null) === null) {
+                        GM_setValue(newKey, oldData);
+                    }
+                });
+
+                this._migrateReadingTime(username);
+                GM_setValue(flag, true);
+            }
+
+            // 迁移阅读时间数据
+            _migrateReadingTime(username) {
+                const key = `ldsp_${CURRENT_SITE.prefix}_reading_time_${username}`;
+                const data = GM_getValue(key, null);
+                if (!data || typeof data !== 'object') return;
+
+                if (data.date && data.minutes !== undefined && !data.dailyData) {
+                    GM_setValue(key, {
+                        version: 3,
+                        dailyData: { [data.date]: { totalMinutes: data.minutes || 0, lastActive: data.lastActive || Date.now(), sessions: [] } },
+                        monthlyCache: {},
+                        yearlyCache: {}
+                    });
+                } else if (data.version === 2) {
+                    data.version = 3;
+                    data.monthlyCache = data.monthlyCache || {};
+                    data.yearlyCache = data.yearlyCache || {};
+                    if (data.dailyData) {
+                        Object.entries(data.dailyData).forEach(([dateKey, dayData]) => {
+                            try {
+                                const d = new Date(dateKey);
+                                const monthKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+                                const yearKey = `${d.getFullYear()}`;
+                                const minutes = dayData.totalMinutes || 0;
+                                data.monthlyCache[monthKey] = (data.monthlyCache[monthKey] || 0) + minutes;
+                                data.yearlyCache[yearKey] = (data.yearlyCache[yearKey] || 0) + minutes;
+                            } catch (e) {}
+                        });
+                    }
+                    GM_setValue(key, data);
+                }
+            }
+        }
+
+        // ==================== 自定义错误类型 ====================
+        class NetworkError extends Error {
+            constructor(message, code = 'NETWORK_ERROR', status = 0) {
+                super(message);
+                this.name = 'NetworkError';
+                this.code = code;
+                this.status = status;
+            }
+            
+            get isTimeout() { return this.code === 'TIMEOUT'; }
+            get isAuth() { return this.code === 'UNAUTHORIZED' || this.status === 401; }
+            get isNotFound() { return this.status === 404; }
+            get isServerError() { return this.status >= 500; }
+        }
+
+        // ==================== 网络管理器 ====================
+        class Network {
+            constructor() {
+                this._pending = new Map();
+                this._apiCache = new Map();
+                this._apiCacheTime = new Map();
+            }
+            
+            // 创建统一的错误对象
+            static createError(message, code = 'UNKNOWN', status = 0) {
+                return new NetworkError(message, code, status);
+            }
+
+            // 静态方法：加载阅读等级配置（从服务端获取，本地缓存24小时）
+            static async loadReadingLevels() {
+                const storageKey = `ldsp_reading_levels`;
+                const timeKey = `ldsp_reading_levels_time`;
+                
+                try {
+                    // 检查本地缓存是否过期（24小时刷新一次）
+                    const cachedTime = GM_getValue(timeKey, 0);
+                    const now = Date.now();
+                    
+                    if (cachedTime && (now - cachedTime) < CONFIG.READING_LEVELS_REFRESH) {
+                        // 缓存未过期，使用本地数据
+                        const cached = GM_getValue(storageKey, null);
+                        if (cached && Array.isArray(cached) && cached.length > 0) {
+                            CONFIG.READING_LEVELS = cached;
+                            return;
+                        }
+                    }
+                    
+                    // 需要从服务端获取
+                    const response = await new Promise((resolve, reject) => {
+                        GM_xmlhttpRequest({
+                            method: 'GET',
+                            url: `${CONFIG.LEADERBOARD_API}/api/config/reading-levels`,
+                            headers: { 'Content-Type': 'application/json' },
+                            timeout: 10000,
+                            onload: res => {
+                                if (res.status >= 200 && res.status < 300) {
+                                    try {
+                                        resolve(JSON.parse(res.responseText));
+                                    } catch (e) {
+                                        reject(new Error('Parse error'));
+                                    }
+                                } else {
+                                    reject(new Error(`HTTP ${res.status}`));
+                                }
+                            },
+                            onerror: () => reject(new Error('Network error')),
+                            ontimeout: () => reject(new Error('Timeout'))
+                        });
+                    });
+                    
+                    if (response.success && response.data?.levels && Array.isArray(response.data.levels)) {
+                        const levels = response.data.levels;
+                        CONFIG.READING_LEVELS = levels;
+                        GM_setValue(storageKey, levels);
+                        GM_setValue(timeKey, now);
+                    } else {
+                        throw new Error('Invalid response format');
+                    }
+                } catch (e) {
+                    // 尝试使用本地缓存（即使过期也比没有好）
+                    const cached = GM_getValue(storageKey, null);
+                    if (cached && Array.isArray(cached) && cached.length > 0) {
+                        CONFIG.READING_LEVELS = cached;
+                    } else {
+                        // 使用默认配置
+                        CONFIG.READING_LEVELS = CONFIG.READING_LEVELS_DEFAULT;
+                    }
+                }
+            }
+
+            async fetch(url, options = {}) {
+                if (this._pending.has(url)) return this._pending.get(url);
+                
+                const promise = this._fetchWithRetry(url, options);
+                this._pending.set(url, promise);
+                
+                try {
+                    return await promise;
+                } finally {
+                    this._pending.delete(url);
+                }
+            }
+
+            // 清除 API 缓存
+            clearApiCache(endpoint) {
+                if (endpoint) {
+                    this._apiCache.delete(endpoint);
+                    this._apiCacheTime.delete(endpoint);
+                } else {
+                    this._apiCache.clear();
+                    this._apiCacheTime.clear();
+                }
+            }
+
+            async _fetchWithRetry(url, options) {
+                const { maxRetries = CONFIG.NETWORK.RETRY_COUNT, timeout = CONFIG.NETWORK.TIMEOUT } = options;
+                
+                for (let i = 0; i < maxRetries; i++) {
+                    try {
+                        return await this._doFetch(url, timeout);
+                    } catch (e) {
+                        if (i === maxRetries - 1) throw e;
+                        await new Promise(r => setTimeout(r, CONFIG.NETWORK.RETRY_DELAY * Math.pow(2, i)));
+                    }
+                }
+            }
+
+            async _doFetch(url, timeout) {
+                // 检测 GM_xmlhttpRequest 是否可用
+                const hasGM = typeof GM_xmlhttpRequest === 'function';
+                
+                // 方法1: 尝试 GM_xmlhttpRequest（可绕过跨域）
+                if (hasGM) {
+                    try {
+                        const result = await new Promise((resolve, reject) => {
+                            let settled = false;
+                            const timeoutId = setTimeout(() => {
+                                if (!settled) {
+                                    settled = true;
+                                    reject(new Error('Timeout'));
+                                }
+                            }, timeout);
+                            
+                            try {
+                                GM_xmlhttpRequest({
+                                    method: 'GET',
+                                    url,
+                                    timeout,
+                                    onload: res => {
+                                        if (settled) return;
+                                        settled = true;
+                                        clearTimeout(timeoutId);
+                                        if (res.status >= 200 && res.status < 300) {
+                                            resolve(res.responseText);
+                                        } else {
+                                            reject(new Error(`HTTP ${res.status}`));
+                                        }
+                                    },
+                                    onerror: () => {
+                                        if (settled) return;
+                                        settled = true;
+                                        clearTimeout(timeoutId);
+                                        reject(new Error('Network error'));
+                                    },
+                                    ontimeout: () => {
+                                        if (settled) return;
+                                        settled = true;
+                                        clearTimeout(timeoutId);
+                                        reject(new Error('GM Timeout'));
+                                    }
+                                });
+                            } catch (gmCallError) {
+                                if (settled) return;
+                                settled = true;
+                                clearTimeout(timeoutId);
+                                reject(gmCallError);
+                            }
+                        });
+                        return result;
+                    } catch (gmError) {
+                        // 跨域请求不使用 native fetch fallback（会触发 CORS 错误）
+                        const isCrossOrigin = !url.startsWith(location.origin);
+                        if (isCrossOrigin) {
+                            throw gmError;  // 直接抛出错误，不 fallback
+                        }
+                        // 同源请求继续尝试 native fetch
+                    }
+                }
+                
+                // 方法2: native fetch 作为 fallback（仅同源请求）
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), timeout);
+                const resp = await fetch(url, { 
+                    credentials: 'include',
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                return await resp.text();
+            }
+
+            // API 请求（带认证和缓存）
+            async api(endpoint, options = {}) {
+                const method = options.method || 'GET';
+                const cacheTtl = options.cacheTtl || 0;
+                
+                // GET 请求支持缓存
+                if (method === 'GET' && cacheTtl > 0) {
+                    const now = Date.now();
+                    const cacheKey = `${endpoint}_${options.token || ''}`;
+                    if (this._apiCache.has(cacheKey)) {
+                        const cacheTime = this._apiCacheTime.get(cacheKey);
+                        if (now - cacheTime < cacheTtl) {
+                            return this._apiCache.get(cacheKey);
+                        }
+                    }
+                }
+
+                return new Promise((resolve, reject) => {
+                    // 确保 body 是字符串
+                    let bodyData = options.body;
+                    if (bodyData && typeof bodyData === 'object') {
+                        bodyData = JSON.stringify(bodyData);
+                    }
+                    
+                    GM_xmlhttpRequest({
+                        method,
+                        url: `${CONFIG.LEADERBOARD_API}${endpoint}`,
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Client-Version': GM_info.script.version || 'unknown',
+                            ...(options.token ? { 'Authorization': `Bearer ${options.token}` } : {})
+                        },
+                        data: bodyData || undefined,
+                        timeout: CONFIG.NETWORK.TIMEOUT,
+                        onload: res => {
+                            try {
+                                const data = JSON.parse(res.responseText);
+                                if (res.status >= 200 && res.status < 300) {
+                                    // 缓存成功响应
+                                    if (method === 'GET' && cacheTtl > 0) {
+                                        const cacheKey = `${endpoint}_${options.token || ''}`;
+                                        this._apiCache.set(cacheKey, data);
+                                        this._apiCacheTime.set(cacheKey, Date.now());
+                                    }
+                                    resolve(data);
+                                } else {
+                                    // 构建错误消息，包含错误码便于识别
+                                    const errorCode = data.error?.code || '';
+                                    const errorMsg = data.error?.message || data.error || `HTTP ${res.status}`;
+                                    reject(new Error(`${errorCode}: ${errorMsg}`));
+                                }
+                            } catch (e) {
+                                reject(new Error('Parse error'));
+                            }
+                        },
+                        onerror: () => reject(new Error('Network error')),
+                        ontimeout: () => reject(new Error('Timeout'))
+                    });
+                });
+            }
+
+            // 获取 JSON 数据（带 cookie 同源请求）
+            // iOS Safari 中 GM_xmlhttpRequest 的 withCredentials 可能无法正确传递 cookie
+            // 因此对同源请求优先使用原生 fetch，可以正确携带 cookie
+            async fetchJson(url, options = {}) {
+                const timeout = options.timeout || CONFIG.NETWORK.TIMEOUT;
+                const headers = options.headers || {};
+                
+                // 检查是否为同源请求
+                const isSameOrigin = this._isSameOrigin(url);
+                
+                // 同源请求优先使用原生 fetch（iOS Safari 兼容性更好）
+                if (isSameOrigin) {
+                    return this._fetchJsonNative(url, timeout, headers);
+                }
+                
+                // 跨域请求使用 GM_xmlhttpRequest
+                return this._fetchJsonGM(url, timeout, headers);
+            }
+            
+            // 检查 URL 是否与当前页面同源
+            _isSameOrigin(url) {
+                try {
+                    const urlObj = new URL(url, location.href);
+                    return urlObj.origin === location.origin;
+                } catch {
+                    return false;
+                }
+            }
+            
+            // 使用原生 fetch 获取 JSON（同源请求，更好的 cookie 支持）
+            async _fetchJsonNative(url, timeout, headers) {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), timeout);
+                
+                try {
+                    const resp = await fetch(url, {
+                        method: 'GET',
+                        headers: {
+                            'Accept': 'application/json',
+                            ...headers
+                        },
+                        credentials: 'include',
+                        signal: controller.signal
+                    });
+                    
+                    clearTimeout(timeoutId);
+                    
+                    if (resp.status >= 200 && resp.status < 300) {
+                        return await resp.json();
+                    } else if (resp.status === 403 || resp.status === 401) {
+                        throw new Error('需要登录后访问');
+                    } else {
+                        throw new Error(`HTTP ${resp.status}`);
+                    }
+                } catch (e) {
+                    clearTimeout(timeoutId);
+                    if (e.name === 'AbortError') {
+                        throw new Error('请求超时');
+                    }
+                    throw e;
+                }
+            }
+            
+            // 使用 GM_xmlhttpRequest 获取 JSON（跨域请求）
+            _fetchJsonGM(url, timeout, headers) {
+                return new Promise((resolve, reject) => {
+                    const timeoutId = setTimeout(() => reject(new Error('Timeout')), timeout);
+                    
+                    GM_xmlhttpRequest({
+                        method: 'GET',
+                        url,
+                        headers: {
+                            'Accept': 'application/json',
+                            ...headers
+                        },
+                        timeout,
+                        withCredentials: true,
+                        onload: res => {
+                            clearTimeout(timeoutId);
+                            try {
+                                if (res.status >= 200 && res.status < 300) {
+                                    resolve(JSON.parse(res.responseText));
+                                } else if (res.status === 403 || res.status === 401) {
+                                    reject(new Error('需要登录后访问'));
+                                } else {
+                                    reject(new Error(`HTTP ${res.status}`));
+                                }
+                            } catch (e) {
+                                reject(new Error('解析响应失败'));
+                            }
+                        },
+                        onerror: () => {
+                            clearTimeout(timeoutId);
+                            reject(new Error('网络错误'));
+                        },
+                        ontimeout: () => {
+                            clearTimeout(timeoutId);
+                            reject(new Error('请求超时'));
+                        }
+                    });
+                });
+            }
+        }
+
+        // ==================== 历史数据管理器 ====================
+        class HistoryManager {
+            constructor(storage) {
+                this.storage = storage;
+                this.cache = new LRUCache();
+                this._history = null;
+                this._historyTime = 0;
+            }
+
+            getHistory() {
+                const now = Date.now();
+                if (this._history && (now - this._historyTime) < CONFIG.CACHE.HISTORY_TTL) {
+                    return this._history;
+                }
+                
+                const history = this.storage.get('history', []);
+                const cutoff = now - CONFIG.CACHE.MAX_HISTORY_DAYS * 86400000;
+                this._history = history.filter(h => h.ts > cutoff);
+                this._historyTime = now;
+                return this._history;
+            }
+
+            addHistory(data, readingTime = 0) {
+                const history = this.getHistory();
+                const now = Date.now();
+                const today = new Date().toDateString();
+                const record = { ts: now, data, readingTime };
+
+                const idx = history.findIndex(h => new Date(h.ts).toDateString() === today);
+                idx >= 0 ? history[idx] = record : history.push(record);
+
+                this.storage.set('history', history);
+                this._history = history;
+                this._historyTime = now;
+                this.cache.clear();
+                return history;
+            }
+
+            // 聚合每日增量
+            aggregateDaily(history, reqs, maxDays) {
+                const cacheKey = `daily_${maxDays}_${history.length}`;
+                if (this.cache.has(cacheKey)) return this.cache.get(cacheKey);
+
+                const byDay = new Map();
+                history.forEach(h => {
+                    const day = new Date(h.ts).toDateString();
+                    byDay.has(day) ? byDay.get(day).push(h) : byDay.set(day, [h]);
+                });
+
+                const sortedDays = [...byDay.keys()].sort((a, b) => new Date(a) - new Date(b));
+                const result = new Map();
+                let prevData = null;
+
+                sortedDays.forEach(day => {
+                    const latest = byDay.get(day).at(-1);
+                    const dayData = {};
+                    reqs.forEach(r => {
+                        dayData[r.name] = (latest.data[r.name] || 0) - (prevData?.[r.name] || 0);
+                    });
+                    result.set(day, dayData);
+                    prevData = { ...latest.data };
+                });
+
+                this.cache.set(cacheKey, result);
+                return result;
+            }
+
+            // 聚合每周增量
+            aggregateWeekly(history, reqs) {
+                const cacheKey = `weekly_${history.length}`;
+                if (this.cache.has(cacheKey)) return this.cache.get(cacheKey);
+
+                const now = new Date();
+                const [year, month] = [now.getFullYear(), now.getMonth()];
+                const weeks = this._getWeeksInMonth(year, month);
+                const result = new Map();
+                const byWeek = new Map(weeks.map((_, i) => [i, []]));
+
+                history.forEach(h => {
+                    const d = new Date(h.ts);
+                    if (d.getFullYear() === year && d.getMonth() === month) {
+                        weeks.forEach((week, i) => {
+                            if (d >= week.start && d <= week.end) byWeek.get(i).push(h);
+                        });
+                    }
+                });
+
+                let prevData = null;
+                const lastMonth = history.filter(h => new Date(h.ts) < new Date(year, month, 1));
+                if (lastMonth.length) prevData = { ...lastMonth.at(-1).data };
+
+                weeks.forEach((week, i) => {
+                    const records = byWeek.get(i);
+                    const weekData = {};
+                    if (records.length) {
+                        const latest = records.at(-1);
+                        reqs.forEach(r => {
+                            weekData[r.name] = (latest.data[r.name] || 0) - (prevData?.[r.name] || 0);
+                        });
+                        prevData = { ...latest.data };
+                    } else {
+                        reqs.forEach(r => weekData[r.name] = 0);
+                    }
+                    result.set(i, { weekNum: i + 1, start: week.start, end: week.end, label: `第${i + 1}周`, data: weekData });
+                });
+
+                this.cache.set(cacheKey, result);
+                return result;
+            }
+
+            // 聚合每月增量
+            aggregateMonthly(history, reqs) {
+                const cacheKey = `monthly_${history.length}`;
+                if (this.cache.has(cacheKey)) return this.cache.get(cacheKey);
+
+                const byMonth = new Map();
+                history.forEach(h => {
+                    const d = new Date(h.ts);
+                    const key = new Date(d.getFullYear(), d.getMonth(), 1).toDateString();
+                    byMonth.has(key) ? byMonth.get(key).push(h) : byMonth.set(key, [h]);
+                });
+
+                const sortedMonths = [...byMonth.keys()].sort((a, b) => new Date(a) - new Date(b));
+                const result = new Map();
+                let prevData = null;
+
+                sortedMonths.forEach(month => {
+                    const latest = byMonth.get(month).at(-1);
+                    const monthData = {};
+                    reqs.forEach(r => {
+                        monthData[r.name] = (latest.data[r.name] || 0) - (prevData?.[r.name] || 0);
+                    });
+                    result.set(month, monthData);
+                    prevData = { ...latest.data };
+                });
+
+                this.cache.set(cacheKey, result);
+                return result;
+            }
+
+            _getWeeksInMonth(year, month) {
+                const weeks = [];
+                const lastDay = new Date(year, month + 1, 0);
+                let start = new Date(year, month, 1);
+                
+                while (start <= lastDay) {
+                    let end = new Date(start);
+                    end.setDate(end.getDate() + 6);
+                    if (end > lastDay) end = new Date(lastDay);
+                    weeks.push({ start: new Date(start), end });
+                    start = new Date(end);
+                    start.setDate(start.getDate() + 1);
+                }
+                return weeks;
+            }
+        }
+
+        // ==================== 阅读时间追踪器 ====================
+        class ReadingTracker {
+            constructor(storage) {
+                this.storage = storage;
+                this.isActive = true;
+                this.lastActivity = Date.now();
+                this.lastSave = Date.now();
+                this._intervals = [];
+                this._initialized = false;
+                this._yearCache = null;
+                this._yearCacheTime = 0;
+            }
+
+            init(username) {
+                if (this._initialized) return;
+                this.storage.migrate(username);
+                this._bindEvents();
+                
+                // 始终启动活动状态追踪（用于 UI 显示）
+                // 但只有领导者才会执行数据保存（避免多标签页重复写入）
+                this._startTracking();
+                
+                this._initialized = true;
+            }
+            
+            _stopTracking() {
+                this._intervals.forEach(id => clearInterval(id));
+                this._intervals = [];
+                this._tracking = false;
+                // 停止前保存当前数据
+                this.save();
+            }
+
+            _bindEvents() {
+                try {
+                    // 使用节流的活动处理器
+                    // 普通事件：每秒最多触发一次
+                    this._activityHandler = Utils.throttle(() => this._onActivity(), 1000);
+                    // 高频事件（如 mousemove）：每 3 秒最多触发一次
+                    this._highFreqHandler = Utils.throttle(() => this._onActivity(), 3000);
+                    
+                    // 监听用户活动事件
+                    // 使用 capture: true 确保在事件捕获阶段就能获取，避免被其他脚本阻止
+                    // 普通频率事件：点击、按键、触摸开始
+                    this._normalEvents = ['mousedown', 'keydown', 'click', 'touchstart', 'pointerdown'];
+                    this._normalEvents.forEach(e => {
+                        document.addEventListener(e, this._activityHandler, { passive: true, capture: true });
+                    });
+                    
+                    // 高频事件：移动、滚动（使用更长的节流时间）
+                    this._highFreqEvents = ['mousemove', 'scroll', 'wheel', 'touchmove', 'pointermove'];
+                    this._highFreqEvents.forEach(e => {
+                        document.addEventListener(e, this._highFreqHandler, { passive: true, capture: true });
+                    });
+
+                    // 页面可见性变化
+                    this._visibilityHandler = () => {
+                        if (document.hidden) {
+                            this.save();
+                            this.isActive = false;
+                        } else {
+                            // 页面恢复可见时，假定用户正在查看，恢复活动状态
+                            // 如果用户60秒内无任何操作，定时器会自动设为 inactive
+                            this.lastActivity = Date.now();
+                            this.isActive = true;
+                        }
+                    };
+                    document.addEventListener('visibilitychange', this._visibilityHandler);
+                    
+                    // Safari/iOS 兼容：pageshow/pagehide 事件比 visibilitychange 更可靠
+                    this._pageShowHandler = (e) => {
+                        // e.persisted 表示页面从 bfcache 恢复
+                        this.lastActivity = Date.now();
+                        this.isActive = true;
+                    };
+                    this._pageHideHandler = () => {
+                        this.save();
+                        this.isActive = false;
+                    };
+                    window.addEventListener('pageshow', this._pageShowHandler);
+                    window.addEventListener('pagehide', this._pageHideHandler);
+                    
+                    // 窗口获得焦点时更新活动状态（同时监听 window 和 document）
+                    this._focusHandler = () => {
+                        this.lastActivity = Date.now();
+                        // Safari 上 focus 事件更可靠，直接设置 active
+                        this.isActive = true;
+                    };
+                    this._blurHandler = () => {
+                        // 窗口失去焦点时保存数据（Safari 上 visibilitychange 可能不触发）
+                        this.save();
+                    };
+                    window.addEventListener('focus', this._focusHandler);
+                    window.addEventListener('blur', this._blurHandler);
+                    document.addEventListener('focus', this._focusHandler);
+
+                    // 页面卸载前保存
+                    this._beforeUnloadHandler = () => this.save();
+                    window.addEventListener('beforeunload', this._beforeUnloadHandler);
+                    
+                } catch (e) {
+                    Logger.log('Failed to bind events:', e);
+                    // 降级：即使事件绑定失败，也尝试启动基本功能
+                }
+            }
+
+            _onActivity() {
+                const now = Date.now();
+                if (!this.isActive) this.isActive = true;
+                this.lastActivity = now;
+            }
+
+            _startTracking() {
+                // 防止重复启动
+                if (this._tracking) return;
+                this._tracking = true;
+                
+                // 用于检测系统休眠/恢复
+                let lastCheckTime = Date.now();
+                
+                // 记录定时器启动时间，用于健康检查
+                this._trackingStartTime = Date.now();
+                
+                this._intervals.push(
+                    setInterval(() => {
+                        const now = Date.now();
+                        const checkGap = now - lastCheckTime;
+                        
+                        // 检测系统休眠：如果两次检查间隔超过预期的 3 倍，说明可能休眠过
+                        // 例如：READING_TRACK=10秒，如果间隔超过 30 秒，说明系统暂停过
+                        if (checkGap > CONFIG.INTERVALS.READING_TRACK * 3) {
+                            // 系统刚从休眠恢复，重置状态避免累积错误时间
+                            this.isActive = false;
+                            this.lastActivity = now;
+                            this.lastSave = now;
+                            lastCheckTime = now;
+                            Logger.log('System resume detected, reset tracking state');
+                            return; // 跳过本次空闲检测，等待用户新活动
+                        }
+                        lastCheckTime = now;
+                        
+                        // 空闲检测逻辑：只负责将 active 状态设为 false
+                        // isActive = true 只能通过用户活动事件触发（_onActivity）
+                        const idle = now - this.lastActivity;
+                        if (this.isActive && idle > CONFIG.INTERVALS.READING_IDLE) {
+                            this.isActive = false;
+                        }
+                        // 注意：不再自动将 isActive 设为 true
+                        // 用户必须有新活动才能恢复记录状态
+                    }, CONFIG.INTERVALS.READING_TRACK),
+                    setInterval(() => this.save(), CONFIG.INTERVALS.READING_SAVE)
+                );
+                
+                // 健康检查：每 60 秒检查定时器是否还存活
+                // 如果定时器意外被清除，尝试重新启动
+                this._healthCheckId = setInterval(() => {
+                    if (this._tracking && this._intervals.length === 0) {
+                        Logger.log('Tracking timers died, restarting...');
+                        this._tracking = false;
+                        this._startTracking();
+                    }
+                }, 60000);
+            }
+
+            save() {
+                if (!this.storage.getUser()) return;
+
+                const todayKey = Utils.getTodayKey();
+                const now = Date.now();
+                
+                // 计算这次应该加的时间（基于本标签页的活动状态）
+                const elapsed = (now - this.lastSave) / 1000;
+                const idle = now - this.lastActivity;
+                
+                // 防护：检测异常数据
+                // 1. elapsed 为负数（系统时间被调整）
+                // 2. elapsed 过大（超过 2 分钟，可能是休眠恢复）
+                // 3. idle 为负数（系统时间被调整）
+                if (elapsed < 0 || elapsed > 120 || idle < 0) {
+                    // 重置状态，不记录这段异常时间
+                    this.lastSave = now;
+                    this.lastActivity = now;
+                    this.isActive = false;
+                    return;
+                }
+                
+                let toAdd = 0;
+                if (elapsed > 0) {
+                    // 计算有效的活动时间
+                    // 如果用户一直活跃（idle <= 60秒），记录全部 elapsed 时间
+                    // 如果用户空闲了，减去超出空闲阈值的部分
+                    toAdd = idle <= CONFIG.INTERVALS.READING_IDLE 
+                        ? elapsed 
+                        : Math.max(0, elapsed - (idle - CONFIG.INTERVALS.READING_IDLE) / 1000);
+                    
+                    // 额外防护：单次保存不能超过保存间隔的 1.5 倍（正常约45秒）
+                    const maxToAdd = CONFIG.INTERVALS.READING_SAVE / 1000 * 1.5;
+                    toAdd = Math.min(toAdd, maxToAdd);
+                }
+                
+                // 无论是否是领导者，都更新 lastSave（避免时间累积）
+                this.lastSave = now;
+                
+                // 只有领导者才写入 storage
+                if (!TabLeader.isLeader()) return;
+
+                let stored = this.storage.get('readingTime', null);
+
+                if (!stored?.dailyData) {
+                    stored = { version: 3, dailyData: {}, monthlyCache: {}, yearlyCache: {} };
+                }
+
+                let today = stored.dailyData[todayKey] || { totalMinutes: 0, lastActive: now, sessions: [] };
+
+                const minutes = toAdd / 60;
+                if (minutes > 0.1) {
+                    today.totalMinutes += minutes;
+                    today.lastActive = now;
+                    today.sessions = (today.sessions || []).slice(-20); // 限制会话数量
+                    today.sessions.push({ time: now, added: minutes });
+
+                    stored.dailyData[todayKey] = today;
+                    this._updateCache(stored, todayKey, minutes);
+                    this._cleanOld(stored);
+                    this.storage.set('readingTime', stored);
+                    this._yearCache = null;
+                }
+            }
+
+            _updateCache(stored, dateKey, minutes) {
+                try {
+                    const d = new Date(dateKey);
+                    const monthKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+                    const yearKey = `${d.getFullYear()}`;
+                    stored.monthlyCache[monthKey] = (stored.monthlyCache[monthKey] || 0) + minutes;
+                    stored.yearlyCache[yearKey] = (stored.yearlyCache[yearKey] || 0) + minutes;
+                } catch (e) {}
+            }
+
+            _cleanOld(stored) {
+                const cutoff = new Date();
+                cutoff.setDate(cutoff.getDate() - CONFIG.CACHE.MAX_HISTORY_DAYS);
+
+                Object.keys(stored.dailyData).forEach(key => {
+                    if (new Date(key) < cutoff) delete stored.dailyData[key];
+                });
+
+                Object.keys(stored.monthlyCache || {}).forEach(key => {
+                    const [y, m] = key.split('-');
+                    if (new Date(+y, +m - 1, 1) < cutoff) delete stored.monthlyCache[key];
+                });
+            }
+
+            getTodayTime() {
+                if (!this.storage.getUser()) return 0;
+                
+                const stored = this.storage.get('readingTime', null);
+                const saved = stored?.dailyData?.[Utils.getTodayKey()]?.totalMinutes || 0;
+                
+                const now = Date.now();
+                const elapsed = (now - this.lastSave) / 1000;
+                const idle = now - this.lastActivity;
+                
+                let unsaved = 0;
+                if (idle <= CONFIG.INTERVALS.READING_IDLE) {
+                    unsaved = elapsed / 60;
+                } else {
+                    unsaved = Math.max(0, elapsed - (idle - CONFIG.INTERVALS.READING_IDLE) / 1000) / 60;
+                }
+
+                return saved + Math.max(0, unsaved);
+            }
+
+            getTimeForDate(dateKey) {
+                return this.storage.get('readingTime', null)?.dailyData?.[dateKey]?.totalMinutes || 0;
+            }
+
+            getWeekHistory() {
+                const result = [];
+                const now = new Date();
+                
+                for (let i = 6; i >= 0; i--) {
+                    const d = new Date(now);
+                    d.setDate(d.getDate() - i);
+                    const key = d.toDateString();
+                    result.push({
+                        date: key,
+                        label: Utils.formatDate(d.getTime()),
+                        day: CONFIG.WEEKDAYS[d.getDay()],
+                        minutes: i === 0 ? this.getTodayTime() : this.getTimeForDate(key),
+                        isToday: i === 0
+                    });
+                }
+                return result;
+            }
+
+            getYearData() {
+                const now = Date.now();
+                if (this._yearCache && (now - this._yearCacheTime) < CONFIG.CACHE.YEAR_DATA_TTL) {
+                    return this._yearCache;
+                }
+
+                const today = new Date();
+                const year = today.getFullYear();
+                const stored = this.storage.get('readingTime', null);
+                const daily = stored?.dailyData || {};
+                const result = new Map();
+
+                Object.entries(daily).forEach(([key, data]) => {
+                    if (new Date(key).getFullYear() === year) {
+                        result.set(key, data.totalMinutes || 0);
+                    }
+                });
+                result.set(Utils.getTodayKey(), this.getTodayTime());
+
+                this._yearCache = result;
+                this._yearCacheTime = now;
+                return result;
+            }
+
+            getTotalTime() {
+                const stored = this.storage.get('readingTime', null);
+                if (!stored?.dailyData) return this.getTodayTime();
+
+                const todayKey = Utils.getTodayKey();
+                let total = 0;
+                Object.entries(stored.dailyData).forEach(([key, data]) => {
+                    total += key === todayKey ? this.getTodayTime() : (data.totalMinutes || 0);
+                });
+                return total;
+            }
+            
+            destroy() {
+                // 清除计时定时器
+                this._intervals.forEach(id => clearInterval(id));
+                this._intervals = [];
+                this._tracking = false;
+                
+                // 清除健康检查定时器
+                if (this._healthCheckId) {
+                    clearInterval(this._healthCheckId);
+                    this._healthCheckId = null;
+                }
+                
+                // 移除普通事件监听器（注意：capture 必须与添加时一致）
+                if (this._activityHandler && this._normalEvents) {
+                    this._normalEvents.forEach(e => {
+                        document.removeEventListener(e, this._activityHandler, { passive: true, capture: true });
+                    });
+                }
+                // 移除高频事件监听器
+                if (this._highFreqHandler && this._highFreqEvents) {
+                    this._highFreqEvents.forEach(e => {
+                        document.removeEventListener(e, this._highFreqHandler, { passive: true, capture: true });
+                    });
+                }
+                if (this._visibilityHandler) {
+                    document.removeEventListener('visibilitychange', this._visibilityHandler);
+                }
+                // 移除 Safari 兼容事件
+                if (this._pageShowHandler) {
+                    window.removeEventListener('pageshow', this._pageShowHandler);
+                }
+                if (this._pageHideHandler) {
+                    window.removeEventListener('pagehide', this._pageHideHandler);
+                }
+                // 移除焦点事件
+                if (this._focusHandler) {
+                    window.removeEventListener('focus', this._focusHandler);
+                    document.removeEventListener('focus', this._focusHandler);
+                }
+                if (this._blurHandler) {
+                    window.removeEventListener('blur', this._blurHandler);
+                }
+                if (this._beforeUnloadHandler) {
+                    window.removeEventListener('beforeunload', this._beforeUnloadHandler);
+                }
+                
+                // 保存数据
+                this.save();
+            }
+        }
+
+        // ==================== 通知管理器 ====================
+        class Notifier {
+            constructor(storage) {
+                this.storage = storage;
+            }
+
+            check(reqs) {
+                const achieved = this.storage.get('milestones', {});
+                const newMilestones = [];
+
+                reqs.forEach(r => {
+                    Object.entries(CONFIG.MILESTONES).forEach(([key, thresholds]) => {
+                        if (r.name.includes(key)) {
+                            thresholds.forEach(t => {
+                                const k = `${key}_${t}`;
+                                if (r.currentValue >= t && !achieved[k]) {
+                                    newMilestones.push({ name: key, threshold: t });
+                                    achieved[k] = true;
+                                }
+                            });
+                        }
+                    });
+
+                    const reqKey = `req_${r.name}`;
+                    if (r.isSuccess && !achieved[reqKey]) {
+                        newMilestones.push({ name: r.name, type: 'req' });
+                        achieved[reqKey] = true;
+                    }
+                });
+
+                if (newMilestones.length) {
+                    this.storage.set('milestones', achieved);
+                    this._notify(newMilestones);
+                }
+            }
+
+            _notify(milestones) {
+                const last = this.storage.get('lastNotify', 0);
+                if (Date.now() - last < 60000) return;
+                
+                this.storage.set('lastNotify', Date.now());
+                const msg = milestones.slice(0, 3).map(m => 
+                    m.type === 'req' ? `✅ ${m.name}` : `🏆 ${m.name} → ${m.threshold}`
+                ).join('\n');
+
+                typeof GM_notification !== 'undefined' && GM_notification({
+                    title: '🎉 达成里程碑！',
+                    text: msg,
+                    timeout: 5000
+                });
+            }
+        }
+
+        // ==================== OAuth 管理器 ====================
+        class OAuthManager {
+            constructor(storage, network) {
+                this.storage = storage;
+                this.network = network;
+            }
+
+            getToken() { return this.storage.getGlobal('leaderboardToken', null); }
+            setToken(token) { this.storage.setGlobalNow('leaderboardToken', token); }
+            
+            getUserInfo() { return this.storage.getGlobal('leaderboardUser', null); }
+            setUserInfo(user) { this.storage.setGlobalNow('leaderboardUser', user); }
+            
+            /**
+             * 检查是否已登录且 Token 未过期
+             */
+            isLoggedIn() {
+                const token = this.getToken();
+                const user = this.getUserInfo();
+                if (!token || !user) return false;
+                
+                // 检查 token 是否过期
+                if (this._isTokenExpired(token)) {
+                    Logger.log('Token expired, logging out');
+                    this.logout();
+                    return false;
+                }
+                return true;
+            }
+            
+            /**
+             * 解析 JWT Token 检查是否过期
+             */
+            _isTokenExpired(token) {
+                try {
+                    const parts = token.split('.');
+                    if (parts.length !== 3) return true;
+                    
+                    // 解析 payload (base64url)
+                    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+                    const decoded = JSON.parse(atob(payload));
+                    
+                    // 检查过期时间 (exp 是秒级时间戳)
+                    if (!decoded.exp) return false; // 无过期时间则认为有效
+                    
+                    const now = Math.floor(Date.now() / 1000);
+                    // 提前 10 分钟判断为过期，增加容错时间避免边界情况
+                    return decoded.exp < (now + 600);
+                } catch (e) {
+                    console.error('[LDStatus Mini] Token parse error:', e);
+                    return true; // 解析失败视为过期
+                }
+            }
+            
+            isJoined() { return this.storage.getGlobal('leaderboardJoined', false); }
+            setJoined(v) { this.storage.setGlobalNow('leaderboardJoined', v); }
+
+            /**
+             * 检查 URL hash 中的登录结果
+             * 统一同窗口登录模式：回调后通过 URL hash 传递登录结果
+             */
+            _checkUrlHashLogin() {
+                try {
+                    const hash = window.location.hash;
+                    if (!hash) return null;
+                    
+                    // 查找 ldsp_oauth 参数
+                    const match = hash.match(/ldsp_oauth=([^&]+)/);
+                    if (!match) return null;
+                    
+                    const encoded = match[1];
+                    // 解码 base64
+                    const decoded = JSON.parse(decodeURIComponent(atob(encoded)));
+                    
+                    // 检查时效性（5分钟内有效）
+                    if (decoded.ts && Date.now() - decoded.ts > 5 * 60 * 1000) {
+                        console.log('[OAuth] URL login result expired');
+                        this._clearUrlHash();
+                        return null;
+                    }
+                    
+                    // 转换为标准格式
+                    const result = {
+                        success: true,
+                        token: decoded.t,
+                        user: decoded.u,
+                        isJoined: decoded.j === 1
+                    };
+                    
+                    // 清除 URL 中的登录参数，保持 URL 干净
+                    this._clearUrlHash();
+                    
+                    return result;
+                } catch (e) {
+                    console.error('[OAuth] Failed to parse URL hash login:', e);
+                    this._clearUrlHash();
+                    return null;
+                }
+            }
+            
+            /**
+             * 清除 URL 中的 OAuth 登录参数
+             */
+            _clearUrlHash() {
+                try {
+                    const hash = window.location.hash;
+                    if (!hash || !hash.includes('ldsp_oauth=')) return;
+                    
+                    // 移除 ldsp_oauth 参数
+                    let newHash = hash.replace(/[#&]?ldsp_oauth=[^&]*/, '');
+                    // 清理多余的 # 和 &
+                    newHash = newHash.replace(/^[#&]+/, '').replace(/[#&]+$/, '');
+                    
+                    // 更新 URL（不触发页面刷新）
+                    const newUrl = window.location.pathname + window.location.search + (newHash ? '#' + newHash : '');
+                    history.replaceState(null, '', newUrl);
+                } catch (e) {
+                    console.warn('[OAuth] Failed to clear URL hash:', e);
+                }
+            }
+
+            /**
+             * 统一同窗口登录
+             * 所有环境都使用同窗口跳转方式，避免弹窗拦截和跨窗口通信问题
+             */
+            async login() {
+                // 检查是否有待处理的登录结果（从 URL hash 中获取）
+                const pendingResult = this._checkUrlHashLogin();
+                if (pendingResult?.success && pendingResult.token && pendingResult.user) {
+                    this.setToken(pendingResult.token);
+                    this.setUserInfo(pendingResult.user);
+                    this.setJoined(pendingResult.isJoined || false);
+                    return pendingResult.user;
+                }
+
+                // 获取授权链接并跳转（同窗口模式）
+                const siteParam = encodeURIComponent(CURRENT_SITE.domain);
+                // 使用不带 hash 的 URL 作为返回地址
+                const returnUrl = encodeURIComponent(window.location.origin + window.location.pathname + window.location.search);
+                
+                try {
+                    const result = await this.network.api(`/api/auth/init?site=${siteParam}&return_url=${returnUrl}`);
+                    
+                    if (result.success && result.data?.auth_url) {
+                        // 跳转到授权页面
+                        window.location.href = result.data.auth_url;
+                        // 返回一个永不 resolve 的 Promise（页面会跳转，不会执行后续代码）
+                        return new Promise(() => {});
+                    } else {
+                        throw new Error(result.error?.message || '获取授权链接失败');
+                    }
+                } catch (e) {
+                    throw new Error(e.message || '登录请求失败');
+                }
+            }
+
+            logout() {
+                this.setToken(null);
+                this.setUserInfo(null);
+                this.setJoined(false);
+            }
+
+            /**
+             * 发起 API 请求，自动处理 Token 过期
+             * @param {string} endpoint - API 端点
+             * @param {Object} options - 请求选项
+             * @param {boolean} options.requireAuth - 是否需要登录（默认 true）
+             */
+            async api(endpoint, options = {}) {
+                const { requireAuth = true, ...restOptions } = options;
+                
+                // 需要登录的接口，先检查登录状态（包含 Token 过期检测）
+                if (requireAuth) {
+                    const token = this.getToken();
+                    // 无 Token 或 Token 已过期，直接返回错误
+                    if (!token || this._isTokenExpired(token)) {
+                        // 清理过期状态
+                        if (token) this.logout();
+                        return { success: false, error: { code: 'NOT_LOGGED_IN', message: 'Not logged in or token expired' } };
+                    }
+                }
+                
+                try {
+                    const result = await this.network.api(endpoint, { ...restOptions, token: this.getToken() });
+                    return result;
+                } catch (e) {
+                    // 检查是否是 Token 过期错误
+                    const errMsg = e.message || '';
+                    const isAuthError = errMsg.includes('expired') || errMsg.includes('TOKEN_EXPIRED') || 
+                        errMsg.includes('INVALID_TOKEN') || errMsg.includes('401') ||
+                        errMsg.includes('Unauthorized') || (e instanceof NetworkError && e.isAuth);
+                    
+                    if (isAuthError) {
+                        this.logout();
+                        // 通过事件总线通知（替代全局 window 事件）
+                        EventBus.emit('auth:expired', { endpoint });
+                    }
+                    throw e;
+                }
+            }
+        }
+
+
+
+        // ==================== 云同步管理器 ====================
+        class CloudSyncManager {
+            constructor(storage, oauth, tracker) {
+                this.storage = storage;
+                this.oauth = oauth;
+                this.tracker = tracker;
+                this._timer = null;
+                this._syncing = false;
+                this._lastUpload = storage.getGlobal('lastCloudSync', 0);
+                this._lastDownload = storage.getGlobal('lastDownloadSync', 0);
+                this._lastHash = storage.getGlobal('lastUploadHash', '');
+                this._onSyncStateChange = null;  // 同步状态变化回调
+                
+                // 失败重试机制
+                this._failureCount = { reading: 0, requirements: 0 };
+                this._lastFailure = { reading: 0, requirements: 0 };
+                
+                // trust_level 缓存（避免重复调用 requirements 接口）
+                this._trustLevelCache = storage.getGlobal('trustLevelCache', null);
+                this._trustLevelCacheTime = storage.getGlobal('trustLevelCacheTime', 0);
+            }
+            
+            // 计算退避延迟（指数退避，最大 30 分钟）
+            _getBackoffDelay(type) {
+                const failures = this._failureCount[type] || 0;
+                if (failures === 0) return 0;
+                const baseDelay = CONFIG.INTERVALS.SYNC_RETRY_DELAY || 60000;
+                return Math.min(baseDelay * Math.pow(2, failures - 1), 30 * 60 * 1000);
+            }
+            
+            // 检查是否可以重试
+            _canRetry(type) {
+                const lastFail = this._lastFailure[type] || 0;
+                const backoff = this._getBackoffDelay(type);
+                return Date.now() - lastFail >= backoff;
+            }
+            
+            // 记录失败
+            _recordFailure(type) {
+                this._failureCount[type] = Math.min((this._failureCount[type] || 0) + 1, 6);
+                this._lastFailure[type] = Date.now();
+            }
+            
+            // 记录成功（重置失败计数）
+            _recordSuccess(type) {
+                this._failureCount[type] = 0;
+                this._lastFailure[type] = 0;
+            }
+            
+            // 检查用户 trust_level 是否足够
+            // 优先从 OAuth 用户信息获取，其次使用缓存
+            _hasSufficientTrustLevel() {
+                // 1. 优先从 OAuth 用户信息获取 trust_level（最准确）
+                // v3.4.7: 兼容 trust_level 和 trustLevel 两种命名格式
+                const userInfo = this.oauth.getUserInfo();
+                const trustLevel = userInfo?.trust_level ?? userInfo?.trustLevel;
+                if (userInfo && typeof trustLevel === 'number') {
+                    const hasTrust = trustLevel >= 2;
+                    // 更新缓存以便其他地方使用
+                    if (this._trustLevelCache !== hasTrust) {
+                        this._updateTrustLevelCache(hasTrust);
+                    }
+                    return hasTrust;
+                }
+                
+                // 2. 使用缓存（24小时有效）
+                const now = Date.now();
+                const cacheAge = now - this._trustLevelCacheTime;
+                if (this._trustLevelCache !== null && cacheAge < 24 * 60 * 60 * 1000) {
+                    return this._trustLevelCache;
+                }
+                
+                // 3. 无法确定，返回 null（需要从 API 获取）
+                return null;
+            }
+            
+            // 更新 trust_level 缓存（兼容性保留）
+            _updateTrustLevelCache(hasTrust) {
+                // v3.4.8: 移除等级限制，始终缓存为 true
+                this._trustLevelCache = true;
+                this._trustLevelCacheTime = Date.now();
+                this.storage.setGlobalNow('trustLevelCache', true);
+                this.storage.setGlobalNow('trustLevelCacheTime', this._trustLevelCacheTime);
+            }
+
+            // 设置同步状态变化回调
+            setSyncStateCallback(callback) {
+                this._onSyncStateChange = callback;
+            }
+
+            // 更新同步状态
+            _setSyncing(syncing) {
+                this._syncing = syncing;
+                this._onSyncStateChange?.(syncing);
+            }
+
+            // 获取同步状态
+            isSyncing() {
+                return this._syncing;
+            }
+
+            _getDataHash() {
+                const data = this.storage.get('readingTime', null);
+                if (!data?.dailyData) return '';
+                const days = Object.keys(data.dailyData).length;
+                const total = Object.values(data.dailyData).reduce((s, d) => s + (d.totalMinutes || 0), 0);
+                return `${days}:${Math.round(total)}`;
+            }
+
+            async download() {
+                // 检查退避延迟
+                if (!this._canRetry('reading')) {
+                    return null;
+                }
+
+                try {
+                    const result = await this.oauth.api('/api/reading/history?days=365');
+                    if (!result.success) {
+                        this._recordFailure('reading');
+                        return null;
+                    }
+                    
+                    this._recordSuccess('reading');
+
+                    const cloud = result.data.dailyData || {};
+                    let local = this.storage.get('readingTime', null);
+
+                    if (!local?.dailyData) {
+                        local = { version: 3, dailyData: cloud, monthlyCache: {}, yearlyCache: {} };
+                        this._rebuildCache(local);
+                        this.storage.setNow('readingTime', local);
+                        // 通知 UI 阅读数据已更新（新设备首次同步）
+                        EventBus.emit('reading:synced', { merged: Object.keys(cloud).length, source: 'cloud' });
+                        return { merged: Object.keys(cloud).length, source: 'cloud' };
+                    }
+
+                    let merged = 0;
+                    Object.entries(cloud).forEach(([key, cloudDay]) => {
+                        const localMinutes = local.dailyData[key]?.totalMinutes || 0;
+                        const cloudMinutes = cloudDay.totalMinutes || 0;
+                        if (cloudMinutes > localMinutes) {
+                            local.dailyData[key] = {
+                                totalMinutes: cloudMinutes,
+                                lastActive: cloudDay.lastActive || Date.now(),
+                                sessions: local.dailyData[key]?.sessions || []
+                            };
+                            merged++;
+                        }
+                    });
+
+                    if (merged > 0) {
+                        this._rebuildCache(local);
+                        this.storage.setNow('readingTime', local);
+                        // 通知 UI 阅读数据已更新
+                        EventBus.emit('reading:synced', { merged, source: 'merge' });
+                    }
+                    return { merged, source: 'merge' };
+                } catch (e) {
+                    console.error('[CloudSync] Download failed:', e);
+                    this._recordFailure('reading');
+                    return null;
+                }
+            }
+
+            async upload() {
+                // 前置检查：登录状态 + 同步状态 + 数据有效性
+                if (!this.oauth.isLoggedIn() || this._syncing) return null;
+                
+                const local = this.storage.get('readingTime', null);
+                if (!local?.dailyData || Object.keys(local.dailyData).length === 0) {
+                    return null;
+                }
+                
+                // 检查退避延迟
+                if (!this._canRetry('reading')) {
+                    return null;
+                }
+
+                try {
+                    this._setSyncing(true);
+
+                    // 优化：只上传最近 90 天的数据，减少请求大小
+                    const cutoffDate = new Date();
+                    cutoffDate.setDate(cutoffDate.getDate() - 90);
+                    const cutoff = cutoffDate.toDateString();
+                    
+                    const recentData = {};
+                    let count = 0;
+                    for (const [key, value] of Object.entries(local.dailyData)) {
+                        // 只保留最近90天的数据
+                        try {
+                            const date = new Date(key);
+                            if (date >= cutoffDate && count < 100) { // 最多100条
+                                recentData[key] = value;
+                                count++;
+                            }
+                        } catch (e) {}
+                    }
+                    
+                    if (Object.keys(recentData).length === 0) {
+                        this._setSyncing(false);
+                        return null;
+                    }
+
+                    const result = await this.oauth.api('/api/reading/sync-full', {
+                        method: 'POST',
+                        body: { dailyData: recentData, lastSyncTime: Date.now() }
+                    });
+
+                    if (result.success) {
+                        this._lastUpload = Date.now();
+                        this.storage.setGlobalNow('lastCloudSync', this._lastUpload);
+                        this._recordSuccess('reading');
+                        return result.data;
+                    }
+                    this._recordFailure('reading');
+                    throw new Error(result.error || '上传失败');
+                } catch (e) {
+                    console.error('[CloudSync] Upload failed:', e);
+                    this._recordFailure('reading');
+                    return null;
+                } finally {
+                    this._setSyncing(false);
+                }
+            }
+
+            async onPageLoad() {
+                if (!this.oauth.isLoggedIn()) return;
+
+                const now = Date.now();
+                const local = this.storage.get('readingTime', null);
+                const hasLocal = local?.dailyData && Object.keys(local.dailyData).length > 0;
+                const isNew = !hasLocal || this._lastDownload === 0;
+
+                // 串行执行同步请求，避免并发压力
+                // 1. 下载检查（优先级最高）
+                if (isNew || (now - this._lastDownload) > CONFIG.INTERVALS.CLOUD_DOWNLOAD) {
+                    const result = await this.download();
+                    if (result) {
+                        this._lastDownload = now;
+                        this.storage.setGlobalNow('lastDownloadSync', now);
+                        if (isNew && result.merged > 0) this.tracker._yearCache = null;
+                    }
+                }
+
+                // 2. 上传检查（仅在数据变化时）
+                const hash = this._getDataHash();
+                if (hash && hash !== this._lastHash && (now - this._lastUpload) > 5 * 60 * 1000) {
+                    // 至少间隔 5 分钟才上传
+                    const result = await this.upload();
+                    if (result) {
+                        this._lastHash = hash;
+                        this.storage.setGlobalNow('lastUploadHash', hash);
+                    }
+                }
+
+                this._startPeriodicSync();
+            }
+
+            async fullSync() {
+                // 前置登录检查
+                if (!this.oauth.isLoggedIn() || this._syncing) return;
+                
+                try {
+                    this._setSyncing(true);
+                    
+                    await this.download();
+                    this._lastDownload = Date.now();
+                    this.storage.setGlobalNow('lastDownloadSync', this._lastDownload);
+
+                    // 上传本地数据（只上传最近 90 天，减少请求大小）
+                    const local = this.storage.get('readingTime', null);
+                    if (local?.dailyData && Object.keys(local.dailyData).length > 0) {
+                        const cutoffDate = new Date();
+                        cutoffDate.setDate(cutoffDate.getDate() - 90);
+                        
+                        const recentData = {};
+                        let count = 0;
+                        for (const [key, value] of Object.entries(local.dailyData)) {
+                            try {
+                                const date = new Date(key);
+                                if (date >= cutoffDate && count < 100) {
+                                    recentData[key] = value;
+                                    count++;
+                                }
+                            } catch (e) {}
+                        }
+                        
+                        if (Object.keys(recentData).length > 0) {
+                            const result = await this.oauth.api('/api/reading/sync-full', {
+                                method: 'POST',
+                                body: { dailyData: recentData, lastSyncTime: Date.now() }
+                            });
+                            if (result?.success) {
+                                this._lastUpload = Date.now();
+                                this.storage.setGlobalNow('lastCloudSync', this._lastUpload);
+                            }
+                        }
+                    }
+                    this._lastHash = this._getDataHash();
+                    this.storage.setGlobalNow('lastUploadHash', this._lastHash);
+
+                    this._startPeriodicSync();
+                } finally {
+                    this._setSyncing(false);
+                }
+            }
+
+            _startPeriodicSync() {
+                if (this._timer) return;
+                this._timer = setInterval(async () => {
+                    if (!this.oauth.isLoggedIn()) return;
+                    // 只有领导者标签页才执行定期同步，避免多标签页重复请求
+                    if (!TabLeader.isLeader()) return;
+                    if (this._syncing) return; // 避免并发
+
+                    const now = Date.now();
+                    const hash = this._getDataHash();
+
+                    // 上传检查：数据变化 + 间隔足够 + 不在退避期
+                    if (hash !== this._lastHash && 
+                        (now - this._lastUpload) > CONFIG.INTERVALS.CLOUD_UPLOAD &&
+                        this._canRetry('reading')) {
+                        const result = await this.upload();
+                        if (result) {
+                            this._lastHash = hash;
+                            this.storage.setGlobalNow('lastUploadHash', hash);
+                        }
+                    }
+
+                    // 下载检查：间隔足够 + 不在退避期
+                    if ((now - this._lastDownload) > CONFIG.INTERVALS.CLOUD_DOWNLOAD &&
+                        this._canRetry('reading')) {
+                        const result = await this.download();
+                        if (result) {
+                            this._lastDownload = now;
+                            this.storage.setGlobalNow('lastDownloadSync', now);
+                        }
+                    }
+                }, CONFIG.INTERVALS.CLOUD_CHECK);
+            }
+
+            _rebuildCache(data) {
+                data.monthlyCache = {};
+                data.yearlyCache = {};
+                Object.entries(data.dailyData).forEach(([key, day]) => {
+                    try {
+                        const d = new Date(key);
+                        if (isNaN(d.getTime())) return;
+                        const monthKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+                        const yearKey = `${d.getFullYear()}`;
+                        const minutes = day.totalMinutes || 0;
+                        data.monthlyCache[monthKey] = (data.monthlyCache[monthKey] || 0) + minutes;
+                        data.yearlyCache[yearKey] = (data.yearlyCache[yearKey] || 0) + minutes;
+                    } catch (e) {}
+                });
+            }
+
+            // ==================== 升级要求历史同步 (trust_level >= 2) ====================
+
+            /**
+             * 设置 HistoryManager 引用（用于升级要求同步）
+             */
+            setHistoryManager(historyMgr) {
+                this._historyMgr = historyMgr;
+                // 兼容旧版本存储 key
+                this._reqLastDownload = this.storage.getGlobal('lastReqDownload', 0);
+                this._reqLastFullSync = this.storage.getGlobal('lastReqFullSync', 0) || 
+                                        this.storage.getGlobal('lastReqSync', 0); // 兼容旧 key
+                this._reqLastIncrementalSync = this.storage.getGlobal('lastReqIncrementalSync', 0);
+            }
+
+            /**
+             * 获取升级要求历史数据的 hash
+             */
+            _getReqHash() {
+                if (!this._historyMgr) return '';
+                const history = this._historyMgr.getHistory();
+                if (!history.length) return '';
+                return `${history.length}:${history[history.length - 1].ts}`;
+            }
+
+            /**
+             * 下载升级要求历史数据
+             */
+            async downloadRequirements() {
+                // 前置检查：登录状态 + 只有领导者标签页执行
+                if (!this.oauth.isLoggedIn() || !this._historyMgr) return null;
+                if (!TabLeader.isLeader()) return null;
+                
+                // 检查退避延迟
+                if (!this._canRetry('requirements')) {
+                    return null;
+                }
+
+                try {
+                    // 减少请求数据量：从 100 天减少到 60 天
+                    const result = await this.oauth.api('/api/requirements/history?days=60');
+                    
+                    if (!result.success) {
+                        // 权限不足（trust_level < 2）是正常情况，缓存结果避免重复请求
+                        if (result.error?.code === 'INSUFFICIENT_TRUST_LEVEL') {
+                            this._updateTrustLevelCache(false);
+                            return null;
+                        }
+                        this._recordFailure('requirements');
+                        return null;
+                    }
+                    
+                    // 请求成功，说明有足够权限
+                    this._updateTrustLevelCache(true);
+                    this._recordSuccess('requirements');
+
+                    const cloudHistory = result.data.history || [];
+                    if (!cloudHistory.length) return { merged: 0, source: 'empty' };
+
+                    let localHistory = this._historyMgr.getHistory();
+                    const localByDay = new Map();
+                    localHistory.forEach(h => {
+                        const day = new Date(h.ts).toDateString();
+                        localByDay.set(day, h);
+                    });
+
+                    let merged = 0;
+                    cloudHistory.forEach(cloudRecord => {
+                        const day = new Date(cloudRecord.ts).toDateString();
+                        const localRecord = localByDay.get(day);
+
+                        if (!localRecord) {
+                            // 本地没有，添加云端数据
+                            localHistory.push(cloudRecord);
+                            merged++;
+                        } else {
+                            // 本地有，合并数据（取每个字段的较大值）
+                            let changed = false;
+                            for (const [key, cloudValue] of Object.entries(cloudRecord.data)) {
+                                if (typeof cloudValue === 'number') {
+                                    const localValue = localRecord.data[key] || 0;
+                                    if (cloudValue > localValue) {
+                                        localRecord.data[key] = cloudValue;
+                                        changed = true;
+                                    }
+                                }
+                            }
+                            if (cloudRecord.readingTime > (localRecord.readingTime || 0)) {
+                                localRecord.readingTime = cloudRecord.readingTime;
+                                changed = true;
+                            }
+                            if (changed) merged++;
+                        }
+                    });
+
+                    if (merged > 0) {
+                        // 按时间排序
+                        localHistory.sort((a, b) => a.ts - b.ts);
+                        this.storage.set('history', localHistory);
+                        this._historyMgr._history = localHistory;
+                        this._historyMgr._historyTime = Date.now();
+                        this._historyMgr.cache.clear();
+                    }
+
+                    return { merged, source: 'merge' };
+                } catch (e) {
+                    console.error('[CloudSync] Requirements download failed:', e);
+                    this._recordFailure('requirements');
+                    return null;
+                }
+            }
+
+            /**
+             * 增量同步当天的升级要求数据
+             * @param {Object} todayRecord - 今天的历史记录 {ts, data, readingTime}
+             */
+            async syncTodayRequirements(todayRecord) {
+                // 前置检查：登录状态 + 数据有效性
+                if (!this.oauth.isLoggedIn() || !this._historyMgr) return null;
+                if (!todayRecord?.data || Object.keys(todayRecord.data).length === 0) return null;
+                
+                // 检查退避延迟
+                if (!this._canRetry('requirements')) {
+                    return null;
+                }
+
+                try {
+                    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+                    const result = await this.oauth.api('/api/requirements/sync', {
+                        method: 'POST',
+                        body: { 
+                            date: today,
+                            requirements: todayRecord.data,
+                            readingTime: todayRecord.readingTime || 0
+                        }
+                    });
+
+                    if (result.success) {
+                        this._reqLastIncrementalSync = Date.now();
+                        this.storage.setGlobalNow('lastReqIncrementalSync', this._reqLastIncrementalSync);
+                        this._updateTrustLevelCache(true);
+                        this._recordSuccess('requirements');
+                        return result.data;
+                    }
+                    
+                    // 权限不足是正常情况，缓存结果
+                    if (result.error?.code === 'INSUFFICIENT_TRUST_LEVEL') {
+                        this._updateTrustLevelCache(false);
+                        return null;
+                    }
+                    
+                    this._recordFailure('requirements');
+                    return null;
+                } catch (e) {
+                    console.error('[CloudSync] Requirements incremental sync failed:', e);
+                    this._recordFailure('requirements');
+                    return null;
+                }
+            }
+
+            /**
+             * 全量上传升级要求历史数据（仅在需要时调用）
+             */
+            async uploadRequirementsFull() {
+                // 前置检查：登录状态 + 数据有效性
+                if (!this.oauth.isLoggedIn() || !this._historyMgr || this._syncing) return null;
+                
+                const history = this._historyMgr.getHistory();
+                if (!history.length) return null;
+                
+                // 检查退避延迟
+                if (!this._canRetry('requirements')) {
+                    return null;
+                }
+
+                try {
+                    // 限制上传数据量，最多 60 天
+                    const recentHistory = history.slice(-60);
+                    
+                    const result = await this.oauth.api('/api/requirements/sync-full', {
+                        method: 'POST',
+                        body: { history: recentHistory, lastSyncTime: Date.now() }
+                    });
+
+                    if (result.success) {
+                        this._reqLastFullSync = Date.now();
+                        this.storage.setGlobalNow('lastReqFullSync', this._reqLastFullSync);
+                        this._updateTrustLevelCache(true);
+                        this._recordSuccess('requirements');
+                        return result.data;
+                    }
+                    
+                    // 权限不足是正常情况，缓存结果
+                    if (result.error?.code === 'INSUFFICIENT_TRUST_LEVEL') {
+                        this._updateTrustLevelCache(false);
+                        return null;
+                    }
+                    
+                    this._recordFailure('requirements');
+                    throw new Error(result.error?.message || '上传失败');
+                } catch (e) {
+                    console.error('[CloudSync] Requirements full upload failed:', e);
+                    this._recordFailure('requirements');
+                    return null;
+                }
+            }
+
+            /**
+             * 兼容旧调用 - 重定向到增量同步
+             * @deprecated 使用 syncTodayRequirements 或 uploadRequirementsFull
+             */
+            async uploadRequirements() {
+                // 获取今天的记录并进行增量同步
+                const history = this._historyMgr?.getHistory() || [];
+                const today = new Date().toDateString();
+                const todayRecord = history.find(h => new Date(h.ts).toDateString() === today);
+                return this.syncTodayRequirements(todayRecord);
+            }
+
+            /**
+             * 页面加载时同步升级要求数据
+             * 仅 trust_level >= 2 的用户可用
+             * 
+             * 优化策略（v3.3.1）：
+             * 1. 增量同步：默认只同步当天数据（1小时间隔）
+             * 2. 全量同步：仅在以下情况触发（12小时间隔）：
+             *    - 首次登录（从未下载过云端数据）
+             *    - 本地数据天数与云端不一致
+             */
+            async syncRequirementsOnLoad() {
+                // 前置检查：登录状态 + 只有领导者标签页执行
+                if (!this.oauth.isLoggedIn() || !this._historyMgr) return;
+                if (!TabLeader.isLeader()) return;
+
+                const now = Date.now();
+                const localHistory = this._historyMgr.getHistory();
+                const INCREMENTAL_INTERVAL = CONFIG.INTERVALS.REQ_SYNC_INCREMENTAL || 3600000; // 1小时
+                const FULL_INTERVAL = CONFIG.INTERVALS.REQ_SYNC_FULL || 43200000; // 12小时
+                
+                // ========== 判断是否需要全量同步 ==========
+                const isFirstTime = this._reqLastDownload === 0;
+                const needFullSync = isFirstTime || (now - (this._reqLastFullSync || 0)) > FULL_INTERVAL;
+                
+                if (needFullSync) {
+                    // 1. 先下载云端数据
+                    const downloadResult = await this.downloadRequirements();
+                    if (downloadResult) {
+                        this._reqLastDownload = now;
+                        this.storage.setGlobalNow('lastReqDownload', now);
+                        
+                        // 2. 如果本地有数据且云端数据较少，上传本地数据
+                        const cloudDays = downloadResult.merged || 0;
+                        const localDays = localHistory.length;
+                        
+                        if (localDays > 0 && (isFirstTime || localDays > cloudDays)) {
+                            const uploadResult = await this.uploadRequirementsFull();
+                            if (uploadResult) {
+                                this._reqLastFullSync = now;
+                                this.storage.setGlobalNow('lastReqFullSync', now);
+                            }
+                        } else {
+                            this._reqLastFullSync = now;
+                            this.storage.setGlobalNow('lastReqFullSync', now);
+                        }
+                    }
+                    return;
+                }
+                
+                // ========== 增量同步：只同步当天数据 ==========
+                const lastIncremental = this._reqLastIncrementalSync || 0;
+                if ((now - lastIncremental) < INCREMENTAL_INTERVAL) {
+                    return;
+                }
+                
+                // 获取今天的记录
+                const today = new Date().toDateString();
+                const todayRecord = localHistory.find(h => new Date(h.ts).toDateString() === today);
+                
+                if (todayRecord) {
+                    await this.syncTodayRequirements(todayRecord);
+                }
+            }
+
+            /**
+             * 获取系统公告（公开接口，不需要登录）
+             * @returns {Promise<{enabled: boolean, content: string, type: string}|null>}
+             */
+            async getAnnouncement() {
+                try {
+                    const response = await fetch(`${CONFIG.LEADERBOARD_API}/api/config/announcement`);
+                    if (!response.ok) return null;
+                    const result = await response.json();
+                    if (result.success && result.data) {
+                        return result.data;
+                    }
+                    return null;
+                } catch (e) {
+                    console.error('[CloudSync] Get announcement failed:', e);
+                    return null;
+                }
+            }
+
+            /**
+             * 获取官网URL（公开接口，不需要登录）
+             * 每天最多请求一次，使用本地缓存
+             * @returns {Promise<string>} 官网URL
+             */
+            async getWebsiteUrl() {
+                const DEFAULT_URL = 'https://ldspro.qzz.io/';
+                const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+                
+                try {
+                    // 检查今日是否已请求过
+                    const cachedDate = GM_getValue('ldsp_website_url_date', null);
+                    const cachedUrl = GM_getValue('ldsp_website_url', null);
+                    
+                    if (cachedDate === today && cachedUrl) {
+                        return cachedUrl;
+                    }
+                    
+                    // 今日未请求，发起请求
+                    const response = await fetch(`${CONFIG.LEADERBOARD_API}/api/config/website-url`);
+                    if (!response.ok) {
+                        // 请求失败，返回缓存或默认值
+                        return cachedUrl || DEFAULT_URL;
+                    }
+                    
+                    const result = await response.json();
+                    if (result.success && result.data?.url) {
+                        // 更新缓存
+                        GM_setValue('ldsp_website_url', result.data.url);
+                        GM_setValue('ldsp_website_url_date', today);
+                        return result.data.url;
+                    }
+                    
+                    return cachedUrl || DEFAULT_URL;
+                } catch (e) {
+                    console.error('[CloudSync] Get website URL failed:', e);
+                    // 出错时返回缓存或默认值
+                    const cachedUrl = GM_getValue('ldsp_website_url', null);
+                    return cachedUrl || DEFAULT_URL;
+                }
+            }
+
+            destroy() {
+                this._timer && clearInterval(this._timer);
+                this._timer = null;
+            }
+        }
+
+        // ==================== 样式管理器 ====================
+        const Styles = {
+            _injected: false,
+
+            inject() {
+                if (this._injected) return;
+                const cfg = Screen.getConfig();
+                const style = document.createElement('style');
+                style.id = 'ldsp-styles';
+                style.textContent = this._css(cfg);
+                document.head.appendChild(style);
+                this._injected = true;
+            },
+
+            _css(c) {
+                return `
+    #ldsp-panel{--dur-fast:120ms;--dur:200ms;--dur-slow:350ms;--ease:cubic-bezier(.22,1,.36,1);--ease-circ:cubic-bezier(.85,0,.15,1);--ease-spring:cubic-bezier(.175,.885,.32,1.275);--ease-out:cubic-bezier(0,.55,.45,1);--bg:#12131a;--bg-card:rgba(24,26,36,.92);--bg-hover:rgba(38,42,56,.95);--bg-el:rgba(32,35,48,.88);--bg-glass:rgba(255,255,255,.02);--txt:#e4e6ed;--txt-sec:#9499ad;--txt-mut:#5d6275;--accent:#6b8cef;--accent-light:#8aa4f4;--accent2:#5bb5a6;--accent2-light:#7cc9bc;--accent3:#e07a8d;--grad:linear-gradient(135deg,#5a7de0 0%,#4a6bc9 100%);--grad-accent:linear-gradient(135deg,#4a6bc9,#3d5aaa);--grad-warm:linear-gradient(135deg,#e07a8d,#c9606e);--grad-gold:linear-gradient(135deg,#d4a853 0%,#c49339 100%);--ok:#5bb5a6;--ok-light:#7cc9bc;--ok-bg:rgba(91,181,166,.12);--err:#e07a8d;--err-light:#ea9aa8;--err-bg:rgba(224,122,141,.12);--warn:#d4a853;--warn-bg:rgba(212,168,83,.12);--border:rgba(255,255,255,.06);--border2:rgba(255,255,255,.1);--border-accent:rgba(107,140,239,.3);--border-panel:rgba(0,0,0,.25);--shadow:0 1.25rem 3rem rgba(0,0,0,.4);--shadow-lg:0 1.5rem 4rem rgba(0,0,0,.5),0 0 2rem rgba(107,140,239,.06);--shadow-glow:0 0 1.25rem rgba(107,140,239,.15);--glow-accent:0 0 1rem rgba(107,140,239,.2);--scrollbar:rgba(140,150,175,.5);--scrollbar-hover:rgba(140,150,175,.7);--r-xs:0.25em;--r-sm:0.5em;--r-md:0.75em;--r-lg:1em;--r-xl:1.25em;--w:${c.width}px;--h:${c.maxHeight}px;--fs:${c.fontSize}px;--pd:${c.padding}px;--av:${c.avatarSize}px;--ring:${c.ringSize}px;--min-w:220px;--max-w:420px;--min-h:300px;display:flex;flex-direction:column;position:fixed;left:0.5vw;top:${c.top}px;right:auto;width:var(--w);max-height:var(--h);min-width:var(--min-w);max-width:var(--max-w);min-height:var(--min-h);background:var(--bg);border-radius:var(--r-lg);font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Noto Sans SC',sans-serif;font-size:var(--fs);color:var(--txt);box-shadow:var(--shadow);z-index:99999;overflow:hidden;border:none;backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+    #ldsp-panel,#ldsp-panel *{transition:opacity var(--dur) var(--ease),transform var(--dur) var(--ease);user-select:none;-webkit-font-smoothing:antialiased}
+    #ldsp-panel{transform:translateZ(0);backface-visibility:hidden}
+    #ldsp-panel input,#ldsp-panel textarea{cursor:text;user-select:text}
+    #ldsp-panel [data-clickable],#ldsp-panel [data-clickable] *,#ldsp-panel button,#ldsp-panel a,#ldsp-panel .ldsp-tab,#ldsp-panel .ldsp-subtab,#ldsp-panel .ldsp-ring-lvl,#ldsp-panel .ldsp-rd-day-bar,#ldsp-panel .ldsp-year-cell:not(.empty),#ldsp-panel .ldsp-rank-item,#ldsp-panel .ldsp-ticket-item,#ldsp-panel .ldsp-ticket-type,#ldsp-panel .ldsp-ticket-tab,#ldsp-panel .ldsp-ticket-close,#ldsp-panel .ldsp-ticket-back,#ldsp-panel .ldsp-lb-refresh,#ldsp-panel .ldsp-modal-btn,#ldsp-panel .ldsp-lb-btn,#ldsp-panel .ldsp-update-bubble-close{cursor:pointer}
+    #ldsp-panel.no-trans,#ldsp-panel.no-trans *{transition:none!important;animation-play-state:paused!important}
+    #ldsp-panel.anim{transition:width var(--dur-slow) var(--ease),height var(--dur-slow) var(--ease),min-width var(--dur-slow) var(--ease),min-height var(--dur-slow) var(--ease),max-width var(--dur-slow) var(--ease),max-height var(--dur-slow) var(--ease),top var(--dur-slow) var(--ease),border-radius var(--dur-slow) var(--ease);transform:none!important}
+    #ldsp-panel.light{--bg:rgba(250,251,254,.97);--bg-card:rgba(245,247,252,.94);--bg-hover:rgba(238,242,250,.96);--bg-el:rgba(255,255,255,.94);--bg-glass:rgba(0,0,0,.012);--txt:#1e2030;--txt-sec:#4a5068;--txt-mut:#8590a6;--accent:#5070d0;--accent-light:#6b8cef;--accent2:#4a9e8f;--accent2-light:#5bb5a6;--ok:#4a9e8f;--ok-light:#5bb5a6;--ok-bg:rgba(74,158,143,.08);--err:#d45d6e;--err-light:#e07a8d;--err-bg:rgba(212,93,110,.08);--warn:#c49339;--warn-bg:rgba(196,147,57,.08);--border:rgba(0,0,0,.08);--border2:rgba(0,0,0,.1);--border-accent:rgba(80,112,208,.2);--border-panel:rgba(0,0,0,.1);--shadow:0 1.25rem 3rem rgba(0,0,0,.08);--shadow-lg:0 1.5rem 4rem rgba(0,0,0,.12);--glow-accent:0 0 1rem rgba(80,112,208,.1);--scrollbar:var(--accent);--scrollbar-hover:var(--accent-light)}
+    #ldsp-panel.collapsed{width:48px!important;height:48px!important;min-width:48px!important;min-height:48px!important;max-height:48px!important;border-radius:var(--r-md);cursor:pointer;touch-action:none;background:linear-gradient(135deg,#7a9bf5 0%,#5a7de0 50%,#5bb5a6 100%);border:none;box-shadow:var(--shadow),0 0 20px rgba(107,140,239,.35)}
+    #ldsp-panel.collapsed .ldsp-hdr{padding:0;justify-content:center;align-items:center;height:100%;background:0 0;min-height:0}
+    #ldsp-panel.collapsed .ldsp-hdr-info{opacity:0;visibility:hidden;pointer-events:none;position:absolute;transform:translateX(-10px)}
+    #ldsp-panel.collapsed .ldsp-body{display:none!important}
+    #ldsp-panel.collapsed .ldsp-hdr-btns>button:not(.ldsp-toggle){opacity:0;visibility:hidden;pointer-events:none;transform:scale(0.8);position:absolute}
+    #ldsp-panel.collapsed .ldsp-hdr-btns{justify-content:center;width:100%;height:100%;margin-left:0}
+    #ldsp-panel.collapsed,#ldsp-panel.collapsed *{cursor:pointer!important}
+    #ldsp-panel.collapsed .ldsp-toggle{width:100%;height:100%;font-size:18px;background:0 0;display:flex;align-items:center;justify-content:center;color:#fff;position:absolute;inset:0;margin:0;padding:0;box-sizing:border-box}
+    #ldsp-panel.collapsed .ldsp-toggle .ldsp-toggle-arrow{display:none}
+    #ldsp-panel.collapsed .ldsp-toggle .ldsp-toggle-logo{display:block;width:24px;height:24px;filter:brightness(1.05) drop-shadow(0 0 2px rgba(140,180,255,.2));transition:filter .2s var(--ease),transform .2s var(--ease)}
+    #ldsp-panel:not(.collapsed) .ldsp-toggle .ldsp-toggle-logo{display:none}
+    @media (hover:hover){#ldsp-panel.collapsed:hover{transform:scale(1.08);box-shadow:var(--shadow-lg),0 0 35px rgba(120,160,255,.6)}#ldsp-panel.collapsed:hover .ldsp-toggle-logo{filter:brightness(1.6) drop-shadow(0 0 12px rgba(160,200,255,1)) drop-shadow(0 0 20px rgba(140,180,255,.8));transform:scale(1.15) rotate(360deg);transition:filter .3s var(--ease),transform .6s var(--ease-spring)}}
+    #ldsp-panel.collapsed:active .ldsp-toggle-logo{filter:brightness(2) drop-shadow(0 0 16px rgba(200,230,255,1)) drop-shadow(0 0 30px rgba(160,200,255,1));transform:scale(0.92)}
+    #ldsp-panel.collapsed.no-hover-effect{transform:none!important}#ldsp-panel.collapsed.no-hover-effect .ldsp-toggle-logo{filter:brightness(1.05) drop-shadow(0 0 2px rgba(140,180,255,.2))!important;transform:none!important}
+    .ldsp-hdr{display:flex;align-items:center;padding:10px 12px;background:var(--grad);cursor:move;user-select:none;touch-action:none;position:relative;gap:8px;min-height:52px;box-sizing:border-box;flex-shrink:0}
+    .ldsp-hdr::before{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.1) 0%,transparent 100%);pointer-events:none}
+    .ldsp-hdr::after{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle,rgba(255,255,255,.1) 0%,transparent 60%);opacity:0;transition:opacity .5s;pointer-events:none}
+    .ldsp-hdr:hover::after{opacity:1}
+    .ldsp-hdr-info{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 auto;position:relative;z-index:1;transition:opacity .25s var(--ease),visibility .25s,transform .25s var(--ease);overflow:hidden}
+    .ldsp-site-wrap{display:flex;flex-direction:column;align-items:center;gap:3px;flex-shrink:0;position:relative}
+    .ldsp-site-icon{width:26px;height:26px;border-radius:7px;border:2px solid rgba(255,255,255,.25);flex-shrink:0;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+    .ldsp-hdr-text{display:flex;flex-direction:column;align-items:flex-start;gap:1px;min-width:0;flex:1 1 0;overflow:hidden}
+    .ldsp-title{font-weight:800;font-size:14px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2;letter-spacing:-.02em;text-shadow:0 1px 2px rgba(0,0,0,.2);max-width:100%}
+    .ldsp-ver{font-size:10px;color:rgba(255,255,255,.6);line-height:1.2;display:flex;align-items:center;gap:4px;overflow:hidden;max-width:100%}
+    .ldsp-learn-trust{display:block;text-align:center;margin-top:8px;font-size:10px;color:var(--txt-dim);text-decoration:none;opacity:.6;transition:opacity .15s,color .15s}
+    .ldsp-learn-trust:hover{opacity:1;color:var(--txt-sec)}
+    .ldsp-app-name{font-size:10px;font-weight:700;white-space:nowrap;background:linear-gradient(90deg,#a8c0f8,#7a9eef,#7cc9bc,#7a9eef,#a8c0f8);background-size:200% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:gradient-shift 6s ease infinite;will-change:background-position}
+    @keyframes gradient-shift{0%{background-position:0% center}50%{background-position:100% center}100%{background-position:0% center}}
+    .ldsp-ver-num{background:rgba(255,255,255,.2);padding:2px 8px;border-radius:10px;color:#fff;font-weight:600;font-size:9px;backdrop-filter:blur(4px)}
+    .ldsp-site-ver{font-size:9px;color:#fff;text-align:center;font-weight:700;background:rgba(0,0,0,.25);padding:1px 5px;border-radius:5px;letter-spacing:.02em}
+    .ldsp-hdr-btns{display:flex;gap:4px;flex-shrink:0;position:relative;z-index:1;margin-left:auto}
+    .ldsp-hdr-btns button{width:28px;height:28px;border:none;background:rgba(255,255,255,.12);color:#fff;border-radius:var(--r-sm);font-size:12px;display:flex;align-items:center;justify-content:center;flex-shrink:0;outline:none;-webkit-tap-highlight-color:transparent;backdrop-filter:blur(4px);transition:transform .25s var(--ease),background .15s,box-shadow .2s,opacity .2s,visibility .2s}
+    .ldsp-hdr-btns button:hover{background:rgba(255,255,255,.25);transform:translateY(-2px) scale(1.05);box-shadow:0 4px 12px rgba(0,0,0,.2)}
+    .ldsp-hdr-btns button:active{transform:translateY(0) scale(.95)}
+    .ldsp-hdr-btns button:focus{outline:none}
+    .ldsp-hdr-btns button:disabled{opacity:.5;cursor:not-allowed;transform:none!important}
+    .ldsp-hdr-btns button.has-update{background:linear-gradient(135deg,var(--ok),var(--ok-light));animation:pulse-update 3s ease-in-out infinite;position:relative;box-shadow:0 0 15px rgba(16,185,129,.4)}
+    .ldsp-hdr-btns button.has-update::after{content:'';position:absolute;top:-3px;right:-3px;width:10px;height:10px;background:var(--err);border-radius:50%;border:2px solid rgba(0,0,0,.2);animation:pulse-dot 2.5s ease infinite}
+    @keyframes pulse-update{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
+    @keyframes pulse-dot{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.15);opacity:.8}}
+    .ldsp-update-bubble{position:absolute;top:52px;left:50%;transform:translateX(-50%) translateY(-10px);background:var(--bg-card);border:1px solid var(--border-accent);border-radius:var(--r-md);padding:16px 18px;text-align:center;z-index:100;box-shadow:var(--shadow-lg),var(--glow-accent);opacity:0;pointer-events:none;transition:transform .3s var(--ease-spring),opacity .3s var(--ease);max-width:calc(100% - 24px);width:220px;backdrop-filter:blur(16px);will-change:transform,opacity}
+    .ldsp-update-bubble::before{content:'';position:absolute;top:-7px;left:50%;transform:translateX(-50%) rotate(45deg);width:12px;height:12px;background:var(--bg-card);border-left:1px solid var(--border-accent);border-top:1px solid var(--border-accent)}
+    .ldsp-update-bubble.show{opacity:1;transform:translateX(-50%) translateY(0);pointer-events:auto}
+    .ldsp-update-bubble-close{position:absolute;top:8px;right:10px;font-size:16px;color:var(--txt-mut);transition:color .15s,background .15s;line-height:1;width:20px;height:20px;display:flex;align-items:center;justify-content:center;border-radius:50%}
+    .ldsp-update-bubble-close:hover{color:var(--txt);background:var(--bg-hover)}
+    .ldsp-update-bubble-icon{font-size:28px;margin-bottom:8px;animation:bounce-in .5s var(--ease-spring)}
+    @keyframes bounce-in{0%{transform:scale(0)}50%{transform:scale(1.2)}100%{transform:scale(1)}}
+    .ldsp-update-bubble-title{font-size:13px;font-weight:700;margin-bottom:6px;color:var(--txt);letter-spacing:-.01em}
+    .ldsp-update-bubble-ver{font-size:11px;margin-bottom:12px;color:var(--txt-sec)}
+    .ldsp-update-bubble-btn{background:var(--grad);color:#fff;border:none;padding:8px 20px;border-radius:20px;font-size:12px;font-weight:600;transition:transform .2s var(--ease),box-shadow .2s;box-shadow:0 4px 15px rgba(107,140,239,.3)}
+    .ldsp-update-bubble-btn:hover{transform:translateY(-2px) scale(1.02);box-shadow:0 6px 20px rgba(107,140,239,.4)}
+    .ldsp-update-bubble-btn:active{transform:translateY(0) scale(.98)}
+    .ldsp-update-bubble-btn:disabled{opacity:.6;cursor:not-allowed;transform:none!important}
+    .ldsp-body{background:var(--bg);position:relative;overflow:hidden;display:flex;flex-direction:column;flex:1;min-height:0}
+    .ldsp-announcement{overflow:hidden;background:linear-gradient(90deg,rgba(59,130,246,.1),rgba(107,140,239,.1));border-bottom:1px solid var(--border);padding:0;height:0;opacity:0;transition:height .3s var(--ease),opacity .3s,padding .3s;flex-shrink:0}
+    .ldsp-announcement.active{height:24px;min-height:24px;opacity:1;padding:0 10px}
+    .ldsp-announcement.warning{background:linear-gradient(90deg,rgba(245,158,11,.15),rgba(239,68,68,.08))}
+    .ldsp-announcement.success{background:linear-gradient(90deg,rgba(16,185,129,.12),rgba(34,197,94,.08))}
+    .ldsp-announcement-inner{display:flex;align-items:center;height:24px;white-space:nowrap;animation:marquee var(--marquee-duration,20s) linear forwards}
+    .ldsp-announcement-inner:hover{animation-play-state:paused}
+    .ldsp-announcement-text{font-size:11px;font-weight:500;color:var(--txt-sec);display:flex;align-items:center;gap:6px;padding-right:50px}
+    .ldsp-announcement-text::before{content:'📢';font-size:12px}
+    .ldsp-announcement.warning .ldsp-announcement-text::before{content:'⚠️'}
+    .ldsp-announcement.success .ldsp-announcement-text::before{content:'🎉'}
+    @keyframes marquee{0%{transform:translateX(100%)}100%{transform:translateX(-100%)}}
+    .ldsp-user{display:flex;align-items:stretch;gap:10px;padding:10px var(--pd) 24px;background:var(--bg-card);border-bottom:1px solid var(--border);position:relative;overflow:hidden;flex-shrink:0}
+    .ldsp-user::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--accent),transparent);opacity:.3}
+    .ldsp-user-left{display:flex;flex-direction:column;flex:1;min-width:0;gap:8px;justify-content:center}
+    .ldsp-user-row{display:flex;align-items:center;gap:10px}
+    .ldsp-user-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px;position:relative}
+    .ldsp-user-actions.collapsed{max-height:24px;overflow:hidden}
+    .ldsp-user-actions-wrap{display:flex;flex-direction:column;gap:4px;flex:1;min-width:0}
+    .ldsp-user-actions-toggle{display:none;align-items:center;justify-content:center;gap:3px;padding:4px 10px;background:transparent;border:none;border-radius:6px;font-size:9px;color:var(--txt-mut);cursor:pointer;transition:all .15s;opacity:.7}
+    .ldsp-user-actions-toggle:hover{background:var(--bg-hover);color:var(--accent);opacity:1}
+    .ldsp-user-actions-toggle.show{display:inline-flex}
+    .ldsp-user-actions-toggle svg{width:10px;height:10px;stroke-width:2;transition:transform .2s}
+    .ldsp-user-actions-toggle.expanded{color:var(--accent);opacity:1}
+    .ldsp-user-actions-toggle.expanded svg{transform:rotate(180deg)}
+    .ldsp-avatar{width:var(--av);height:var(--av);border-radius:12px;border:2px solid var(--accent);flex-shrink:0;background:var(--bg-el);position:relative;box-shadow:0 4px 12px rgba(107,140,239,.2);transition:transform .3s var(--ease),box-shadow .3s,border-color .2s}
+    .ldsp-avatar:hover{transform:scale(1.08) rotate(-3deg);border-color:var(--accent-light);box-shadow:0 6px 20px rgba(107,140,239,.35),var(--glow-accent)}
+    .ldsp-avatar-ph{width:var(--av);height:var(--av);border-radius:12px;background:var(--grad);display:flex;align-items:center;justify-content:center;font-size:18px;color:#fff;flex-shrink:0;transition:transform .3s var(--ease),box-shadow .3s;position:relative;box-shadow:0 4px 12px rgba(107,140,239,.25)}
+    .ldsp-avatar-ph:hover{transform:scale(1.08) rotate(-3deg);box-shadow:0 6px 20px rgba(107,140,239,.4)}
+    .ldsp-avatar-wrap{position:relative;flex-shrink:0}
+    .ldsp-avatar-wrap::after{content:'🔗 GitHub';position:absolute;bottom:-20px;left:50%;transform:translateX(-50%) translateY(4px);background:var(--bg-el);color:var(--txt-sec);padding:3px 8px;border-radius:6px;font-size:8px;white-space:nowrap;opacity:0;pointer-events:none;transition:transform .2s var(--ease),opacity .2s;border:1px solid var(--border2);box-shadow:0 4px 12px rgba(0,0,0,.2)}
+    .ldsp-avatar-wrap:hover::after{opacity:1;transform:translateX(-50%) translateY(0)}
+    .ldsp-user-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+    .ldsp-user-display-name{font-weight:700;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.3;letter-spacing:-.01em;background:linear-gradient(135deg,var(--txt) 0%,var(--txt-sec) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+    .ldsp-user-handle{font-size:12px;color:var(--txt-mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500}
+    .ldsp-user.not-logged .ldsp-avatar,.ldsp-user.not-logged .ldsp-avatar-ph{border:2px dashed var(--warn);animation:pulse-border 3s ease infinite}
+    @keyframes pulse-border{0%,100%{border-color:var(--warn)}50%{border-color:rgba(245,158,11,.5)}}
+    @keyframes pulse-border-red{0%,100%{border-color:#ef4444}50%{border-color:rgba(239,68,68,.4)}}
+    .ldsp-user.not-logged .ldsp-user-display-name{color:var(--warn);-webkit-text-fill-color:var(--warn)}
+    .ldsp-login-hint{font-size:9px;color:var(--warn);margin-left:4px;animation:blink 2.5s ease-in-out infinite;background:var(--warn-bg);padding:2px 6px;border-radius:8px;font-weight:500}
+    @keyframes blink{0%,100%{opacity:1}50%{opacity:.7}}
+    .ldsp-user-meta{display:flex;align-items:center;gap:8px;margin-top:3px}
+
+    .ldsp-reading{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:8px;border-radius:var(--r-md);aspect-ratio:0.92/1;min-width:100px;max-width:250px;align-self:stretch;position:relative;overflow:visible;border:1px solid var(--border);transition:background .2s,border-color .2s,box-shadow .3s;flex-shrink:0;box-sizing:border-box}
+    .ldsp-reading::before{content:'';position:absolute;inset:0;border-radius:inherit;background:linear-gradient(180deg,rgba(255,255,255,.05) 0%,transparent 100%);pointer-events:none}
+    .ldsp-reading-icon{font-size:20px;margin-bottom:3px;animation:bounce 3s ease-in-out infinite;filter:drop-shadow(0 2px 4px rgba(0,0,0,.2));will-change:transform}
+    @keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+    .ldsp-reading-time{font-size:13px;font-weight:800;letter-spacing:-.02em}
+    .ldsp-reading-label{font-size:9px;opacity:.85;margin-top:2px;font-weight:600;letter-spacing:.02em}
+    .ldsp-reading{--rc:#94a3b8}
+    .ldsp-reading::after{content:'未活动 已停止记录';position:absolute;bottom:-16px;left:50%;transform:translateX(-50%);font-size:8px;color:var(--err);white-space:nowrap;font-weight:600;letter-spacing:.02em;opacity:.8}
+    .ldsp-reading.tracking{animation:reading-glow 3.5s ease-in-out infinite;will-change:box-shadow}
+    .ldsp-reading.tracking::after{content:'阅读时间记录中...';color:var(--rc);opacity:1}
+    @keyframes reading-glow{0%,100%{box-shadow:0 0 8px color-mix(in srgb,var(--rc) 40%,transparent),0 0 16px color-mix(in srgb,var(--rc) 20%,transparent),0 0 24px color-mix(in srgb,var(--rc) 10%,transparent)}50%{box-shadow:0 0 16px color-mix(in srgb,var(--rc) 60%,transparent),0 0 32px color-mix(in srgb,var(--rc) 35%,transparent),0 0 48px color-mix(in srgb,var(--rc) 15%,transparent)}}
+    .ldsp-reading-ripple{position:absolute;inset:-2px;border-radius:inherit;pointer-events:none;z-index:-1;opacity:0}
+    .ldsp-reading.tracking .ldsp-reading-ripple{opacity:1}
+    .ldsp-reading.tracking .ldsp-reading-ripple::before,.ldsp-reading.tracking .ldsp-reading-ripple::after{content:'';position:absolute;inset:0;border-radius:inherit;border:2px solid var(--rc);opacity:.5;animation:ripple-expand 4s ease-out infinite;will-change:transform,opacity}
+    .ldsp-reading.tracking .ldsp-reading-ripple::after{animation-delay:2s}
+    @keyframes ripple-expand{0%{transform:scale(1);opacity:.5;border-width:2px}100%{transform:scale(1.4);opacity:0;border-width:1px}}
+    .ldsp-reading.hi{box-shadow:0 0 20px rgba(249,115,22,.2)}
+    .ldsp-reading.hi .ldsp-reading-icon{animation:fire 1.2s ease-in-out infinite;will-change:transform}
+    @keyframes fire{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}
+    .ldsp-reading.max{box-shadow:0 0 25px rgba(236,72,153,.25)}
+    .ldsp-reading.max .ldsp-reading-icon{animation:crown 2s ease-in-out infinite;will-change:transform}
+    @keyframes crown{0%,100%{transform:rotate(-5deg) scale(1)}50%{transform:rotate(5deg) scale(1.1)}}
+
+    .ldsp-tabs{display:flex;padding:8px 10px;gap:6px;background:var(--bg);border-bottom:1px solid var(--border);flex-shrink:0;container-type:inline-size}
+    .ldsp-tab{flex:1;padding:7px 8px;border:none;background:var(--bg-card);color:var(--txt-sec);border-radius:var(--r-sm);font-size:11px;font-weight:600;transition:background .15s,color .15s,border-color .15s,box-shadow .2s;border:1px solid transparent;white-space:nowrap;display:flex;align-items:center;justify-content:center;gap:4px;min-width:0;overflow:hidden}
+    .ldsp-tab .ldsp-tab-icon{flex-shrink:0;font-size:12px}
+    .ldsp-tab .ldsp-tab-text{overflow:hidden;text-overflow:ellipsis;min-width:1em}
+    .ldsp-tab:hover{background:var(--bg-hover);color:var(--txt);border-color:var(--border2);transform:translateY(-1px)}
+    .ldsp-tab.active{background:var(--grad);color:#fff;box-shadow:0 4px 15px rgba(107,140,239,.3);border-color:transparent}
+    @container (max-width:260px){.ldsp-tab{font-size:10px;padding:6px 5px;gap:2px}.ldsp-tab .ldsp-tab-icon{display:none}}
+    @container (max-width:200px){.ldsp-tab{font-size:9px;padding:5px 3px}}
+    @media (max-width:340px){.ldsp-tabs{padding:6px 8px;gap:4px}.ldsp-tab{font-size:10px;padding:6px 6px;gap:2px}.ldsp-tab .ldsp-tab-icon{display:none}}
+    @media (max-width:280px){.ldsp-tabs{padding:5px 6px;gap:3px}.ldsp-tab{font-size:9px;padding:5px 4px}}
+    .ldsp-content{flex:1 1 auto;min-height:0;max-height:calc(var(--h) - 180px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:transparent transparent}
+    .ldsp-content.scrolling{scrollbar-color:var(--scrollbar) transparent}
+    .ldsp-content::-webkit-scrollbar{width:6px;background:transparent}
+    .ldsp-content::-webkit-scrollbar-track{background:transparent}
+    .ldsp-content::-webkit-scrollbar-thumb{background:transparent;border-radius:4px;transition:background .3s}
+    .ldsp-content.scrolling::-webkit-scrollbar-thumb{background:var(--scrollbar)}
+    .ldsp-content::-webkit-scrollbar-button{width:0;height:0;display:none}
+    .ldsp-section{display:none;padding:10px}
+    .ldsp-section.active{display:block;animation:enter var(--dur) var(--ease-out)}
+    @keyframes enter{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+    .ldsp-ring{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:var(--bg-card);border-radius:var(--r-md);margin-bottom:10px;position:relative;overflow:hidden;border:1px solid var(--border);gap:12px}
+    .ldsp-ring::before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 50% 0%,rgba(107,140,239,.08) 0%,transparent 70%);pointer-events:none}
+    .ldsp-ring-stat{display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:50px;gap:4px;z-index:1}
+    .ldsp-ring-stat-val{font-size:18px;font-weight:800;letter-spacing:-.02em}
+    .ldsp-ring-stat-val.ok{color:var(--ok)}
+    .ldsp-ring-stat-val.fail{color:var(--err)}
+    .ldsp-ring-stat-lbl{font-size:9px;color:var(--txt-mut);font-weight:500;white-space:nowrap}
+    .ldsp-ring-center{display:flex;flex-direction:column;align-items:center;position:relative}
+    .ldsp-ring-wrap{position:relative;width:var(--ring);height:var(--ring)}
+    .ldsp-ring-wrap svg{transform:rotate(-90deg);width:100%;height:100%;overflow:visible}
+    .ldsp-ring-bg{fill:none;stroke:var(--bg-el);stroke-width:7}
+    .ldsp-ring-fill{fill:none;stroke:url(#ldsp-grad);stroke-width:7;stroke-linecap:round;transition:stroke-dashoffset 1s var(--ease)}
+    .ldsp-ring-fill.anim{animation:ring 1.5s var(--ease) forwards}
+    @keyframes ring{from{stroke-dashoffset:var(--circ)}to{stroke-dashoffset:var(--off)}}
+    .ldsp-ring-txt{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center}
+    .ldsp-ring-val{font-size:clamp(12px,calc(var(--ring) * 0.2),18px);font-weight:800;background:var(--grad);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;letter-spacing:-.02em}
+    .ldsp-ring-val.anim{animation:val 1s var(--ease-spring) .5s forwards;opacity:0}
+    @keyframes val{from{opacity:0;transform:scale(.6)}60%{transform:scale(1.1)}to{opacity:1;transform:scale(1)}}
+    .ldsp-ring-lbl{font-size:9px;color:var(--txt-mut);margin-top:2px;font-weight:500}
+    .ldsp-ring-lvl{font-size:12px;font-weight:700;margin-top:8px;padding:4px 14px;border-radius:12px;background-image:linear-gradient(90deg,#64748b 0%,#94a3b8 50%,#64748b 100%);background-size:200% 100%;background-position:0% 50%;color:#fff;box-shadow:0 2px 10px rgba(100,116,139,.35);letter-spacing:.03em;text-shadow:0 1px 2px rgba(0,0,0,.2);transition:transform 2s ease;transform-style:preserve-3d;animation:lvl-shimmer 6s ease-in-out infinite;will-change:background-position}
+    .ldsp-ring-lvl:hover{transform:rotateY(360deg);animation-play-state:paused}
+    .ldsp-ring-lvl.lv1{background-image:linear-gradient(90deg,#64748b 0%,#94a3b8 50%,#64748b 100%);box-shadow:0 2px 10px rgba(100,116,139,.35);animation-duration:4s}
+    .ldsp-ring-lvl.lv2{background-image:linear-gradient(90deg,#3b82f6 0%,#60a5fa 50%,#3b82f6 100%);box-shadow:0 2px 10px rgba(59,130,246,.4);animation-duration:3.5s}
+    .ldsp-ring-lvl.lv3{background-image:linear-gradient(90deg,#5070d0 0%,#8aa4f4 30%,#5bb5a6 70%,#5070d0 100%);box-shadow:0 2px 12px rgba(107,140,239,.45);animation-duration:3s}
+    .ldsp-ring-lvl.lv4{background-image:linear-gradient(90deg,#f59e0b 0%,#fbbf24 25%,#f97316 50%,#ef4444 75%,#f59e0b 100%);box-shadow:0 2px 15px rgba(245,158,11,.5),0 0 20px rgba(249,115,22,.3);animation-duration:2.5s;animation-name:lvl-shimmer-gold}
+    @keyframes lvl-shimmer{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
+    @keyframes lvl-shimmer-gold{0%,100%{background-position:0% 50%;filter:brightness(1)}50%{background-position:100% 50%;filter:brightness(1.2)}}
+    .ldsp-confetti{position:absolute;width:100%;height:100%;top:0;left:0;pointer-events:none;overflow:visible;z-index:10}
+    .ldsp-confetti-piece{position:absolute;font-size:12px;opacity:0;top:42%;left:50%;transform-origin:center center;text-shadow:0 1px 3px rgba(0,0,0,.3)}
+    .ldsp-ring.complete.anim-done .ldsp-confetti-piece{animation:confetti-burst 2s cubic-bezier(.15,.8,.3,1) forwards}
+    @keyframes confetti-burst{0%{opacity:1;transform:translate(-50%,-50%) scale(0)}5%{opacity:1;transform:translate(-50%,-50%) scale(1.5)}25%{opacity:1;transform:translate(calc(var(--tx) * 1.2),calc(var(--ty) * 1.2)) rotate(calc(var(--rot) * 0.4)) scale(1.1)}100%{opacity:0;transform:translate(calc(var(--tx) + var(--drift)),calc(var(--ty) + 110px)) rotate(var(--rot)) scale(0.2)}}
+    .ldsp-ring-tip{font-size:11px;text-align:center;margin:12px 0 16px;padding:8px 14px;border-radius:20px;font-weight:600;letter-spacing:.02em}
+    .ldsp-ring-tip.ok{color:var(--ok);background:linear-gradient(135deg,var(--ok-bg),rgba(16,185,129,.05));border:1px solid rgba(16,185,129,.2)}
+    .ldsp-ring-tip.progress{color:var(--accent);background:linear-gradient(135deg,rgba(107,140,239,.1),rgba(6,182,212,.05));border:1px solid rgba(107,140,239,.2)}
+    .ldsp-ring-tip.max{color:var(--warn);background:linear-gradient(135deg,rgba(251,191,36,.1),rgba(249,115,22,.05));border:1px solid rgba(251,191,36,.25)}
+    .ldsp-item{display:flex;align-items:center;padding:8px 10px;margin-bottom:6px;background:var(--bg-card);border-radius:var(--r-sm);border-left:3px solid var(--border2);animation:item var(--dur) var(--ease-out) backwards;transition:background .15s,border-color .15s,transform .2s var(--ease);border:1px solid var(--border);border-left-width:3px}
+    .ldsp-item:nth-child(1){animation-delay:0ms}.ldsp-item:nth-child(2){animation-delay:25ms}.ldsp-item:nth-child(3){animation-delay:50ms}.ldsp-item:nth-child(4){animation-delay:75ms}.ldsp-item:nth-child(5){animation-delay:100ms}.ldsp-item:nth-child(6){animation-delay:125ms}.ldsp-item:nth-child(7){animation-delay:150ms}.ldsp-item:nth-child(8){animation-delay:175ms}.ldsp-item:nth-child(9){animation-delay:200ms}.ldsp-item:nth-child(10){animation-delay:225ms}.ldsp-item:nth-child(11){animation-delay:250ms}.ldsp-item:nth-child(12){animation-delay:275ms}
+    @keyframes item{from{opacity:0;transform:translateX(-15px)}to{opacity:1;transform:none}}
+    .ldsp-item:hover{background:var(--bg-hover);transform:translateX(4px);box-shadow:0 4px 12px rgba(0,0,0,.1)}
+    .ldsp-item.ok{border-left-color:var(--ok);background:linear-gradient(135deg,var(--ok-bg) 0%,transparent 100%)}
+    .ldsp-item.fail{border-left-color:var(--err);background:linear-gradient(135deg,var(--err-bg) 0%,transparent 100%)}
+    .ldsp-item-icon{font-size:12px;margin-right:8px;width:18px;height:18px;display:flex;align-items:center;justify-content:center;border-radius:50%;background:var(--bg-el)}
+    .ldsp-item.ok .ldsp-item-icon{background:var(--ok-bg);color:var(--ok)}
+    .ldsp-item.fail .ldsp-item-icon{background:var(--err-bg);color:var(--err)}
+    .ldsp-item-name{flex:1;font-size:11px;color:var(--txt-sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500}
+    .ldsp-item.ok .ldsp-item-name{color:var(--ok)}
+    .ldsp-item-vals{display:flex;align-items:center;gap:3px;font-size:12px;font-weight:700;margin-left:8px}
+    .ldsp-item-cur{color:var(--txt);transition:color .2s}
+    .ldsp-item-cur.upd{animation:upd .7s var(--ease-spring)}
+    @keyframes upd{0%{transform:scale(1)}30%{transform:scale(1.3);background:var(--accent);color:#fff;border-radius:6px;padding:0 4px}100%{transform:scale(1)}}
+    .ldsp-item.ok .ldsp-item-cur{color:var(--ok)}
+    .ldsp-item.fail .ldsp-item-cur{color:var(--err)}
+    .ldsp-item-sep{color:var(--txt-mut);font-weight:400;opacity:.6}
+    .ldsp-item-req{color:var(--txt-mut);font-weight:500}
+    .ldsp-item-chg{font-size:10px;padding:2px 6px;border-radius:6px;font-weight:700;margin-left:6px;animation:pop var(--dur) var(--ease-spring)}
+    @keyframes pop{from{transform:scale(0) rotate(-10deg);opacity:0}to{transform:scale(1) rotate(0);opacity:1}}
+    .ldsp-item-chg.up{background:var(--ok-bg);color:var(--ok);box-shadow:0 2px 8px rgba(16,185,129,.2)}
+    .ldsp-item-chg.down{background:var(--err-bg);color:var(--err);box-shadow:0 2px 8px rgba(244,63,94,.2)}
+    .ldsp-subtabs{display:flex;align-items:center;gap:6px;padding:6px 10px;overflow-x:auto;scrollbar-width:thin;scrollbar-color:var(--scrollbar) transparent;-webkit-overflow-scrolling:touch}
+    .ldsp-subtabs::-webkit-scrollbar{height:6px;background:var(--bg-el);border-radius:3px}
+    .ldsp-subtabs::-webkit-scrollbar-track{background:var(--bg-el);border-radius:3px}
+    .ldsp-subtabs::-webkit-scrollbar-thumb{background:var(--scrollbar);border-radius:3px;transition:background .3s}
+    .ldsp-subtabs::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+    .ldsp-subtabs::-webkit-scrollbar-button{width:0;height:0;display:none}
+    .ldsp-subtab{padding:6px 12px;border:1px solid var(--border2);background:var(--bg-card);color:var(--txt-sec);border-radius:20px;font-size:10px;font-weight:600;white-space:nowrap;flex-shrink:0;transition:background .15s,color .15s,border-color .15s}
+    .ldsp-subtab:hover{border-color:var(--accent);color:var(--accent);background:rgba(107,140,239,.08);transform:translateY(-1px)}
+    .ldsp-subtab.active{background:var(--grad);border-color:transparent;color:#fff;box-shadow:0 4px 12px rgba(107,140,239,.25)}
+    .ldsp-chart{background:var(--bg-card);border-radius:var(--r-md);padding:12px;margin-bottom:10px;border:1px solid var(--border);position:relative;overflow:hidden}
+    .ldsp-chart::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--accent),transparent);opacity:.2}
+    .ldsp-chart:last-child{margin-bottom:0}
+    .ldsp-chart-title{font-size:12px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:6px;color:var(--txt)}
+    .ldsp-chart-sub{font-size:10px;color:var(--txt-mut);font-weight:500;margin-left:auto}
+    .ldsp-spark-row{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+    .ldsp-spark-row:last-child{margin-bottom:0}
+    .ldsp-spark-lbl{width:55px;font-size:10px;color:var(--txt-sec);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+    .ldsp-spark-bars{flex:1;display:flex;align-items:flex-end;gap:3px;height:24px}
+    .ldsp-spark-bar{flex:1;background:linear-gradient(180deg,var(--accent),var(--accent2));border-radius:3px 3px 0 0;min-height:3px;opacity:.35;position:relative;transition:opacity .2s,height .2s var(--ease)}
+    .ldsp-spark-bar:last-child{opacity:1}
+    .ldsp-spark-bar:hover{opacity:1;transform:scaleY(1.15);box-shadow:0 -4px 12px rgba(107,140,239,.3)}
+    .ldsp-spark-bar::after{content:attr(data-v);position:absolute;bottom:100%;left:50%;transform:translateX(-50%) translateY(5px);font-size:9px;background:var(--bg-el);padding:3px 6px;border-radius:4px;opacity:0;white-space:nowrap;pointer-events:none;border:1px solid var(--border2);box-shadow:0 4px 12px rgba(0,0,0,.2);transition:transform .15s var(--ease),opacity .15s}
+    .ldsp-spark-bar:hover::after{opacity:1;transform:translateX(-50%) translateY(-2px)}
+    .ldsp-spark-val{font-size:11px;font-weight:700;min-width:35px;text-align:right;color:var(--accent)}
+    .ldsp-date-labels{display:flex;justify-content:space-between;padding:8px 0 0 60px;margin-right:40px}
+    .ldsp-date-lbl{font-size:9px;color:var(--txt-mut);text-align:center;font-weight:500}
+    .ldsp-changes{margin-top:8px}
+    .ldsp-chg-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);transition:background .15s}
+    .ldsp-chg-row:hover{background:var(--bg-glass);margin:0 -6px;padding:8px 6px;border-radius:var(--r-xs)}
+    .ldsp-chg-row:last-child{border-bottom:none}
+    .ldsp-chg-name{font-size:11px;color:var(--txt-sec);flex:1;font-weight:500}
+    .ldsp-chg-cur{font-size:10px;color:var(--txt-mut);margin-right:8px}
+    .ldsp-chg-val{font-size:11px;font-weight:700;padding:3px 8px;border-radius:6px}
+    .ldsp-chg-val.up{background:var(--ok-bg);color:var(--ok)}
+    .ldsp-chg-val.down{background:var(--err-bg);color:var(--err)}
+    .ldsp-chg-val.neu{background:var(--bg-el);color:var(--txt-mut)}
+    .ldsp-rd-stats{border-radius:var(--r-md);padding:14px;margin-bottom:10px;display:flex;align-items:center;gap:12px;border:1px solid var(--border)}
+    .ldsp-rd-stats-icon{font-size:32px;flex-shrink:0;filter:drop-shadow(0 2px 8px rgba(0,0,0,.2))}
+    .ldsp-rd-stats-info{flex:1}
+    .ldsp-rd-stats-val{font-size:18px;font-weight:800;background:var(--grad);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:-.02em}
+    .ldsp-rd-stats-lbl{font-size:10px;color:var(--txt-mut);margin-top:3px;font-weight:500}
+    .ldsp-rd-stats-badge{padding:5px 12px;border-radius:12px;font-size:10px;font-weight:700;transform:translateY(-1px);transition:transform .15s,box-shadow .15s}
+    .ldsp-track{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--bg-card);border-radius:var(--r-sm);margin-bottom:10px;font-size:10px;color:var(--txt-mut);border:1px solid var(--border);font-weight:500}
+    .ldsp-track-dot{width:8px;height:8px;border-radius:50%;background:var(--ok);animation:pulse 3s ease-in-out infinite;box-shadow:0 0 10px rgba(16,185,129,.4);will-change:opacity,transform}
+    @keyframes pulse{0%,100%{opacity:1;transform:scale(1);box-shadow:0 0 10px rgba(16,185,129,.4)}50%{opacity:.7;transform:scale(.9);box-shadow:0 0 5px rgba(16,185,129,.2)}}
+    @keyframes gradient-shift{0%{background-position:0% center}50%{background-position:100% center}100%{background-position:0% center}}
+    .ldsp-rd-prog{background:var(--bg-card);border-radius:var(--r-md);padding:12px;margin-bottom:10px;border:1px solid var(--border)}
+    .ldsp-rd-prog-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+    .ldsp-rd-prog-title{font-size:11px;color:var(--txt-sec);font-weight:600}
+    .ldsp-rd-prog-val{font-size:12px;font-weight:700;color:var(--accent)}
+    .ldsp-rd-prog-bar{height:8px;background:var(--bg-el);border-radius:4px;overflow:hidden;box-shadow:inset 0 1px 3px rgba(0,0,0,.1)}
+    .ldsp-rd-prog-fill{height:100%;border-radius:4px;transition:width .5s var(--ease);position:relative}
+    .ldsp-rd-prog-fill::after{content:'';position:absolute;top:0;left:0;right:0;height:50%;background:linear-gradient(180deg,rgba(255,255,255,.2) 0%,transparent 100%);border-radius:4px 4px 0 0}
+    .ldsp-rd-week{display:flex;justify-content:space-between;align-items:flex-end;height:55px;padding:0 4px;margin:12px 0 8px;gap:4px}
+    .ldsp-rd-day{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0}
+    .ldsp-rd-day-bar{width:100%;max-width:18px;background:linear-gradient(180deg,var(--accent) 0%,var(--accent2) 100%);border-radius:4px 4px 0 0;min-height:3px;position:relative;transition:opacity .2s,height .2s var(--ease)}
+    .ldsp-rd-day-bar:hover{transform:scaleX(1.2);box-shadow:0 -4px 15px rgba(91,181,166,.35)}
+    .ldsp-rd-day-bar::after{content:attr(data-t);position:absolute;bottom:100%;left:50%;transform:translateX(-50%) translateY(5px);background:var(--bg-el);padding:4px 8px;border-radius:6px;font-size:9px;font-weight:600;white-space:nowrap;opacity:0;pointer-events:none;margin-bottom:4px;border:1px solid var(--border2);box-shadow:0 4px 12px rgba(0,0,0,.2);transition:transform .15s var(--ease),opacity .15s}
+    .ldsp-rd-day-bar:hover::after{opacity:1;transform:translateX(-50%) translateY(0)}
+    .ldsp-rd-day-lbl{font-size:9px;color:var(--txt-mut);line-height:1;font-weight:500}
+    .ldsp-today-stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:10px}
+    .ldsp-today-stat{background:var(--bg-card);border-radius:var(--r-md);padding:12px 10px;text-align:center;border:1px solid var(--border);position:relative;overflow:hidden;transition:background .15s,border-color .15s}
+    .ldsp-today-stat:hover{transform:translateY(-2px);box-shadow:0 8px 20px rgba(0,0,0,.1)}
+    .ldsp-today-stat::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--grad)}
+    .ldsp-today-stat-val{font-size:18px;font-weight:800;background:var(--grad);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:-.02em}
+    .ldsp-today-stat-lbl{font-size:10px;color:var(--txt-mut);margin-top:4px;font-weight:500}
+    .ldsp-time-info{font-size:10px;color:var(--txt-mut);text-align:center;padding:8px 10px;background:var(--bg-card);border-radius:var(--r-sm);margin-bottom:10px;border:1px solid var(--border);font-weight:500}
+    .ldsp-time-info span{color:var(--accent);font-weight:700}
+    .ldsp-year-heatmap{padding:10px 14px 10px 0;overflow-x:hidden;overflow-y:auto;max-height:320px;scrollbar-width:thin;scrollbar-color:transparent transparent}
+    .ldsp-year-heatmap.scrolling{scrollbar-color:var(--scrollbar) transparent}
+    .ldsp-year-heatmap::-webkit-scrollbar{width:6px;background:transparent}
+    .ldsp-year-heatmap::-webkit-scrollbar-track{background:transparent}
+    .ldsp-year-heatmap::-webkit-scrollbar-thumb{background:transparent;border-radius:4px;transition:background .3s}
+    .ldsp-year-heatmap.scrolling::-webkit-scrollbar-thumb{background:var(--scrollbar)}
+    .ldsp-year-heatmap::-webkit-scrollbar-button{width:0;height:0;display:none}
+    .ldsp-year-wrap{display:flex;flex-direction:column;gap:3px;width:100%;padding-right:6px}
+    .ldsp-year-row{display:flex;align-items:center;gap:4px;width:100%;position:relative}
+    .ldsp-year-month{width:28px;font-size:8px;font-weight:600;color:var(--txt-mut);text-align:right;flex-shrink:0;line-height:1;position:absolute;left:0;top:50%;transform:translateY(-50%)}
+    .ldsp-year-cells{display:grid;grid-template-columns:repeat(14,minmax(9px,1fr));gap:3px;width:100%;align-items:center;margin-left:32px}
+    .ldsp-year-cell{width:100%;aspect-ratio:1;border-radius:3px;background:var(--bg-card);border:1px solid var(--border);position:relative;transition:transform .15s var(--ease),box-shadow .15s}
+    .ldsp-year-cell:hover{transform:scale(1.6);box-shadow:0 4px 15px rgba(107,140,239,.4);border-color:var(--accent);z-index:10}
+    .ldsp-year-cell.l0{background:rgba(107,140,239,.1);border-color:rgba(107,140,239,.18)}
+    .ldsp-year-cell.l1{background:rgba(180,230,210,.35);border-color:rgba(180,230,210,.45)}
+    .ldsp-year-cell.l2{background:rgba(130,215,180,.5);border-color:rgba(130,215,180,.6)}
+    .ldsp-year-cell.l3{background:rgba(90,195,155,.65);border-color:rgba(90,195,155,.75)}
+    .ldsp-year-cell.l4{background:linear-gradient(135deg,#6dcfa5,#50c090);border-color:#6dcfa5;box-shadow:0 0 8px rgba(109,207,165,.4)}
+    .ldsp-year-cell.empty{background:0 0;border-color:transparent;cursor:default}
+    .ldsp-year-cell.empty:hover{transform:none;box-shadow:none}
+    .ldsp-year-tip{position:absolute;left:50%;transform:translateX(-50%);background:var(--bg-el);padding:5px 8px;border-radius:6px;font-size:9px;white-space:nowrap;opacity:0;pointer-events:none;border:1px solid var(--border2);z-index:1000;line-height:1.3;box-shadow:0 4px 15px rgba(0,0,0,.25);font-weight:500}
+    .ldsp-year-cell:hover .ldsp-year-tip{opacity:1}
+    .ldsp-year-cell .ldsp-year-tip{bottom:100%;margin-bottom:4px}
+    .ldsp-year-row:nth-child(-n+3) .ldsp-year-tip{bottom:auto;top:100%;margin-top:4px;margin-bottom:0}
+    .ldsp-year-cell:nth-child(13) .ldsp-year-tip,.ldsp-year-cell:nth-child(14) .ldsp-year-tip{left:auto;right:0;transform:translateX(0)}
+    .ldsp-heatmap-legend{display:flex;align-items:center;gap:6px;justify-content:center;font-size:9px;color:var(--txt-mut);padding:8px 0;font-weight:500}
+    .ldsp-heatmap-legend-cell{width:10px;height:10px;border-radius:2px;border:1px solid var(--border)}
+    .ldsp-empty,.ldsp-loading{text-align:center;padding:30px 16px;color:var(--txt-mut)}
+    .ldsp-empty-icon{font-size:36px;margin-bottom:12px;filter:drop-shadow(0 2px 8px rgba(0,0,0,.1))}
+    .ldsp-empty-txt{font-size:12px;line-height:1.7;font-weight:500}
+    .ldsp-spinner{width:28px;height:28px;border:3px solid var(--border2);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 10px;will-change:transform}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .ldsp-mini-loader{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:50px 20px;color:var(--txt-mut)}
+    .ldsp-mini-spin{width:32px;height:32px;border:3px solid var(--border2);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;margin-bottom:14px;will-change:transform}
+    .ldsp-mini-txt{font-size:11px;font-weight:500}
+    .ldsp-toast{position:absolute;bottom:-55px;left:50%;transform:translateX(-50%) translateY(15px);background:var(--grad);color:#fff;padding:10px 18px;border-radius:20px;font-size:12px;font-weight:600;box-shadow:0 8px 30px rgba(107,140,239,.4);opacity:0;white-space:nowrap;display:flex;align-items:center;gap:8px;z-index:100000;transition:transform .3s var(--ease-spring),opacity .3s;will-change:transform,opacity}
+    .ldsp-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+    .ldsp-modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;z-index:100001;opacity:0;transition:opacity .3s var(--ease)}
+    .ldsp-modal-overlay.show{opacity:1}
+    .ldsp-modal{background:var(--bg-card);border-radius:var(--r-xl);padding:24px;max-width:340px;width:90%;box-shadow:var(--shadow-lg),var(--glow-accent);transform:scale(.9) translateY(30px);transition:transform .35s var(--ease-spring);border:1px solid var(--border);backdrop-filter:blur(20px)}
+    .ldsp-modal-overlay.show .ldsp-modal{transform:scale(1) translateY(0)}
+    .ldsp-modal-hdr{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+    .ldsp-modal-icon{font-size:28px;filter:drop-shadow(0 2px 8px rgba(0,0,0,.2))}
+    .ldsp-modal-title{font-size:17px;font-weight:700;letter-spacing:-.02em}
+    .ldsp-modal-body{font-size:13px;color:var(--txt-sec);line-height:1.7;margin-bottom:20px}
+    .ldsp-modal-body p{margin:0 0 10px}
+    .ldsp-modal-body ul{margin:10px 0;padding-left:0;list-style:none}
+    .ldsp-modal-body li{margin:6px 0;padding-left:24px;position:relative}
+    .ldsp-modal-body li::before{content:'';position:absolute;left:0;top:6px;width:6px;height:6px;background:var(--accent);border-radius:50%}
+    .ldsp-modal-body strong{color:var(--accent);font-weight:600}
+    .ldsp-modal-footer{display:flex;gap:12px}
+    .ldsp-modal-btn{flex:1;padding:12px 18px;border:none;border-radius:var(--r-md);font-size:13px;font-weight:600;transition:background .15s,transform .2s var(--ease)}
+    .ldsp-modal-btn.primary{background:var(--grad);color:#fff;box-shadow:0 4px 15px rgba(107,140,239,.3)}
+    .ldsp-modal-btn.primary:hover{transform:translateY(-2px);box-shadow:0 8px 25px rgba(107,140,239,.4)}
+    .ldsp-modal-btn.primary:active{transform:translateY(0)}
+    .ldsp-modal-btn.secondary{background:var(--bg-el);color:var(--txt-sec);border:1px solid var(--border2)}
+    .ldsp-modal-btn.secondary:hover{background:var(--bg-hover);border-color:var(--border-accent)}
+    .ldsp-modal-btn.danger{background:var(--grad-warm);color:#fff;box-shadow:0 4px 15px rgba(224,122,141,.3)}
+    .ldsp-modal-btn.danger:hover{transform:translateY(-2px);box-shadow:0 8px 25px rgba(224,122,141,.4)}
+    .ldsp-modal-btn.danger:active{transform:translateY(0)}
+    .ldsp-modal-note{margin-top:14px;font-size:11px;color:var(--txt-mut);text-align:center;font-weight:500}
+    .ldsp-confirm-overlay{position:absolute;top:0;left:0;right:0;bottom:0;width:100%;height:100%;box-sizing:border-box;background:rgba(18,19,26,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:center;z-index:20;opacity:0;pointer-events:none;transition:opacity .3s var(--ease);border-radius:inherit;margin:0;padding:0 20px}
+    .ldsp-confirm-overlay.show{opacity:1;pointer-events:auto}
+    .ldsp-confirm-box{background:linear-gradient(145deg,var(--bg-card),var(--bg));border-radius:var(--r-lg);padding:24px 20px;width:100%;max-width:260px;box-shadow:var(--shadow-lg),0 0 40px rgba(224,122,141,.1);transform:scale(.92) translateY(20px);transition:transform .35s var(--ease-spring);border:1px solid var(--border2);position:relative;overflow:hidden;margin:0 auto}
+    .ldsp-confirm-box::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--grad-warm);opacity:.8}
+    .ldsp-confirm-overlay.show .ldsp-confirm-box{transform:scale(1) translateY(0)}
+    .ldsp-confirm-icon{text-align:center;font-size:40px;margin-bottom:14px;filter:drop-shadow(0 4px 8px rgba(224,122,141,.3));animation:confirm-icon-bounce .5s var(--ease-spring) .1s both}
+    @keyframes confirm-icon-bounce{0%{transform:scale(0) rotate(-20deg);opacity:0}60%{transform:scale(1.15) rotate(5deg)}100%{transform:scale(1) rotate(0);opacity:1}}
+    .ldsp-confirm-title{text-align:center;font-size:16px;font-weight:700;margin-bottom:10px;color:#ef4444;letter-spacing:-.02em}
+    .ldsp-confirm-msg{text-align:center;font-size:12px;color:var(--txt-sec);line-height:1.7;margin-bottom:20px;padding:0 4px}
+    .ldsp-confirm-btns{display:flex;gap:10px}
+    .ldsp-confirm-btn{flex:1;padding:11px 14px;border:none;border-radius:var(--r-sm);font-size:12px;font-weight:600;transition:background .15s,transform .15s,box-shadow .15s,border-color .15s;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+    .ldsp-confirm-btn.cancel{background:var(--bg-el);color:var(--txt-sec);border:1px solid var(--border2)}
+    @media (hover:hover){.ldsp-confirm-btn.cancel:hover{background:var(--bg-hover);border-color:var(--border-accent)}}
+    .ldsp-confirm-btn.confirm{background:var(--grad-warm);color:#fff;box-shadow:0 4px 15px rgba(224,122,141,.3);border:none}
+    @media (hover:hover){.ldsp-confirm-btn.confirm:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(224,122,141,.4)}}
+    .ldsp-confirm-btn:active{transform:scale(.96)}
+    @media (max-width:480px){.ldsp-confirm-box{padding:20px 16px;max-width:240px}.ldsp-confirm-icon{font-size:36px;margin-bottom:12px}.ldsp-confirm-title{font-size:14px}.ldsp-confirm-msg{font-size:11px;margin-bottom:16px}.ldsp-confirm-btn{padding:10px 12px;font-size:11px}.ldsp-update-bubble{width:200px;padding:14px 16px}.ldsp-update-bubble-icon{font-size:24px;margin-bottom:6px}.ldsp-update-bubble-title{font-size:12px;margin-bottom:5px}.ldsp-update-bubble-ver{font-size:10px;margin-bottom:10px}.ldsp-update-bubble-btn{padding:7px 16px;font-size:11px}}
+    @media (max-width:380px){.ldsp-confirm-overlay{padding:0 10px}.ldsp-confirm-box{padding:18px 14px;max-width:230px}.ldsp-confirm-icon{font-size:34px;margin-bottom:10px}.ldsp-confirm-title{font-size:13px}.ldsp-confirm-msg{font-size:10px;margin-bottom:14px}.ldsp-confirm-btn{padding:9px 10px;font-size:10px}}
+    @media (max-width:320px){.ldsp-confirm-overlay{padding:0 8px}.ldsp-confirm-box{padding:14px 12px;max-width:200px}.ldsp-confirm-icon{font-size:28px;margin-bottom:8px}.ldsp-confirm-title{font-size:12px}.ldsp-confirm-msg{font-size:9px;margin-bottom:12px;line-height:1.5}.ldsp-confirm-btns{gap:6px}.ldsp-confirm-btn{padding:8px 8px;font-size:9px;border-radius:6px}.ldsp-update-bubble{width:180px;padding:12px 14px}.ldsp-update-bubble-icon{font-size:20px;margin-bottom:5px}.ldsp-update-bubble-title{font-size:11px}.ldsp-update-bubble-ver{font-size:9px;margin-bottom:8px}.ldsp-update-bubble-btn{padding:6px 12px;font-size:10px}}
+    .ldsp-no-chg{text-align:center;padding:18px;color:var(--txt-mut);font-size:11px;font-weight:500}
+    .ldsp-lb-hdr{display:flex;align-items:center;justify-content:space-between;padding:12px;background:var(--bg-card);border-radius:var(--r-md);margin-bottom:10px;border:1px solid var(--border)}
+    .ldsp-lb-status{display:flex;align-items:center;gap:10px}
+    .ldsp-lb-dot{width:10px;height:10px;border-radius:50%;background:var(--txt-mut);transition:background .2s}
+    .ldsp-lb-dot.joined{background:var(--ok);box-shadow:0 0 10px rgba(16,185,129,.4)}
+    .ldsp-lb-btn{padding:8px 14px;border:none;border-radius:20px;font-size:11px;font-weight:600;transition:background .15s,color .15s,transform .2s var(--ease)}
+    .ldsp-lb-btn.primary{background:var(--grad);color:#fff;box-shadow:0 4px 12px rgba(107,140,239,.25)}
+    .ldsp-lb-btn.primary:hover{transform:translateY(-2px);box-shadow:0 6px 18px rgba(107,140,239,.4)}
+    .ldsp-lb-btn.primary:active{transform:translateY(0)}
+    .ldsp-lb-btn.secondary{background:var(--bg-el);color:var(--txt-sec);border:1px solid var(--border2)}
+    .ldsp-lb-btn.secondary:hover{background:var(--bg-hover);border-color:var(--border-accent)}
+    .ldsp-lb-btn.danger{background:var(--err-bg);color:var(--err);border:1px solid rgba(244,63,94,.3)}
+    .ldsp-lb-btn.danger:hover{background:var(--err);color:#fff;box-shadow:0 4px 12px rgba(244,63,94,.3)}
+    .ldsp-lb-btn:disabled{opacity:.5;cursor:not-allowed;transform:none!important}
+    .ldsp-rank-list{display:flex;flex-direction:column;gap:6px}
+    .ldsp-rank-item{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-card);border-radius:var(--r-md);animation:item var(--dur) var(--ease-out) backwards;border:1px solid var(--border);transition:background .15s,border-color .15s,transform .2s var(--ease)}
+    .ldsp-rank-item:hover{background:var(--bg-hover);transform:translateX(4px);box-shadow:0 4px 15px rgba(0,0,0,.1)}
+    .ldsp-rank-item.t1{background:linear-gradient(135deg,rgba(255,215,0,.12) 0%,rgba(255,185,0,.05) 100%);border:1px solid rgba(255,215,0,.35);box-shadow:0 4px 20px rgba(255,215,0,.15)}
+    .ldsp-rank-item.t2{background:linear-gradient(135deg,rgba(192,192,192,.12) 0%,rgba(160,160,160,.05) 100%);border:1px solid rgba(192,192,192,.35)}
+    .ldsp-rank-item.t3{background:linear-gradient(135deg,rgba(205,127,50,.12) 0%,rgba(181,101,29,.05) 100%);border:1px solid rgba(205,127,50,.35)}
+    .ldsp-rank-item.me{border-left:3px solid var(--accent);box-shadow:0 0 15px rgba(107,140,239,.1)}
+    .ldsp-rank-num{width:28px;height:28px;border-radius:10px;background:var(--bg-el);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--txt-sec);flex-shrink:0}
+    .ldsp-rank-item.t1 .ldsp-rank-num{background:linear-gradient(135deg,#ffd700 0%,#ffb700 100%);color:#1a1a1a;font-size:14px;box-shadow:0 4px 12px rgba(255,215,0,.4)}
+    .ldsp-rank-item.t2 .ldsp-rank-num{background:linear-gradient(135deg,#e0e0e0 0%,#b0b0b0 100%);color:#1a1a1a;box-shadow:0 4px 12px rgba(192,192,192,.4)}
+    .ldsp-rank-item.t3 .ldsp-rank-num{background:linear-gradient(135deg,#cd7f32 0%,#b5651d 100%);color:#fff;box-shadow:0 4px 12px rgba(205,127,50,.4)}
+    .ldsp-rank-avatar{width:32px;height:32px;border-radius:10px;border:2px solid var(--border2);flex-shrink:0;background:var(--bg-el);transition:transform .2s var(--ease),border-color .15s}
+    .ldsp-rank-item:hover .ldsp-rank-avatar{transform:scale(1.05)}
+    .ldsp-rank-item.t1 .ldsp-rank-avatar{border-color:#ffd700;box-shadow:0 0 12px rgba(255,215,0,.3)}
+    .ldsp-rank-item.t2 .ldsp-rank-avatar{border-color:#c0c0c0}
+    .ldsp-rank-item.t3 .ldsp-rank-avatar{border-color:#cd7f32}
+    .ldsp-rank-info{flex:1;min-width:0;display:flex;flex-wrap:wrap;align-items:baseline;gap:3px 5px}
+    .ldsp-rank-name{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .ldsp-rank-display-name{font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:85px}
+    .ldsp-rank-username{font-size:10px;color:var(--txt-mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500}
+    .ldsp-rank-name-only{font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .ldsp-rank-me-tag{font-size:10px;color:var(--accent);margin-left:3px;font-weight:600;background:rgba(107,140,239,.1);padding:1px 6px;border-radius:8px}
+    .ldsp-rank-time{font-size:13px;font-weight:800;color:var(--accent);white-space:nowrap;letter-spacing:-.02em}
+    .ldsp-rank-item.t1 .ldsp-rank-time{color:#ffc107;text-shadow:0 0 10px rgba(255,193,7,.3)}
+    .ldsp-rank-item.t2 .ldsp-rank-time{color:#b8b8b8}
+    .ldsp-rank-item.t3 .ldsp-rank-time{color:#cd7f32}
+    .ldsp-lb-empty{text-align:center;padding:40px 20px;color:var(--txt-mut)}
+    .ldsp-lb-empty-icon{font-size:48px;margin-bottom:14px;filter:drop-shadow(0 2px 10px rgba(0,0,0,.1))}
+    .ldsp-lb-empty-txt{font-size:12px;line-height:1.7;font-weight:500}
+    .ldsp-lb-login{text-align:center;padding:40px 20px}
+    .ldsp-lb-login-icon{font-size:56px;margin-bottom:16px;filter:drop-shadow(0 4px 15px rgba(0,0,0,.15))}
+    .ldsp-lb-login-title{font-size:15px;font-weight:700;margin-bottom:8px;letter-spacing:-.01em}
+    .ldsp-lb-login-desc{font-size:11px;color:var(--txt-mut);margin-bottom:20px;line-height:1.7;font-weight:500}
+    .ldsp-lb-period{font-size:10px;color:var(--txt-mut);text-align:center;padding:8px 10px;background:var(--bg-card);border-radius:var(--r-sm);margin-bottom:10px;display:flex;justify-content:center;align-items:center;gap:10px;flex-wrap:wrap;border:1px solid var(--border);font-weight:500}
+    .ldsp-lb-period span{color:var(--accent);font-weight:700}
+    .ldsp-lb-period .ldsp-update-rule{font-size:9px;opacity:.8}
+    /* 排行榜响应式 */
+    @media (max-width:380px){.ldsp-lb-hdr{padding:10px}.ldsp-lb-btn{padding:6px 10px;font-size:10px}.ldsp-lb-period{padding:6px 8px;font-size:9px;gap:6px}.ldsp-lb-empty{padding:30px 15px}.ldsp-lb-empty-icon{font-size:40px;margin-bottom:10px}.ldsp-lb-empty-txt{font-size:11px}.ldsp-lb-login{padding:30px 15px}.ldsp-lb-login-icon{font-size:48px;margin-bottom:12px}.ldsp-lb-login-title{font-size:13px}.ldsp-lb-login-desc{font-size:10px;margin-bottom:16px}.ldsp-rank-item{padding:10px;gap:8px}.ldsp-rank-num{width:24px;height:24px;font-size:10px}.ldsp-rank-avatar{width:34px;height:34px}.ldsp-rank-name{font-size:12px}.ldsp-rank-time{font-size:12px}.ldsp-my-rank{padding:10px}.ldsp-my-rank-lbl{font-size:10px}.ldsp-my-rank-val{font-size:18px}}
+    @media (max-width:320px){.ldsp-lb-hdr{padding:8px}.ldsp-lb-status{gap:6px}.ldsp-lb-dot{width:8px;height:8px}.ldsp-lb-btn{padding:5px 8px;font-size:9px}.ldsp-lb-period{padding:5px 6px;font-size:8px;gap:4px}.ldsp-lb-empty{padding:24px 12px}.ldsp-lb-empty-icon{font-size:32px}.ldsp-lb-empty-txt{font-size:10px}.ldsp-lb-login{padding:24px 12px}.ldsp-lb-login-icon{font-size:40px;margin-bottom:10px}.ldsp-lb-login-title{font-size:12px}.ldsp-lb-login-desc{font-size:9px;margin-bottom:12px}.ldsp-rank-list{gap:4px}.ldsp-rank-item{padding:8px;gap:6px}.ldsp-rank-num{width:20px;height:20px;font-size:9px}.ldsp-rank-avatar{width:28px;height:28px}.ldsp-rank-name{font-size:10px}.ldsp-rank-time{font-size:10px}.ldsp-my-rank{padding:8px}.ldsp-my-rank-lbl{font-size:9px}.ldsp-my-rank-val{font-size:16px}}
+    .ldsp-lb-refresh{background:var(--bg-el);border:none;font-size:11px;padding:4px 8px;border-radius:6px;transition:background .15s,opacity .2s;opacity:.8}
+    .ldsp-lb-refresh:hover{opacity:1;background:var(--bg-hover);transform:scale(1.05)}
+    .ldsp-lb-refresh:active{transform:scale(.95)}
+    .ldsp-lb-refresh.spinning{animation:ldsp-spin 1s linear infinite}
+    .ldsp-lb-refresh:disabled{opacity:.4;cursor:not-allowed;transform:none!important}
+    @keyframes ldsp-spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+    .ldsp-my-rank{display:flex;align-items:center;justify-content:space-between;padding:14px;background:var(--grad);border-radius:var(--r-md);margin-bottom:10px;color:#fff;position:relative;overflow:hidden;box-shadow:0 8px 25px rgba(107,140,239,.3)}
+    .ldsp-my-rank::before{content:'';position:absolute;top:-50%;right:-20%;width:100px;height:100px;background:radial-gradient(circle,rgba(255,255,255,.15) 0%,transparent 70%);pointer-events:none}
+    .ldsp-my-rank.not-in-top{background:linear-gradient(135deg,#52525b 0%,#3f3f46 100%);box-shadow:0 8px 25px rgba(0,0,0,.2)}
+    .ldsp-my-rank-lbl{font-size:11px;opacity:.9;font-weight:500}
+    .ldsp-my-rank-val{font-size:20px;font-weight:800;letter-spacing:-.02em;text-shadow:0 2px 8px rgba(0,0,0,.2)}
+    .ldsp-my-rank-time{font-size:12px;opacity:.95;font-weight:600}
+    .ldsp-not-in-top-hint{font-size:10px;opacity:.7;margin-left:5px}
+    .ldsp-join-prompt{background:var(--bg-card);border-radius:var(--r-md);padding:24px 20px;text-align:center;margin-bottom:10px;border:1px solid var(--border);position:relative;overflow:hidden}
+    .ldsp-join-prompt::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--grad)}
+    .ldsp-join-prompt-icon{font-size:44px;margin-bottom:12px;filter:drop-shadow(0 2px 10px rgba(0,0,0,.15))}
+    .ldsp-join-prompt-title{font-size:14px;font-weight:700;margin-bottom:6px;letter-spacing:-.01em}
+    .ldsp-join-prompt-desc{font-size:11px;color:var(--txt-mut);line-height:1.7;margin-bottom:16px;font-weight:500}
+    .ldsp-privacy-note{font-size:9px;color:var(--txt-mut);margin-top:12px;display:flex;align-items:center;justify-content:center;gap:5px;font-weight:500}
+    /* 面板手动调整大小 - 仅桌面端 */
+    @media (hover:hover) and (pointer:fine){
+    #ldsp-panel:not(.collapsed){resize:none}
+    .ldsp-resize-handle{position:absolute;z-index:15;opacity:0;transition:opacity .2s}
+    #ldsp-panel:hover .ldsp-resize-handle{opacity:1}
+    .ldsp-resize-e{right:0;top:1em;bottom:1em;width:6px;cursor:e-resize}
+    .ldsp-resize-s{bottom:0;left:1em;right:1em;height:6px;cursor:s-resize}
+    .ldsp-resize-se{right:0;bottom:0;width:14px;height:14px;cursor:se-resize}
+    .ldsp-resize-se::before{content:'';position:absolute;right:3px;bottom:3px;width:8px;height:8px;border-right:2px solid var(--txt-mut);border-bottom:2px solid var(--txt-mut);opacity:.5;transition:opacity .2s}
+    #ldsp-panel:hover .ldsp-resize-se::before{opacity:.8}
+    .ldsp-resize-handle:hover::before{opacity:1}
+    #ldsp-panel.resizing .ldsp-resize-handle{opacity:1}
+    #ldsp-panel.resizing,#ldsp-panel.resizing *{transition:none!important;user-select:none!important}
+    }
+    @media (prefers-reduced-motion:reduce){#ldsp-panel,#ldsp-panel *{animation:none!important;transition:none!important}#ldsp-panel .ldsp-spinner,#ldsp-panel .ldsp-mini-spin,#ldsp-panel .ldsp-lb-refresh.spinning{animation:spin 1.5s linear infinite!important}}
+    /* ========== 响应式布局系统 ========== */
+    /* 内容区最大高度 */
+    .ldsp-content{max-height:calc(var(--h) - 160px)}
+    /* --- 高度响应式 --- */
+    /* 矮屏优化 (高度<700px): 减小间距 */
+    @media (max-height:700px){.ldsp-user{padding:8px var(--pd) 20px}.ldsp-reading{padding:6px}.ldsp-reading-icon{font-size:18px}.ldsp-reading-time{font-size:12px}.ldsp-reading::after{font-size:7px;bottom:-12px}.ldsp-ring{padding:10px 12px}.ldsp-ring-stat-val{font-size:16px}.ldsp-ring-stat-lbl{font-size:8px}}
+    /* 矮屏优化 (高度<600px): 进一步压缩 */
+    @media (max-height:600px){.ldsp-hdr{padding:8px 10px;min-height:44px;gap:6px}.ldsp-user{padding:6px var(--pd) 16px;gap:8px}.ldsp-user-actions{gap:4px;margin-top:0}.ldsp-action-btn{padding:4px 6px;font-size:9px}.ldsp-tabs{padding:6px 8px}.ldsp-section{padding:8px}.ldsp-reading{padding:5px}.ldsp-reading-icon{font-size:16px;margin-bottom:2px}.ldsp-reading-time{font-size:11px}.ldsp-reading-label{font-size:8px}.ldsp-reading::after{font-size:6px;bottom:-10px}}
+    /* 矮屏优化 (高度<500px): 隐藏次要元素 */
+    @media (max-height:500px){.ldsp-user{padding:5px var(--pd) 14px}.ldsp-reading{padding:4px}.ldsp-reading-icon{font-size:14px;margin-bottom:1px}.ldsp-reading-time{font-size:10px}.ldsp-reading-label{font-size:7px}.ldsp-tabs{padding:5px 6px;gap:4px}.ldsp-tab{padding:5px 6px;font-size:9px}.ldsp-section{padding:5px}.ldsp-ring{padding:8px 10px;margin-bottom:8px}.ldsp-ring-wrap{--ring:55px}.ldsp-announcement.active{height:20px;min-height:20px}.ldsp-announcement-text{font-size:9px}}
+    /* 极矮屏 (高度<420px): 隐藏操作按钮 */
+    @media (max-height:420px){.ldsp-user-actions{display:none}.ldsp-reading::after{display:none}}
+    /* --- 宽度响应式 --- */
+    /* 窄屏优化 (宽度<380px): 手机竖屏 */
+    @media (max-width:380px){#ldsp-panel{--w:260px}#ldsp-panel.collapsed{width:42px!important;height:42px!important;min-width:42px!important;min-height:42px!important;max-height:42px!important}#ldsp-panel.collapsed .ldsp-toggle-logo{width:20px;height:20px}.ldsp-hdr{padding:8px 10px;gap:6px;min-height:46px}.ldsp-hdr-info{gap:5px}.ldsp-site-icon{width:22px;height:22px}.ldsp-site-ver{font-size:7px}.ldsp-title{font-size:11px}.ldsp-app-name{font-size:9px}.ldsp-hdr-btns{gap:3px}.ldsp-hdr-btns button{width:24px;height:24px;font-size:10px}.ldsp-user{gap:8px}.ldsp-avatar,.ldsp-avatar-ph{width:40px;height:40px;border-radius:10px}.ldsp-user-display-name{font-size:14px}.ldsp-user-handle{font-size:10px}.ldsp-reading{padding:5px;max-width:85px}.ldsp-reading-icon{font-size:16px}.ldsp-reading-time{font-size:11px}.ldsp-reading-label{font-size:8px}.ldsp-user-actions{gap:4px}.ldsp-action-btn{font-size:9px;padding:4px 6px;gap:3px}.ldsp-action-icon{font-size:11px}.ldsp-tabs{padding:6px 8px;gap:4px}.ldsp-tab{font-size:9px;padding:5px 6px}.ldsp-section{padding:8px}.ldsp-ring{padding:10px;gap:8px}.ldsp-ring-stat-val{font-size:14px}.ldsp-ring-stat-lbl{font-size:8px}}
+    .ldsp-action-btn{display:inline-flex;align-items:center;gap:4px;padding:5px 10px;background:linear-gradient(135deg,rgba(107,140,239,.08),rgba(90,125,224,.12));border:1px solid rgba(107,140,239,.2);border-radius:8px;font-size:10px;color:var(--accent);transition:background .15s,border-color .15s,transform .15s,box-shadow .15s;font-weight:600;white-space:nowrap;flex:1 1 auto;min-width:fit-content;justify-content:center;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+    @media (hover:hover){.ldsp-action-btn:hover{background:linear-gradient(135deg,rgba(107,140,239,.15),rgba(90,125,224,.2));border-color:var(--accent);box-shadow:0 4px 12px rgba(107,140,239,.18)}}
+    .ldsp-action-btn:active{background:linear-gradient(135deg,rgba(107,140,239,.18),rgba(90,125,224,.24));transform:scale(.97)}
+    .ldsp-action-btn:only-child{flex:0 1 auto}
+    .ldsp-action-btn .ldsp-action-icon{flex-shrink:0}
+    .ldsp-action-btn .ldsp-action-text{overflow:hidden;text-overflow:ellipsis}
+    /* 极窄屏优化 (宽度<320px): 小屏手机 */
+    @media (max-width:320px){#ldsp-panel{--w:230px;--min-w:200px}#ldsp-panel.collapsed{width:36px!important;height:36px!important;min-width:36px!important;min-height:36px!important;max-height:36px!important;border-radius:8px}#ldsp-panel.collapsed .ldsp-toggle-logo{width:18px;height:18px}.ldsp-hdr{padding:6px 8px;gap:4px;min-height:38px}.ldsp-hdr-info{gap:4px}.ldsp-site-icon{width:18px;height:18px;border-radius:5px;border-width:1px}.ldsp-site-ver{display:none}.ldsp-title{font-size:10px}.ldsp-app-name{display:none}.ldsp-ver-num{font-size:8px;padding:1px 5px}.ldsp-hdr-btns{gap:2px}.ldsp-hdr-btns button{width:22px;height:22px;font-size:9px;border-radius:5px}.ldsp-user{padding:6px 8px 14px;gap:6px}.ldsp-avatar,.ldsp-avatar-ph{width:36px;height:36px;border-radius:8px;font-size:14px}.ldsp-user-display-name{font-size:13px}.ldsp-user-handle{font-size:9px}.ldsp-reading{padding:4px;max-width:70px}.ldsp-reading-icon{font-size:13px;margin-bottom:1px}.ldsp-reading-time{font-size:9px}.ldsp-reading-label{font-size:6px}.ldsp-user-actions{flex-direction:column;gap:3px}.ldsp-action-btn{flex:1 1 100%;min-width:0;font-size:8px;padding:4px 5px;gap:2px}.ldsp-action-icon{font-size:10px}.ldsp-tabs{padding:4px 6px;gap:3px}.ldsp-tab{font-size:8px;padding:4px 5px;gap:2px}.ldsp-tab .ldsp-tab-icon{display:none}.ldsp-section{padding:6px}.ldsp-ring{padding:8px;gap:6px;margin-bottom:6px}.ldsp-ring-stat{min-width:40px;gap:2px}.ldsp-ring-stat-val{font-size:13px}.ldsp-ring-stat-lbl{font-size:7px}.ldsp-ring-wrap{--ring:50px}}
+    /* 小屏手机组合优化 (宽度<380px 且 高度<700px) */
+    @media (max-width:380px) and (max-height:700px){.ldsp-user{padding:5px var(--pd) 12px;gap:6px}.ldsp-avatar,.ldsp-avatar-ph{width:36px;height:36px}.ldsp-reading{padding:4px;max-width:65px}.ldsp-reading-icon{font-size:13px;margin-bottom:1px}.ldsp-reading-time{font-size:9px}.ldsp-reading-label{font-size:6px}.ldsp-reading::after{font-size:6px;bottom:-9px}.ldsp-user-actions{gap:3px}.ldsp-action-btn{padding:3px 5px;font-size:8px}.ldsp-ring{padding:8px;margin-bottom:6px}.ldsp-ring-stat-val{font-size:12px}.ldsp-ring-wrap{--ring:48px}}
+    /* 超小屏手机 (宽度<280px) */
+    @media (max-width:280px){#ldsp-panel{--w:210px}.ldsp-hdr{padding:5px 6px;min-height:34px}.ldsp-site-icon{width:16px;height:16px}.ldsp-title{font-size:9px}.ldsp-hdr-btns button{width:20px;height:20px;font-size:8px}.ldsp-user{padding:4px 6px 10px;gap:5px}.ldsp-avatar,.ldsp-avatar-ph{width:32px;height:32px;border-radius:6px}.ldsp-user-display-name{font-size:12px}.ldsp-user-handle{font-size:8px}.ldsp-reading{padding:3px;max-width:55px}.ldsp-reading-icon{font-size:11px;margin-bottom:0}.ldsp-reading-time{font-size:8px}.ldsp-reading-label{font-size:5px;margin-top:1px}.ldsp-reading::after{display:none}.ldsp-action-btn{padding:3px 4px;font-size:7px;gap:2px}.ldsp-tabs{padding:3px 5px;gap:2px}.ldsp-tab{font-size:7px;padding:3px 4px}.ldsp-section{padding:4px}.ldsp-ring{padding:6px;gap:4px}.ldsp-ring-stat-val{font-size:11px}.ldsp-ring-stat-lbl{font-size:6px}.ldsp-ring-wrap{--ring:42px}}
+    /* ========== 响应式布局系统结束 ========== */
+    .ldsp-logout-btn,.ldsp-ticket-btn,.ldsp-melon-btn,.ldsp-ldc-btn{padding:5px 8px}
+    .ldsp-logout-btn{background:linear-gradient(135deg,rgba(239,68,68,.06),rgba(220,38,38,.08));border-color:rgba(239,68,68,.15);color:rgba(239,68,68,.7)}
+    .ldsp-logout-btn:hover{background:linear-gradient(135deg,rgba(239,68,68,.12),rgba(220,38,38,.16));border-color:rgba(239,68,68,.3);color:#ef4444}
+    .ldsp-login-btn{flex:1 1 100%;background:linear-gradient(135deg,rgba(212,168,83,.15),rgba(196,147,57,.2));border-color:rgba(212,168,83,.3);color:var(--warn);animation:login-pulse 2.5s ease-in-out infinite}
+    .ldsp-login-btn:hover{background:linear-gradient(135deg,rgba(212,168,83,.25),rgba(196,147,57,.3));border-color:var(--warn)}
+    @keyframes login-pulse{0%,100%{box-shadow:0 0 0 0 rgba(212,168,83,.3)}50%{box-shadow:0 0 12px 2px rgba(212,168,83,.2)}}
+    .ldsp-ticket-btn .ldsp-ticket-badge{background:var(--err);color:#fff;font-size:8px;padding:2px 5px;border-radius:8px;margin-left:2px;font-weight:700;animation:pulse 3s ease infinite}
+    .ldsp-ticket-overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--bg);border-radius:0 0 var(--r-lg) var(--r-lg);z-index:10;display:none;flex-direction:column;overflow:hidden}
+    .ldsp-ticket-overlay.show{display:flex}
+    .ldsp-ticket-header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg-card);border-bottom:1px solid var(--border);flex-shrink:0}
+    .ldsp-ticket-title{font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;color:var(--txt)}
+    .ldsp-ticket-close{width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:var(--bg-el);border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--txt-sec);transition:background .15s,color .15s}
+    .ldsp-ticket-close:hover{background:var(--err-bg);color:var(--err);border-color:var(--err)}
+    .ldsp-ticket-tabs{display:flex;border-bottom:1px solid var(--border);padding:0 10px;background:var(--bg-card);flex-shrink:0}
+    .ldsp-ticket-tab{padding:8px 12px;font-size:10px;font-weight:600;color:var(--txt-mut);border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
+    .ldsp-ticket-tab.active{color:var(--accent);border-color:var(--accent)}
+    .ldsp-ticket-tab:hover:not(.active){color:var(--txt-sec)}
+    .ldsp-ticket-body{flex:1;overflow-y:auto;padding:12px;background:var(--bg);display:flex;flex-direction:column}
+    .ldsp-ticket-body.detail-mode{padding:0;overflow:hidden}
+    .ldsp-ticket-empty{text-align:center;padding:30px 16px;color:var(--txt-mut)}
+    .ldsp-ticket-empty-icon{font-size:36px;margin-bottom:10px}
+    .ldsp-ticket-list{display:flex;flex-direction:column;gap:8px}
+    .ldsp-ticket-item{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px;cursor:pointer;transition:background .15s,border-color .15s}
+    .ldsp-ticket-item:hover{background:var(--bg-hover);transform:translateX(3px)}
+    .ldsp-ticket-item.has-reply{border-left:3px solid #ef4444;animation:pulse-border-red 3s ease infinite;background:rgba(239,68,68,.05)}
+    .ldsp-ticket-item-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
+    .ldsp-ticket-item-type{font-size:10px;color:var(--txt-sec)}
+    .ldsp-ticket-item-status{font-size:9px;padding:2px 5px;border-radius:4px}
+    .ldsp-ticket-item-status.open{background:var(--ok-bg);color:var(--ok)}
+    .ldsp-ticket-item-status.closed{background:var(--bg-el);color:var(--txt-mut)}
+    .ldsp-ticket-item-title{font-size:11px;font-weight:600;color:var(--txt);margin-bottom:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ldsp-ticket-item-meta{font-size:9px;color:var(--txt-mut);display:flex;gap:6px}
+    .ldsp-ticket-form{display:flex;flex-direction:column;gap:10px}
+    .ldsp-ticket-form-group{display:flex;flex-direction:column;gap:5px}
+    .ldsp-ticket-label{font-size:10px;font-weight:600;color:var(--txt-sec)}
+    .ldsp-ticket-types{display:flex;gap:6px;flex-wrap:wrap}
+    .ldsp-ticket-type{flex:1;min-width:80px;padding:8px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-sm);text-align:center;cursor:pointer;transition:background .15s,border-color .15s}
+    .ldsp-ticket-type:hover{border-color:var(--accent)}
+    .ldsp-ticket-type.selected{border-color:var(--accent);background:rgba(107,140,239,.1)}
+    .ldsp-ticket-type-icon{font-size:16px;display:block;margin-bottom:3px}
+    .ldsp-ticket-type-label{font-size:10px;color:var(--txt)}
+    .ldsp-ticket-input{padding:8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:11px;color:var(--txt)}
+    .ldsp-ticket-input:focus{border-color:var(--accent);outline:none}
+    .ldsp-ticket-textarea{padding:8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:11px;color:var(--txt);min-height:80px;resize:vertical}
+    .ldsp-ticket-textarea:focus{border-color:var(--accent);outline:none}
+    .ldsp-ticket-submit{padding:10px;background:var(--grad);color:#fff;border:none;border-radius:var(--r-sm);font-size:11px;font-weight:600;cursor:pointer;transition:opacity .15s,transform .2s}
+    .ldsp-ticket-submit:hover{box-shadow:0 4px 12px rgba(107,140,239,.3)}
+    .ldsp-ticket-submit:disabled{opacity:.5;cursor:not-allowed}
+    .ldsp-ticket-detail{display:flex;flex-direction:column;flex:1;min-height:0;background:var(--bg)}
+    .ldsp-ticket-detail-top{padding:10px 12px;border-bottom:1px solid var(--border);background:var(--bg-card);flex-shrink:0}
+    .ldsp-ticket-back{display:inline-flex;align-items:center;gap:4px;padding:5px 8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:10px;color:var(--txt-sec);transition:background .15s,color .15s}
+    .ldsp-ticket-back:hover{background:var(--bg-hover);color:var(--txt)}
+    .ldsp-ticket-detail-header{margin-top:6px}
+    .ldsp-ticket-detail-title{font-size:12px;font-weight:600;color:var(--txt);line-height:1.4;word-break:break-word}
+    .ldsp-ticket-detail-meta{display:flex;flex-wrap:wrap;gap:5px;font-size:9px;color:var(--txt-mut);margin-top:5px}
+    .ldsp-ticket-detail-meta span{background:var(--bg-el);padding:2px 5px;border-radius:3px}
+    .ldsp-ticket-messages{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-height:0}
+    .ldsp-ticket-reply{max-width:85%;padding:8px 10px;border-radius:var(--r-sm);font-size:11px;line-height:1.4;word-break:break-word}
+    .ldsp-ticket-reply.user{background:linear-gradient(135deg,rgba(107,140,239,.12),rgba(90,125,224,.08));border:1px solid rgba(107,140,239,.2);margin-left:auto;border-bottom-right-radius:3px}
+    .ldsp-ticket-reply.admin{background:var(--bg-card);border:1px solid var(--border);margin-right:auto;border-bottom-left-radius:3px}
+    .ldsp-ticket-reply-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;font-size:9px;color:var(--txt-mut)}
+    .ldsp-ticket-reply-author{font-weight:600}
+    .ldsp-ticket-reply.admin .ldsp-ticket-reply-author{color:var(--ok)}
+    .ldsp-ticket-reply-content{color:var(--txt);white-space:pre-wrap}
+    .ldsp-ticket-input-area{border-top:1px solid var(--border);padding:10px 12px;background:var(--bg-card);flex-shrink:0}
+    .ldsp-ticket-reply-form{display:flex;gap:6px;align-items:center}
+    .ldsp-ticket-reply-input{flex:1;padding:6px 8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:11px;resize:none;min-height:32px;max-height:50px;color:var(--txt)}
+    .ldsp-ticket-reply-input:focus{border-color:var(--accent);outline:none}
+    .ldsp-ticket-reply-btn{padding:6px 12px;background:var(--grad);color:#fff;border:none;border-radius:var(--r-sm);font-size:10px;font-weight:600;transition:opacity .15s,transform .2s;flex-shrink:0;height:32px}
+    .ldsp-ticket-reply-btn:hover{box-shadow:0 4px 12px rgba(107,140,239,.3)}
+    .ldsp-ticket-reply-btn:disabled{opacity:.5;cursor:not-allowed}
+    .ldsp-ticket-closed-hint{text-align:center;color:var(--txt-mut);font-size:10px;padding:10px}
+    /* 吃瓜助手样式 */
+    .ldsp-melon-btn{background:linear-gradient(135deg,rgba(74,222,128,.08),rgba(34,197,94,.12));border-color:rgba(74,222,128,.2);color:rgba(34,197,94,.85)}
+    .ldsp-melon-btn:hover{background:linear-gradient(135deg,rgba(74,222,128,.15),rgba(34,197,94,.2));border-color:rgba(74,222,128,.35);color:#22c55e}
+    /* 导出帖子按钮样式 - 使用橙色调 */
+    .ldsp-export-btn{background:linear-gradient(135deg,rgba(251,146,60,.08),rgba(234,88,12,.12));border-color:rgba(251,146,60,.2);color:rgba(234,88,12,.85)}
+    .ldsp-export-btn:hover{background:linear-gradient(135deg,rgba(251,146,60,.15),rgba(234,88,12,.2));border-color:rgba(251,146,60,.35);color:#ea580c}
+    /* 导出帖子面板样式 */
+    .ldsp-export-overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--bg);border-radius:0 0 var(--r-lg) var(--r-lg);z-index:10;display:none;flex-direction:column;overflow:hidden}
+    .ldsp-export-overlay.show{display:flex}
+    .ldsp-export-header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg-card);border-bottom:1px solid var(--border);flex-shrink:0}
+    .ldsp-export-title{font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;color:var(--txt)}
+    .ldsp-export-header-actions{display:flex;align-items:center;gap:6px}
+    .ldsp-export-refresh{padding:4px 10px;display:flex;align-items:center;justify-content:center;gap:4px;background:linear-gradient(135deg,rgba(107,140,239,.08),rgba(90,125,224,.12));border:1px solid rgba(107,140,239,.2);border-radius:6px;font-size:10px;color:var(--accent);cursor:pointer;transition:all .15s;white-space:nowrap}
+    .ldsp-export-refresh:hover{background:linear-gradient(135deg,rgba(107,140,239,.15),rgba(90,125,224,.2));border-color:rgba(107,140,239,.4);color:#5a7de0}
+    .ldsp-export-close{width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:var(--bg-el);border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--txt-sec);cursor:pointer;transition:background .15s,color .15s}
+    .ldsp-export-close:hover{background:var(--err-bg);color:var(--err);border-color:var(--err)}
+    .ldsp-export-body{flex:1;overflow-y:auto;padding:12px;background:var(--bg);display:flex;flex-direction:column;gap:10px}
+    .ldsp-export-info{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:12px;font-size:11px}
+    .ldsp-export-info-title{font-weight:600;color:var(--txt);margin-bottom:8px;display:flex;align-items:flex-start;gap:5px;line-height:1.5;font-size:12px}
+    .ldsp-export-info-row{display:flex;align-items:center;gap:6px;color:var(--txt-sec);font-size:10px;margin-top:4px}
+    .ldsp-export-info-label{color:var(--txt-mut);min-width:50px}
+    .ldsp-export-info-value{color:var(--txt);font-weight:500}
+    .ldsp-export-info-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+    .ldsp-export-info-category{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;background:var(--accent);color:#fff;border-radius:10px;font-size:9px;font-weight:600}
+    .ldsp-export-info-tag{display:inline-flex;align-items:center;padding:2px 8px;background:var(--bg-el);color:var(--txt-sec);border-radius:10px;font-size:9px;font-weight:500;border:1px solid var(--border)}
+    .ldsp-export-range{display:flex;align-items:center;gap:8px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px;flex-wrap:wrap}
+    .ldsp-export-range-label{font-size:10px;color:var(--txt-sec);white-space:nowrap}
+    .ldsp-export-range-input{width:70px;padding:5px 8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:11px;color:var(--txt);text-align:center}
+    .ldsp-export-range-input:focus{border-color:var(--accent);outline:none}
+    .ldsp-export-range-sep{color:var(--txt-mut);font-size:10px}
+    .ldsp-export-range-hint{font-size:9px;color:var(--txt-mut);margin-left:auto}
+    .ldsp-export-options{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px}
+    .ldsp-export-options-title{font-size:10px;color:var(--txt-sec);margin-bottom:8px}
+    .ldsp-export-option{display:flex;align-items:center;gap:8px;padding:6px 0}
+    .ldsp-export-option input[type="checkbox"]{width:16px;height:16px;accent-color:var(--accent)}
+    .ldsp-export-option label{font-size:11px;color:var(--txt);cursor:pointer}
+    .ldsp-export-format-selector{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px}
+    .ldsp-export-format-title{font-size:10px;color:var(--txt-sec);margin-bottom:8px}
+    .ldsp-export-format-cards{display:flex;gap:8px}
+    .ldsp-export-format-card{flex:1;display:flex;flex-direction:column;align-items:center;padding:12px 8px;background:var(--bg-el);border:2px solid var(--border);border-radius:var(--r-md);cursor:pointer;transition:all .2s}
+    .ldsp-export-format-card:hover{border-color:var(--txt-mut);background:var(--bg-hover);transform:translateY(-1px)}
+    .ldsp-export-format-card.active{border-color:var(--accent);background:rgba(107,140,239,.1);box-shadow:0 2px 8px rgba(107,140,239,.15)}
+    .ldsp-export-format-card input{display:none}
+    .ldsp-export-format-card-icon{width:28px;height:28px;margin-bottom:6px;display:flex;align-items:center;justify-content:center}
+    .ldsp-export-format-card-icon svg{width:24px;height:24px}
+    .ldsp-export-format-card-name{font-size:11px;font-weight:600;color:var(--txt)}
+    .ldsp-export-format-card.active .ldsp-export-format-card-name{color:var(--accent)}
+    .ldsp-export-actions{display:flex;gap:8px}
+    .ldsp-export-btn-start{flex:1;padding:12px;border:none;border-radius:var(--r-md);font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;box-shadow:0 2px 8px rgba(34,197,94,.2)}
+    .ldsp-export-btn-start:hover{box-shadow:0 4px 16px rgba(34,197,94,.35);transform:translateY(-2px)}
+    .ldsp-export-btn-start:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
+    .ldsp-export-btn-stop{flex:1;padding:12px;border:none;border-radius:var(--r-md);font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;box-shadow:0 2px 8px rgba(239,68,68,.2)}
+    .ldsp-export-btn-stop:hover{box-shadow:0 4px 16px rgba(239,68,68,.35);transform:translateY(-2px)}
+    .ldsp-export-status{text-align:center;padding:14px;color:var(--txt-sec);font-size:11px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md)}
+    .ldsp-export-status-icon{font-size:24px;margin-bottom:8px;display:block}
+    .ldsp-export-not-topic{text-align:center;padding:40px 20px;color:var(--txt-mut)}
+    .ldsp-export-not-topic-icon{font-size:36px;margin-bottom:10px}
+    .ldsp-export-not-topic-text{font-size:12px;line-height:1.6}
+    /* LDC 积分按钮样式 - 使用与主题一致的蓝紫色调 */
+    .ldsp-ldc-btn{background:linear-gradient(135deg,rgba(139,92,246,.08),rgba(124,58,237,.12));border-color:rgba(139,92,246,.2);color:rgba(139,92,246,.85)}
+    .ldsp-ldc-btn:hover{background:linear-gradient(135deg,rgba(139,92,246,.15),rgba(124,58,237,.2));border-color:rgba(139,92,246,.35);color:#8b5cf6}
+    /* LDC 积分面板样式 - 与客户端主题风格统一 */
+    .ldsp-ldc-overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--bg);border-radius:0 0 var(--r-lg) var(--r-lg);z-index:10;display:none;flex-direction:column;overflow:hidden}
+    .ldsp-ldc-overlay.show{display:flex}
+    .ldsp-ldc-header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg-card);border-bottom:1px solid var(--border);flex-shrink:0}
+    .ldsp-ldc-title{font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;color:var(--txt)}
+    .ldsp-ldc-header-actions{display:flex;align-items:center;gap:8px}
+    .ldsp-ldc-link{color:var(--accent)!important;text-decoration:none!important;font-size:10px!important;font-weight:600!important;opacity:.9;transition:opacity .15s}
+    .ldsp-ldc-link:hover{opacity:1}
+    .ldsp-ldc-refresh{width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:var(--bg-el);border:1px solid var(--border);border-radius:6px;color:var(--txt-sec);cursor:pointer;transition:background .15s,border-color .15s,color .15s;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+    .ldsp-ldc-refresh:hover{background:var(--bg-hover);border-color:var(--accent);color:var(--accent)}
+    .ldsp-ldc-refresh.spinning svg{animation:ldsp-spin .8s linear infinite}
+    .ldsp-ldc-refresh svg{width:12px;height:12px;fill:currentColor}
+    .ldsp-ldc-close{width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:var(--bg-el);border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--txt-sec);cursor:pointer;transition:background .15s,color .15s;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+    .ldsp-ldc-close:hover{background:var(--err-bg);color:var(--err);border-color:var(--err)}
+    /* LDC Tabs */
+    .ldsp-ldc-tabs{display:flex;background:var(--bg-card);border-bottom:1px solid var(--border);flex-shrink:0}
+    .ldsp-ldc-tab{flex:1;padding:10px 8px;font-size:11px;font-weight:600;color:var(--txt-mut);text-align:center;cursor:pointer;border-bottom:2px solid transparent;transition:all .15s;-webkit-tap-highlight-color:transparent}
+    .ldsp-ldc-tab:hover{color:var(--txt-sec);background:var(--bg-hover)}
+    .ldsp-ldc-tab.active{color:var(--accent);border-bottom-color:var(--accent);background:transparent}
+    .ldsp-ldc-body{flex:1;overflow-y:auto;padding:12px;background:var(--bg);display:flex;flex-direction:column;gap:10px}
+    .ldsp-ldc-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;color:var(--txt-mut);flex:1}
+    .ldsp-ldc-loading .ldsp-spinner{margin-bottom:10px}
+    .ldsp-ldc-error{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:30px 20px;text-align:center;color:var(--err);flex:1}
+    .ldsp-ldc-error-icon{font-size:32px;margin-bottom:10px}
+    .ldsp-ldc-error-msg{font-size:11px;margin-bottom:12px;color:var(--txt-sec)}
+    .ldsp-ldc-login-btn{display:inline-block;padding:10px 20px;background:var(--grad);color:#fff!important;text-decoration:none!important;border-radius:var(--r-sm);font-size:12px;font-weight:600;transition:all .2s;box-shadow:0 2px 8px rgba(107,140,239,.3)}
+    .ldsp-ldc-login-btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(107,140,239,.4)}
+    .ldsp-ldc-retry-btn{margin-top:8px;padding:8px 16px;background:var(--accent);color:#fff;border:none;border-radius:var(--r-sm);font-size:11px;cursor:pointer;transition:opacity .15s}
+    .ldsp-ldc-retry-btn:hover{opacity:.85}
+    /* iOS Safari 限制提示 */
+    .ldsp-ldc-ios-guide{display:block;padding:12px;text-align:center;overflow-y:auto;-webkit-overflow-scrolling:touch}
+    .ldsp-ldc-ios-icon{font-size:28px;margin-bottom:6px;display:block}
+    .ldsp-ldc-ios-title{font-size:13px;font-weight:700;color:var(--txt);margin-bottom:8px}
+    .ldsp-ldc-ios-desc{font-size:10px;color:var(--txt-sec);margin-bottom:12px;line-height:1.5;padding:0 4px}
+    .ldsp-ldc-ios-desc strong{color:var(--txt);font-weight:600}
+    .ldsp-ldc-ios-solutions{margin-bottom:10px}
+    .ldsp-ldc-ios-solution{padding:10px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);text-align:left;margin-bottom:8px}
+    .ldsp-ldc-ios-solution.alt{background:var(--bg-el);border-style:dashed;margin-bottom:0}
+    .ldsp-ldc-ios-solution-title{font-size:11px;font-weight:600;color:var(--txt);margin-bottom:4px}
+    .ldsp-ldc-ios-solution-desc{font-size:10px;color:var(--txt-sec);margin-bottom:8px;line-height:1.4}
+    .ldsp-ldc-ios-solution.alt .ldsp-ldc-ios-solution-desc{margin-bottom:0}
+    .ldsp-ldc-ios-btn{display:block;padding:10px 16px;border-radius:var(--r-sm);font-size:11px;font-weight:600;cursor:pointer;text-decoration:none!important;border:none;width:100%;text-align:center;box-sizing:border-box;-webkit-appearance:none;-webkit-tap-highlight-color:transparent}
+    .ldsp-ldc-ios-btn.primary{background:var(--grad);color:#fff!important;box-shadow:0 2px 6px rgba(107,140,239,.25)}
+    .ldsp-ldc-ios-tip{font-size:9px;color:var(--txt-mut);padding:8px;background:var(--bg-el);border-radius:var(--r-sm);line-height:1.4}
+    /* 概览页 - 余额卡片 */
+    .ldsp-ldc-balance-card{background:linear-gradient(135deg,rgba(139,92,246,.12),rgba(107,140,239,.15));border:1px solid rgba(139,92,246,.25);border-radius:var(--r-md);padding:16px;text-align:center}
+    .ldsp-ldc-balance-label{font-size:11px;color:var(--txt-sec);margin-bottom:4px}
+    .ldsp-ldc-balance-value{font-size:28px;font-weight:700;color:var(--accent);line-height:1.2}
+    .ldsp-ldc-balance-sub{font-size:10px;color:var(--txt-mut);margin-top:6px}
+    /* 概览页 - 统计网格 */
+    .ldsp-ldc-stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .ldsp-ldc-stat-card{display:flex;align-items:center;gap:10px;padding:12px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md)}
+    .ldsp-ldc-stat-card.income{border-left:3px solid var(--ok)}
+    .ldsp-ldc-stat-card.expense{border-left:3px solid var(--err)}
+    .ldsp-ldc-stat-icon{font-size:18px}
+    .ldsp-ldc-stat-info{flex:1;min-width:0}
+    .ldsp-ldc-stat-label{font-size:10px;color:var(--txt-mut)}
+    .ldsp-ldc-stat-num{font-size:14px;font-weight:700;color:var(--txt)}
+    .ldsp-ldc-stat-card.income .ldsp-ldc-stat-num{color:var(--ok)}
+    .ldsp-ldc-stat-card.expense .ldsp-ldc-stat-num{color:var(--err)}
+    /* 概览页 - 图表区 */
+    .ldsp-ldc-section{display:flex;flex-direction:column;gap:8px}
+    .ldsp-ldc-section-header{display:flex;justify-content:space-between;align-items:center}
+    .ldsp-ldc-section-title{font-size:11px;font-weight:600;color:var(--txt-sec)}
+    .ldsp-ldc-section-summary{font-size:10px;display:flex;gap:8px}
+    .ldsp-ldc-section-summary em{font-style:normal;font-weight:600}
+    .ldsp-ldc-section-summary em.income{color:var(--ok)}
+    .ldsp-ldc-section-summary em.expense{color:var(--err)}
+    .ldsp-ldc-chart{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:12px}
+    .ldsp-ldc-chart-bars{display:flex;justify-content:space-around;align-items:flex-end;height:80px;gap:4px;margin-bottom:8px}
+    .ldsp-ldc-chart-col{display:flex;flex-direction:column;align-items:center;flex:1;height:100%}
+    .ldsp-ldc-chart-bar-group{flex:1;display:flex;align-items:flex-end;gap:2px;width:100%}
+    .ldsp-ldc-chart-bar{width:45%;min-height:2px;border-radius:2px 2px 0 0;transition:height .3s}
+    .ldsp-ldc-chart-bar.income{background:linear-gradient(to top,var(--ok),rgba(74,222,128,.6))}
+    .ldsp-ldc-chart-bar.expense{background:linear-gradient(to top,var(--err),rgba(248,113,113,.6))}
+    .ldsp-ldc-chart-label{font-size:9px;color:var(--txt-mut);margin-top:4px}
+    .ldsp-ldc-chart-legend{display:flex;justify-content:center;gap:16px;padding-top:8px;border-top:1px solid var(--border)}
+    .ldsp-ldc-legend-item{font-size:9px;color:var(--txt-sec);display:flex;align-items:center;gap:4px}
+    .ldsp-ldc-legend-item i{width:8px;height:8px;border-radius:2px}
+    .ldsp-ldc-legend-item.income i{background:var(--ok)}
+    .ldsp-ldc-legend-item.expense i{background:var(--err)}
+    .ldsp-ldc-footer{display:flex;justify-content:center;padding-top:8px;border-top:1px solid var(--border)}
+    .ldsp-ldc-update-time{font-size:9px;color:var(--txt-mut)}
+    .ldsp-ldc-empty{text-align:center;padding:16px;color:var(--txt-mut);font-size:11px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md)}
+    /* 支持页面 */
+    .ldsp-ldc-support{display:flex;flex-direction:column;gap:14px;flex:1}
+    .ldsp-ldc-support-header{text-align:center;padding:12px 10px;background:linear-gradient(135deg,rgba(239,68,68,.06),rgba(249,115,22,.04),rgba(107,140,239,.06));border-radius:var(--r-md);border:1px solid rgba(239,68,68,.1)}
+    .ldsp-ldc-support-title{font-size:15px;font-weight:700;color:var(--txt);margin-bottom:6px;display:flex;align-items:center;justify-content:center;gap:8px}
+    .ldsp-ldc-support-desc{font-size:11px;color:var(--txt-sec);line-height:1.6}
+    .ldsp-ldc-support-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .ldsp-ldc-support-card{display:flex;flex-direction:column;align-items:center;padding:18px 14px 16px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);cursor:pointer;transition:all .3s cubic-bezier(.4,0,.2,1);text-decoration:none!important;position:relative;overflow:hidden}
+    .ldsp-ldc-support-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,transparent,var(--card-accent,var(--border)),transparent);transition:all .3s cubic-bezier(.4,0,.2,1)}
+    .ldsp-ldc-support-card::after{content:'';position:absolute;inset:0;background:radial-gradient(circle at 50% 0%,var(--card-accent,transparent) 0%,transparent 70%);opacity:0;transition:opacity .3s}
+    .ldsp-ldc-support-card:hover{border-color:var(--card-accent,var(--accent));transform:translateY(-4px) scale(1.02);box-shadow:0 12px 28px var(--card-glow,rgba(0,0,0,.15))}
+    .ldsp-ldc-support-card:hover::before{height:4px;background:var(--card-accent,var(--accent))}
+    .ldsp-ldc-support-card:hover::after{opacity:.08}
+    .ldsp-ldc-support-card:active{transform:translateY(-2px) scale(1.01);transition-duration:.1s}
+    .ldsp-ldc-support-card.tier-1{--card-accent:#10b981;--card-glow:rgba(16,185,129,.25)}
+    .ldsp-ldc-support-card.tier-2{--card-accent:#3b82f6;--card-glow:rgba(59,130,246,.25)}
+    .ldsp-ldc-support-card.tier-3{--card-accent:#f59e0b;--card-glow:rgba(245,158,11,.28)}
+    .ldsp-ldc-support-card.tier-4{--card-accent:#ef4444;--card-glow:rgba(239,68,68,.28);background:linear-gradient(145deg,var(--bg-card),rgba(239,68,68,.05))}
+    .ldsp-ldc-support-card.tier-3::before,.ldsp-ldc-support-card.tier-4::before{animation:ldsp-shimmer 2s ease-in-out infinite}
+    @keyframes ldsp-shimmer{0%,100%{opacity:.8}50%{opacity:1}}
+    .ldsp-ldc-support-icon{font-size:34px;margin-bottom:10px;filter:drop-shadow(0 3px 8px var(--card-glow,rgba(0,0,0,.1)));transition:transform .3s cubic-bezier(.4,0,.2,1),filter .3s;will-change:transform}
+    .ldsp-ldc-support-card:hover .ldsp-ldc-support-icon{animation:ldsp-icon-breath 1.8s cubic-bezier(.45,.05,.55,.95) infinite}
+    @keyframes ldsp-icon-breath{0%,100%{transform:scale(1.12) translateY(-2px)}50%{transform:scale(1.18) translateY(-4px)}}
+    .ldsp-ldc-support-name{font-size:12px;font-weight:600;color:var(--txt);margin-bottom:8px;transition:color .3s;letter-spacing:.3px}
+    .ldsp-ldc-support-card:hover .ldsp-ldc-support-name{color:var(--card-accent,var(--txt))}
+    .ldsp-ldc-support-amount{font-size:20px;font-weight:700;color:var(--card-accent,var(--accent));display:flex;align-items:baseline;gap:4px;text-shadow:0 1px 2px var(--card-glow,transparent)}
+    .ldsp-ldc-support-amount span{font-size:11px;font-weight:500;color:var(--txt-mut);text-shadow:none}
+    .ldsp-ldc-support-badge{position:absolute;top:8px;right:8px;padding:3px 8px;background:linear-gradient(135deg,var(--card-accent,var(--accent)),color-mix(in srgb,var(--card-accent,var(--accent)) 70%,#000));color:#fff;font-size:9px;font-weight:600;border-radius:10px;box-shadow:0 2px 8px var(--card-glow,rgba(0,0,0,.2));animation:ldsp-badge-float 3s ease-in-out infinite;transform-origin:center center;transition:all .2s cubic-bezier(.4,0,.2,1)}
+    .ldsp-ldc-support-card:hover .ldsp-ldc-support-badge{animation:ldsp-badge-wiggle .5s ease-in-out;transform:scale(1.1);box-shadow:0 4px 12px var(--card-glow,rgba(0,0,0,.3))}
+    @keyframes ldsp-badge-float{0%,100%{transform:translateY(0) rotate(0deg)}25%{transform:translateY(-2px) rotate(2deg)}75%{transform:translateY(1px) rotate(-1deg)}}
+    @keyframes ldsp-badge-wiggle{0%{transform:scale(1.1) rotate(0deg)}15%{transform:scale(1.15) rotate(-12deg)}30%{transform:scale(1.12) rotate(10deg)}45%{transform:scale(1.15) rotate(-8deg)}60%{transform:scale(1.12) rotate(6deg)}75%{transform:scale(1.13) rotate(-3deg)}100%{transform:scale(1.1) rotate(0deg)}}
+    .ldsp-ldc-support-footer{text-align:center;padding:12px;background:linear-gradient(135deg,var(--bg-card),var(--bg-el));border:1px solid var(--border);border-radius:var(--r-md)}
+    .ldsp-ldc-support-footer-text{font-size:10px;color:var(--txt-mut);line-height:1.7}
+    .ldsp-ldc-support-footer-text em{font-style:normal;color:var(--accent);font-weight:600}
+    .ldsp-ldc-support-heart{display:inline-block;animation:ldsp-heartbeat 1.2s ease-in-out infinite;filter:drop-shadow(0 0 4px rgba(239,68,68,.4))}
+    @keyframes ldsp-heartbeat{0%,100%{transform:scale(1)}14%{transform:scale(1.2)}28%{transform:scale(1)}42%{transform:scale(1.15)}70%{transform:scale(1)}}
+    /* GitHub Star 卡片 - 深色模式（默认） */
+    .ldsp-github-star-card{display:flex;align-items:center;gap:14px;padding:14px 16px;background:linear-gradient(135deg,#161b22 0%,#0d1117 100%);border:1px solid #30363d;border-radius:var(--r-md);cursor:pointer;text-decoration:none;transition:all .25s cubic-bezier(.4,0,.2,1);position:relative;overflow:hidden}
+    .ldsp-github-star-card::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,rgba(88,166,255,.1) 0%,rgba(255,215,0,.1) 100%);opacity:0;transition:opacity .25s}
+    .ldsp-github-star-card:hover{border-color:#58a6ff;transform:translateY(-2px);box-shadow:0 8px 24px rgba(88,166,255,.2)}
+    .ldsp-github-star-card:hover::before{opacity:1}
+    .ldsp-github-star-card:hover .ldsp-github-icon{transform:rotate(-8deg) scale(1.08)}
+    .ldsp-github-star-card:hover .ldsp-github-star-icon{animation:ldsp-star-bounce .6s ease-in-out}
+    .ldsp-github-icon-wrap{flex-shrink:0;width:36px;height:36px;display:flex;align-items:center;justify-content:center}
+    .ldsp-github-icon{width:32px;height:32px;fill:#f0f6fc;transition:all .25s}
+    .ldsp-github-star-icon{font-size:16px;line-height:1;filter:drop-shadow(0 0 4px rgba(255,215,0,.4))}
+    .ldsp-github-content{flex:1;min-width:0;position:relative;z-index:1}
+    .ldsp-github-title{font-size:13px;font-weight:600;color:#f0f6fc;margin-bottom:3px;display:flex;align-items:center;gap:6px}
+    .ldsp-github-desc{font-size:10px;color:#8b949e;line-height:1.5}
+    .ldsp-github-arrow{flex-shrink:0;font-size:16px;color:#58a6ff;transition:all .25s;opacity:.7}
+    .ldsp-github-star-card:hover .ldsp-github-arrow{transform:translateX(4px);opacity:1}
+    @keyframes ldsp-star-bounce{0%,100%{transform:scale(1) rotate(0deg)}25%{transform:scale(1.3) rotate(-15deg)}50%{transform:scale(1) rotate(10deg)}75%{transform:scale(1.15) rotate(-5deg)}}
+    /* GitHub Star 卡片 - 浅色模式 */
+    #ldsp-panel.light .ldsp-github-star-card{background:linear-gradient(135deg,#ffffff 0%,#f6f8fa 100%);border-color:#d0d7de}
+    #ldsp-panel.light .ldsp-github-star-card:hover{border-color:#0969da;box-shadow:0 8px 24px rgba(9,105,218,.15)}
+    #ldsp-panel.light .ldsp-github-star-card::before{background:linear-gradient(135deg,rgba(88,166,255,.08) 0%,rgba(255,215,0,.08) 100%)}
+    #ldsp-panel.light .ldsp-github-icon{fill:#24292f}
+    #ldsp-panel.light .ldsp-github-title{color:#24292f}
+    #ldsp-panel.light .ldsp-github-desc{color:#656d76}
+    #ldsp-panel.light .ldsp-github-arrow{color:#0969da}
+    #ldsp-panel.light .ldsp-github-star-icon{filter:drop-shadow(0 1px 2px rgba(0,0,0,.1))}
+    /* 交易记录 */
+    /* 交易筛选器 */
+    .ldsp-ldc-filter-section{display:flex;flex-direction:column;gap:8px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+    .ldsp-ldc-filter-row{display:flex;align-items:flex-start;gap:8px}
+    .ldsp-ldc-filter-label{font-size:10px;color:var(--txt-mut);min-width:28px;padding-top:5px;flex-shrink:0}
+    .ldsp-ldc-filter-chips{display:flex;gap:5px;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+    .ldsp-ldc-filter-chips::-webkit-scrollbar{display:none}
+    .ldsp-ldc-filter-chips-wrap{flex-wrap:wrap}
+    .ldsp-ldc-filter-chip{padding:5px 10px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:10px;color:var(--txt-sec);cursor:pointer;transition:all .15s;white-space:nowrap;flex-shrink:0;-webkit-tap-highlight-color:transparent}
+    .ldsp-ldc-filter-chip:hover{border-color:var(--txt-mut);color:var(--txt)}
+    .ldsp-ldc-filter-chip.active{background:rgba(107,140,239,.12);border-color:var(--accent);color:var(--accent);font-weight:600}
+    /* 交易列表 */
+    .ldsp-ldc-trans-content{display:flex;flex-direction:column;gap:8px;flex:1;min-height:0}
+    .ldsp-ldc-trans-summary{font-size:10px;color:var(--txt-mut)}
+    .ldsp-ldc-trans-list{display:flex;flex-direction:column;gap:6px;overflow-y:auto;flex:1}
+    .ldsp-ldc-trans-item{display:flex;align-items:center;gap:10px;padding:10px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);cursor:pointer;transition:all .15s;-webkit-tap-highlight-color:transparent;flex-shrink:0}
+    .ldsp-ldc-trans-item:hover{border-color:var(--accent);background:var(--bg-hover)}
+    .ldsp-ldc-trans-item:active{transform:scale(.98)}
+    .ldsp-ldc-trans-icon{font-size:16px;flex-shrink:0;width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:var(--bg-el);border-radius:6px}
+    .ldsp-ldc-trans-info{flex:1;min-width:0}
+    .ldsp-ldc-trans-name{font-size:12px;font-weight:600;color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ldsp-ldc-trans-meta{font-size:10px;color:var(--txt-mut);margin-top:2px;display:flex;gap:6px;align-items:center}
+    .ldsp-ldc-trans-type{padding:2px 6px;border-radius:3px;font-size:9px;font-weight:500}
+    /* 交易类型颜色 - 收益绿/消耗红/转移蓝/社区紫/在线青 */
+    .ldsp-ldc-trans-type.type-receive{background:rgba(74,222,128,.15);color:#22c55e}
+    .ldsp-ldc-trans-type.type-payment{background:rgba(248,113,113,.15);color:#ef4444}
+    .ldsp-ldc-trans-type.type-transfer{background:rgba(96,165,250,.15);color:#3b82f6}
+    .ldsp-ldc-trans-type.type-community{background:rgba(192,132,252,.15);color:#a855f7}
+    .ldsp-ldc-trans-type.type-online{background:rgba(45,212,191,.15);color:#14b8a6}
+    .ldsp-ldc-trans-type.type-default{background:var(--bg-el);color:var(--txt-sec)}
+    .ldsp-ldc-trans-amount{font-size:14px;font-weight:700;flex-shrink:0}
+    .ldsp-ldc-trans-amount.income{color:var(--ok)}
+    .ldsp-ldc-trans-amount.expense{color:var(--err)}
+    .ldsp-ldc-load-more{width:100%;padding:10px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-md);font-size:11px;font-weight:600;color:var(--txt-sec);cursor:pointer;transition:all .15s;flex-shrink:0;display:flex;align-items:center;justify-content:center;gap:6px}
+    .ldsp-ldc-load-more:hover{background:var(--bg-hover);border-color:var(--accent);color:var(--accent)}
+    .ldsp-ldc-load-more:disabled{opacity:.6;cursor:not-allowed}
+    .ldsp-ldc-load-more.loading{pointer-events:none}
+    .ldsp-ldc-empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:30px 20px;flex:1;background:var(--bg-card);border:1px dashed var(--border);border-radius:var(--r-md)}
+    .ldsp-ldc-empty-icon{font-size:36px;margin-bottom:10px;opacity:.8}
+    .ldsp-ldc-empty-text{font-size:12px;color:var(--txt-mut);text-align:center}
+    .ldsp-ldc-empty-hint{font-size:10px;color:var(--txt-mut);margin-top:6px;opacity:.7}
+    /* 交易详情 */
+    .ldsp-ldc-detail{display:flex;flex-direction:column;gap:12px}
+    .ldsp-ldc-detail-header{display:flex;align-items:center;gap:10px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+    .ldsp-ldc-back-btn{padding:6px 10px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:11px;color:var(--txt-sec);cursor:pointer;transition:all .15s}
+    .ldsp-ldc-back-btn:hover{background:var(--bg-hover);border-color:var(--accent);color:var(--accent)}
+    .ldsp-ldc-detail-header span{font-size:13px;font-weight:600;color:var(--txt)}
+    .ldsp-ldc-detail-amount{text-align:center;padding:16px;border-radius:var(--r-md)}
+    .ldsp-ldc-detail-amount.income-bg{background:linear-gradient(135deg,rgba(74,222,128,.08),rgba(34,197,94,.12));border:1px solid rgba(74,222,128,.2)}
+    .ldsp-ldc-detail-amount.expense-bg{background:linear-gradient(135deg,rgba(248,113,113,.08),rgba(239,68,68,.12));border:1px solid rgba(248,113,113,.2)}
+    .ldsp-ldc-detail-amount-value{font-size:28px;font-weight:700}
+    .ldsp-ldc-detail-amount-value.income{color:var(--ok)}
+    .ldsp-ldc-detail-amount-value.expense{color:var(--err)}
+    .ldsp-ldc-detail-amount-label{font-size:11px;color:var(--txt-mut);margin-top:4px}
+    .ldsp-ldc-detail-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden}
+    .ldsp-ldc-detail-row{display:flex;justify-content:space-between;align-items:flex-start;padding:10px 12px;border-bottom:1px solid var(--border)}
+    .ldsp-ldc-detail-row:last-child{border-bottom:none}
+    .ldsp-ldc-detail-row .label{font-size:11px;color:var(--txt-mut);flex-shrink:0}
+    .ldsp-ldc-detail-row .value{font-size:11px;color:var(--txt);text-align:right;word-break:break-all;margin-left:10px}
+    .ldsp-ldc-detail-row .value.mono{font-family:monospace;font-size:10px}
+    .ldsp-ldc-detail-row .value.status-success{color:var(--ok);font-weight:600}
+    .ldsp-ldc-detail-row .value.link{color:var(--accent);text-decoration:none;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+    .ldsp-ldc-detail-row .value.link:hover{text-decoration:underline}
+    /* LDC/工单/吃瓜 响应式适配 */
+    @media (max-width:380px){.ldsp-ldc-header,.ldsp-ticket-header,.ldsp-melon-header{padding:8px 10px}.ldsp-ldc-title,.ldsp-ticket-title,.ldsp-melon-title{font-size:12px}.ldsp-ldc-tabs{}.ldsp-ldc-tab{padding:8px 6px;font-size:10px}.ldsp-ldc-body,.ldsp-ticket-body,.ldsp-melon-body{padding:10px;gap:8px}.ldsp-ldc-balance-card{padding:12px}.ldsp-ldc-balance-value{font-size:24px}.ldsp-ldc-stat-card{padding:10px;gap:8px}.ldsp-ldc-stat-icon{font-size:16px}.ldsp-ldc-stat-num{font-size:13px}.ldsp-ldc-chart-bars{height:60px}.ldsp-ldc-filter-section{gap:6px;padding-bottom:8px}.ldsp-ldc-filter-label{font-size:9px;min-width:24px}.ldsp-ldc-filter-chip{padding:4px 8px;font-size:9px}.ldsp-ldc-trans-item{padding:8px}.ldsp-ldc-trans-icon{font-size:14px;width:22px;height:22px}.ldsp-ldc-trans-name{font-size:11px}.ldsp-ldc-trans-amount{font-size:13px}.ldsp-ticket-tabs{padding:0 8px}.ldsp-ticket-tab,.ldsp-melon-tab{padding:6px 10px;font-size:9px}.ldsp-ldc-support{gap:12px}.ldsp-ldc-support-header{padding:10px 8px}.ldsp-ldc-support-title{font-size:13px}.ldsp-ldc-support-grid{gap:8px}.ldsp-ldc-support-card{padding:14px 10px}.ldsp-ldc-support-icon{font-size:28px;margin-bottom:8px}.ldsp-ldc-support-amount{font-size:16px}}
+    @media (max-width:320px){.ldsp-ldc-header,.ldsp-ticket-header,.ldsp-melon-header{padding:6px 8px}.ldsp-ldc-title,.ldsp-ticket-title,.ldsp-melon-title{font-size:11px;gap:4px}.ldsp-ldc-header-actions{gap:5px}.ldsp-ldc-link{font-size:9px!important}.ldsp-ldc-refresh,.ldsp-ldc-close,.ldsp-ticket-close,.ldsp-melon-close{width:22px;height:22px;font-size:10px}.ldsp-ldc-refresh svg{width:10px;height:10px}.ldsp-ldc-tab{padding:6px 4px;font-size:9px}.ldsp-ldc-body,.ldsp-ticket-body,.ldsp-melon-body{padding:8px;gap:6px}.ldsp-ldc-balance-card{padding:10px}.ldsp-ldc-balance-value{font-size:20px}.ldsp-ldc-balance-sub{font-size:9px}.ldsp-ldc-stats-grid{gap:6px}.ldsp-ldc-stat-card{padding:8px;gap:6px}.ldsp-ldc-stat-icon{font-size:14px}.ldsp-ldc-stat-label{font-size:9px}.ldsp-ldc-stat-num{font-size:12px}.ldsp-ldc-section-title{font-size:10px}.ldsp-ldc-chart{padding:8px}.ldsp-ldc-chart-bars{height:50px}.ldsp-ldc-chart-label{font-size:8px}.ldsp-ldc-filter-section{gap:5px;padding-bottom:6px}.ldsp-ldc-filter-row{gap:6px}.ldsp-ldc-filter-label{font-size:8px;min-width:20px;padding-top:4px}.ldsp-ldc-filter-chip{padding:3px 6px;font-size:8px}.ldsp-ldc-trans-content{gap:6px}.ldsp-ldc-trans-summary{font-size:9px}.ldsp-ldc-trans-list{gap:4px}.ldsp-ldc-trans-item{padding:6px 8px;gap:6px}.ldsp-ldc-trans-icon{font-size:12px;width:20px;height:20px;border-radius:4px}.ldsp-ldc-trans-name{font-size:10px}.ldsp-ldc-trans-meta{font-size:8px;gap:4px}.ldsp-ldc-trans-type{font-size:8px;padding:1px 4px}.ldsp-ldc-trans-amount{font-size:11px}.ldsp-ldc-detail-amount-value{font-size:22px}.ldsp-ldc-detail-row{padding:8px 10px}.ldsp-ldc-detail-row .label,.ldsp-ldc-detail-row .value{font-size:10px}.ldsp-ticket-tabs{padding:0 6px}.ldsp-ticket-tab,.ldsp-melon-tab{padding:5px 8px;font-size:8px}.ldsp-ticket-item{padding:8px}.ldsp-ticket-item-title{font-size:10px}.ldsp-ticket-item-type,.ldsp-ticket-item-meta{font-size:8px}.ldsp-ldc-support{gap:8px}.ldsp-ldc-support-header{padding:8px 6px}.ldsp-ldc-support-title{font-size:12px;gap:5px}.ldsp-ldc-support-desc{font-size:9px}.ldsp-ldc-support-grid{gap:6px}.ldsp-ldc-support-card{padding:12px 8px}.ldsp-ldc-support-icon{font-size:24px;margin-bottom:6px}.ldsp-ldc-support-name{font-size:10px;margin-bottom:4px}.ldsp-ldc-support-amount{font-size:14px}.ldsp-ldc-support-badge{font-size:8px;padding:2px 5px;top:6px;right:6px}.ldsp-ldc-support-footer{padding:8px}.ldsp-ldc-support-footer-text{font-size:9px}}
+    @media (max-height:550px){.ldsp-ldc-body,.ldsp-ticket-body,.ldsp-melon-body{padding:8px;gap:6px}.ldsp-ldc-balance-card{padding:10px}.ldsp-ldc-balance-value{font-size:22px}.ldsp-ldc-stats-grid{gap:6px}.ldsp-ldc-stat-card{padding:8px}.ldsp-ldc-chart-bars{height:50px}.ldsp-ldc-section{gap:6px}.ldsp-ldc-filter-section{gap:5px;padding-bottom:6px}.ldsp-ldc-filter-chip{padding:4px 7px}.ldsp-ldc-support{gap:10px}.ldsp-ldc-support-header{padding:10px 8px}.ldsp-ldc-support-grid{gap:8px}.ldsp-ldc-support-card{padding:12px 8px}.ldsp-ldc-support-icon{font-size:26px;margin-bottom:6px}.ldsp-ldc-support-amount{font-size:16px}}
+    @media (max-height:450px){.ldsp-ldc-body{padding:6px;gap:5px}.ldsp-ldc-balance-card{padding:8px}.ldsp-ldc-balance-value{font-size:18px}.ldsp-ldc-balance-label,.ldsp-ldc-balance-sub{font-size:9px}.ldsp-ldc-stats-grid{gap:4px}.ldsp-ldc-stat-card{padding:6px}.ldsp-ldc-stat-icon{font-size:12px}.ldsp-ldc-stat-num{font-size:11px}.ldsp-ldc-chart{padding:6px}.ldsp-ldc-chart-bars{height:40px}.ldsp-ldc-section{gap:4px}.ldsp-ldc-filter-section{gap:4px;padding-bottom:5px}.ldsp-ldc-filter-row{gap:4px}.ldsp-ldc-filter-chip{padding:3px 5px;font-size:8px}.ldsp-ldc-trans-item{padding:5px 6px}.ldsp-ldc-footer{padding-top:6px}.ldsp-ldc-support-header{padding:4px 0}.ldsp-ldc-support-title{font-size:12px}.ldsp-ldc-support-desc{font-size:10px}.ldsp-ldc-support-card{padding:8px 6px}.ldsp-ldc-support-icon{font-size:18px;margin-bottom:2px}.ldsp-ldc-support-name{font-size:10px}.ldsp-ldc-support-amount{font-size:12px}.ldsp-ldc-support-footer{padding:6px}.ldsp-ldc-support-footer-text{font-size:9px}}
+    .ldsp-melon-overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--bg);border-radius:0 0 var(--r-lg) var(--r-lg);z-index:10;display:none;flex-direction:column;overflow:hidden}
+    .ldsp-melon-overlay.show{display:flex}
+    .ldsp-melon-header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg-card);border-bottom:1px solid var(--border);flex-shrink:0}
+    .ldsp-melon-title{font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;color:var(--txt)}
+    .ldsp-melon-header-actions{display:flex;align-items:center;gap:6px}
+    .ldsp-melon-refresh{padding:4px 10px;display:flex;align-items:center;justify-content:center;gap:4px;background:linear-gradient(135deg,rgba(74,222,128,.08),rgba(34,197,94,.12));border:1px solid rgba(74,222,128,.2);border-radius:6px;font-size:10px;color:#22c55e;cursor:pointer;transition:all .15s;white-space:nowrap}
+    .ldsp-melon-refresh:hover{background:linear-gradient(135deg,rgba(74,222,128,.15),rgba(34,197,94,.2));border-color:rgba(74,222,128,.4);color:#16a34a}
+    .ldsp-melon-refresh svg{flex-shrink:0}
+    .ldsp-melon-close{width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:var(--bg-el);border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--txt-sec);transition:background .15s,color .15s;cursor:pointer}
+    .ldsp-melon-close:hover{background:var(--err-bg);color:var(--err);border-color:var(--err)}
+    .ldsp-melon-tabs{display:flex;border-bottom:1px solid var(--border);padding:0 10px;background:var(--bg-card);flex-shrink:0}
+    .ldsp-melon-tab{padding:8px 12px;font-size:10px;font-weight:600;color:var(--txt-mut);border-bottom:2px solid transparent;transition:color .15s,border-color .15s;cursor:pointer}
+    .ldsp-melon-tab.active{color:var(--accent);border-color:var(--accent)}
+    .ldsp-melon-tab:hover:not(.active){color:var(--txt-sec)}
+    .ldsp-melon-body{flex:1;overflow-y:auto;padding:12px;background:var(--bg);display:flex;flex-direction:column;gap:10px}
+    .ldsp-melon-info{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px;font-size:11px}
+    .ldsp-melon-info-title{font-weight:600;color:var(--txt);margin-bottom:6px;display:flex;align-items:center;gap:5px}
+    .ldsp-melon-info-row{display:flex;align-items:center;gap:6px;color:var(--txt-sec);font-size:10px;margin-top:4px}
+    .ldsp-melon-info-label{color:var(--txt-mut);min-width:50px}
+    .ldsp-melon-info-value{color:var(--txt);font-weight:500}
+    .ldsp-melon-range{display:flex;align-items:center;gap:8px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px;flex-wrap:wrap}
+    .ldsp-melon-range-label{font-size:10px;color:var(--txt-sec);white-space:nowrap}
+    .ldsp-melon-range-input{width:70px;padding:5px 8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:11px;color:var(--txt);text-align:center}
+    .ldsp-melon-range-input:focus{border-color:var(--accent);outline:none}
+    .ldsp-melon-range-sep{color:var(--txt-mut);font-size:10px}
+    .ldsp-melon-range-hint{font-size:9px;color:var(--txt-mut);margin-left:auto}
+    /* 模式选择器 - 卡片式设计 */
+    .ldsp-melon-mode-selector{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px}
+    .ldsp-melon-mode-label{font-size:10px;color:var(--txt-sec);margin-bottom:8px;display:block}
+    .ldsp-melon-mode-cards{display:flex;gap:8px}
+    .ldsp-melon-mode-card{flex:1;display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-el);border:2px solid var(--border);border-radius:var(--r-md);cursor:pointer;transition:all .2s}
+    .ldsp-melon-mode-card:hover{border-color:var(--txt-mut);background:var(--bg)}
+    .ldsp-melon-mode-card.active{border-color:var(--accent);background:rgba(107,140,239,.08)}
+    .ldsp-melon-mode-card input{display:none}
+    .ldsp-melon-mode-card-icon{font-size:20px;flex-shrink:0}
+    .ldsp-melon-mode-card-content{flex:1;min-width:0}
+    .ldsp-melon-mode-card-title{font-size:11px;font-weight:600;color:var(--txt);margin-bottom:2px}
+    .ldsp-melon-mode-card-desc{font-size:9px;color:var(--txt-mut)}
+    .ldsp-melon-mode-card.active .ldsp-melon-mode-card-title{color:var(--accent)}
+    .ldsp-melon-actions{display:flex;gap:8px}
+    .ldsp-melon-btn-summarize{flex:1;padding:10px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;border:none;border-radius:var(--r-sm);font-size:12px;font-weight:600;cursor:pointer;transition:opacity .15s,transform .2s,box-shadow .2s;display:flex;align-items:center;justify-content:center;gap:6px}
+    .ldsp-melon-btn-summarize:hover{box-shadow:0 4px 16px rgba(34,197,94,.35);transform:translateY(-1px)}
+    .ldsp-melon-btn-summarize:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
+    .ldsp-melon-btn-summarize.loading{background:linear-gradient(135deg,#6b8cef,#5a7de0)}
+    /* 输出区域 */
+    .ldsp-melon-output-wrapper{display:flex;flex-direction:column;flex:1;min-height:0}
+    .ldsp-melon-output-header{display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:var(--bg-card);border:1px solid var(--border);border-bottom:none;border-radius:var(--r-md) var(--r-md) 0 0}
+    .ldsp-melon-output-title{font-size:10px;font-weight:600;color:var(--txt-sec)}
+    .ldsp-melon-output-actions{display:flex;gap:6px}
+    .ldsp-melon-resize-btn{display:flex;align-items:center;gap:4px;padding:4px 8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:10px;color:var(--txt-sec);cursor:pointer;transition:all .15s}
+    .ldsp-melon-resize-btn:hover{background:rgba(107,140,239,.1);border-color:var(--accent);color:var(--accent)}
+    .ldsp-melon-copy-btn{display:flex;align-items:center;gap:4px;padding:4px 8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:10px;color:var(--txt-sec);cursor:pointer;transition:all .15s}
+    .ldsp-melon-copy-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+    .ldsp-melon-output{flex:1;min-height:120px;max-height:200px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:12px;overflow-y:auto;font-size:11px;line-height:1.6;color:var(--txt);transition:max-height .3s ease}
+    .ldsp-melon-output.expanded{max-height:400px}
+    .ldsp-melon-output-header+.ldsp-melon-output{border-radius:0 0 var(--r-md) var(--r-md)}
+    .ldsp-melon-output:empty::before{content:'点击「立即吃瓜」获取帖子摘要...';color:var(--txt-mut);font-style:italic}
+    .ldsp-melon-output-content{min-height:20px}
+    .ldsp-melon-cursor{display:inline-block;color:var(--accent);animation:ldsp-blink 1s infinite}
+    @keyframes ldsp-blink{0%,50%{opacity:1}51%,100%{opacity:0}}
+    /* Markdown 渲染 */
+    .ldsp-melon-markdown{font-size:11px;line-height:1.7}
+    .ldsp-melon-markdown .ldsp-melon-p{margin:6px 0}
+    .ldsp-melon-markdown .ldsp-melon-h2,.ldsp-melon-markdown .ldsp-melon-h3{font-size:13px;font-weight:700;margin:12px 0 8px;color:var(--txt);border-bottom:1px solid var(--border);padding-bottom:4px}
+    .ldsp-melon-markdown .ldsp-melon-h4,.ldsp-melon-markdown .ldsp-melon-h5{font-size:12px;font-weight:600;margin:10px 0 6px;color:var(--txt)}
+    .ldsp-melon-markdown .ldsp-melon-ul,.ldsp-melon-markdown .ldsp-melon-ol{margin:6px 0;padding-left:18px}
+    .ldsp-melon-markdown .ldsp-melon-li,.ldsp-melon-markdown .ldsp-melon-oli{margin:3px 0}
+    .ldsp-melon-markdown .ldsp-melon-quote{margin:8px 0;padding:8px 12px;background:var(--bg-el);border-left:3px solid var(--accent);border-radius:0 var(--r-sm) var(--r-sm) 0;color:var(--txt-sec);font-style:italic}
+    .ldsp-melon-markdown strong{color:var(--accent);font-weight:600}
+    .ldsp-melon-markdown .ldsp-melon-inline-code{background:var(--bg-el);padding:2px 5px;border-radius:3px;font-family:monospace;font-size:10px}
+    .ldsp-melon-markdown .ldsp-melon-codeblock{background:var(--bg-el);padding:10px;border-radius:var(--r-sm);overflow-x:auto;margin:8px 0}
+    .ldsp-melon-markdown .ldsp-melon-codeblock code{background:none;padding:0;font-family:monospace;font-size:10px}
+    .ldsp-melon-markdown .ldsp-melon-hr{border:none;border-top:1px solid var(--border);margin:12px 0}
+    .ldsp-melon-markdown .ldsp-melon-link{color:var(--accent);text-decoration:none}
+    .ldsp-melon-markdown .ldsp-melon-link:hover{text-decoration:underline}
+    .ldsp-melon-output h1,.ldsp-melon-output h2,.ldsp-melon-output h3{font-size:13px;font-weight:700;margin:12px 0 8px;color:var(--txt);border-bottom:1px solid var(--border);padding-bottom:4px}
+    .ldsp-melon-output h1:first-child,.ldsp-melon-output h2:first-child,.ldsp-melon-output h3:first-child{margin-top:0}
+    .ldsp-melon-output h4,.ldsp-melon-output h5{font-size:12px;font-weight:600;margin:10px 0 6px;color:var(--txt)}
+    .ldsp-melon-output p{margin:6px 0}
+    .ldsp-melon-output ul,.ldsp-melon-output ol{margin:6px 0;padding-left:18px}
+    .ldsp-melon-output li{margin:3px 0}
+    .ldsp-melon-output blockquote{margin:8px 0;padding:8px 12px;background:var(--bg-el);border-left:3px solid var(--accent);border-radius:0 var(--r-sm) var(--r-sm) 0;color:var(--txt-sec);font-style:italic}
+    .ldsp-melon-output strong{color:var(--accent);font-weight:600}
+    .ldsp-melon-output code{background:var(--bg-el);padding:2px 5px;border-radius:3px;font-family:monospace;font-size:10px}
+    .ldsp-melon-output pre{background:var(--bg-el);padding:10px;border-radius:var(--r-sm);overflow-x:auto;margin:8px 0}
+    .ldsp-melon-output pre code{background:none;padding:0}
+    .ldsp-melon-output table{width:100%;border-collapse:collapse;margin:8px 0;font-size:10px}
+    .ldsp-melon-output th,.ldsp-melon-output td{border:1px solid var(--border);padding:6px 8px;text-align:left}
+    .ldsp-melon-output th{background:var(--bg-el);font-weight:600}
+    .ldsp-melon-output hr{border:none;border-top:1px solid var(--border);margin:12px 0}
+    .ldsp-melon-output a{color:var(--accent);text-decoration:none}
+    .ldsp-melon-output a:hover{text-decoration:underline}
+    .ldsp-melon-status{text-align:center;padding:20px;color:var(--txt-mut);font-size:11px}
+    .ldsp-melon-status-icon{font-size:24px;margin-bottom:8px}
+    .ldsp-melon-error{color:var(--err);background:var(--err-bg);padding:10px;border-radius:var(--r-sm);font-size:11px}
+    /* 历史记录 */
+    .ldsp-melon-history{display:flex;flex-direction:column;height:100%}
+    .ldsp-melon-history-header{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);margin-bottom:10px}
+    .ldsp-melon-history-header-left{display:flex;align-items:center;gap:8px}
+    .ldsp-melon-history-count{font-size:10px;color:var(--txt-mut)}
+    .ldsp-melon-history-storage-badge{font-size:9px;color:var(--txt-mut);background:var(--bg-el);padding:2px 6px;border-radius:10px}
+    .ldsp-melon-history-storage-hint{font-size:10px;color:var(--txt-mut);margin-top:8px}
+    .ldsp-melon-history-clear-all{padding:4px 8px;background:var(--err-bg);border:1px solid rgba(239,68,68,.2);border-radius:var(--r-sm);font-size:9px;color:var(--err);cursor:pointer;transition:all .15s}
+    .ldsp-melon-history-clear-all:hover{background:var(--err);color:#fff}
+    .ldsp-melon-history-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
+    .ldsp-melon-history-item{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px;transition:border-color .15s}
+    .ldsp-melon-history-item:hover{border-color:var(--accent)}
+    .ldsp-melon-history-item-header{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:6px}
+    .ldsp-melon-history-item-title{font-size:11px;font-weight:600;color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+    .ldsp-melon-history-item-meta{display:flex;align-items:center;gap:6px;flex-shrink:0}
+    .ldsp-melon-history-mode{font-size:9px;padding:2px 6px;border-radius:10px;font-weight:500}
+    .ldsp-melon-history-mode.brief{background:rgba(59,130,246,.1);color:#3b82f6}
+    .ldsp-melon-history-mode.detailed{background:rgba(34,197,94,.1);color:#22c55e}
+    .ldsp-melon-history-date{font-size:9px;color:var(--txt-mut)}
+    .ldsp-melon-history-item-preview{font-size:10px;color:var(--txt-sec);line-height:1.5;margin-bottom:8px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+    .ldsp-melon-history-item-actions{display:flex;gap:6px}
+    .ldsp-melon-history-btn{padding:4px 8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:9px;color:var(--txt-sec);cursor:pointer;transition:all .15s}
+    .ldsp-melon-history-btn:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+    .ldsp-melon-history-delete:hover{background:var(--err);border-color:var(--err)}
+    .ldsp-melon-history-empty{text-align:center;padding:40px 20px;color:var(--txt-mut)}
+    .ldsp-melon-history-empty-icon{font-size:36px;margin-bottom:10px}
+    .ldsp-melon-history-empty-text{font-size:12px;font-weight:500;margin-bottom:4px}
+    .ldsp-melon-history-empty-hint{font-size:10px;color:var(--txt-mut)}
+    .ldsp-melon-history-detail{display:flex;flex-direction:column;height:100%}
+    .ldsp-melon-history-detail-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+    .ldsp-melon-history-detail-actions{display:flex;gap:6px}
+    .ldsp-melon-history-back{padding:6px 12px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:10px;color:var(--txt-sec);cursor:pointer;transition:all .15s}
+    .ldsp-melon-history-back:hover{background:var(--bg-card);border-color:var(--accent);color:var(--accent)}
+    .ldsp-melon-history-expand-btn{padding:6px 12px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:10px;color:var(--accent);cursor:pointer;transition:all .15s}
+    .ldsp-melon-history-expand-btn:hover{background:rgba(107,140,239,.1);border-color:var(--accent)}
+    .ldsp-melon-history-copy-all{padding:6px 12px;background:var(--accent);border:none;border-radius:var(--r-sm);font-size:10px;color:#fff;cursor:pointer;transition:opacity .15s}
+    .ldsp-melon-history-copy-all:hover{opacity:.85}
+    .ldsp-melon-history-detail-info{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:10px;margin-bottom:10px}
+    .ldsp-melon-history-detail-title{font-size:12px;font-weight:600;color:var(--txt);margin-bottom:4px}
+    .ldsp-melon-history-detail-meta{font-size:10px;color:var(--txt-mut)}
+    .ldsp-melon-history-detail-content{flex:1;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:12px;overflow-y:auto;font-size:11px;line-height:1.6}
+    /* 设置页 */
+    .ldsp-melon-settings{display:flex;flex-direction:column;gap:12px}
+    .ldsp-melon-setting-group{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);padding:12px}
+    .ldsp-melon-setting-title{font-size:11px;font-weight:600;color:var(--txt);margin-bottom:10px;display:flex;align-items:center;gap:5px}
+    .ldsp-melon-setting-row{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+    .ldsp-melon-setting-row:last-child{margin-bottom:0}
+    .ldsp-melon-setting-label{font-size:10px;color:var(--txt-sec);display:flex;align-items:center;gap:4px}
+    .ldsp-melon-setting-input{padding:8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:11px;color:var(--txt)}
+    .ldsp-melon-setting-input:focus{border-color:var(--accent);outline:none}
+    .ldsp-melon-setting-input::placeholder{color:var(--txt-mut)}
+    .ldsp-melon-setting-input:disabled{background:var(--bg);color:var(--txt-mut);cursor:not-allowed}
+    .ldsp-melon-setting-actions{display:flex;gap:8px}
+    .ldsp-melon-setting-btn{flex:1;padding:10px 12px;background:var(--grad);color:#fff;border:none;border-radius:var(--r-sm);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s}
+    .ldsp-melon-setting-btn:hover{box-shadow:0 4px 12px rgba(107,140,239,.3);transform:translateY(-1px)}
+    .ldsp-melon-btn-edit{background:linear-gradient(135deg,#6b8cef,#5a7de0)}
+    .ldsp-melon-btn-save{background:linear-gradient(135deg,#22c55e,#16a34a)}
+    .ldsp-melon-btn-save:hover{box-shadow:0 4px 12px rgba(34,197,94,.35)}
+    .ldsp-melon-btn-prompt{background:linear-gradient(135deg,#6b8cef,#5a7de0)}
+    .ldsp-melon-setting-textarea{width:100%;padding:8px;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:10px;color:var(--txt);resize:vertical;min-height:60px;font-family:monospace;line-height:1.5}
+    .ldsp-melon-setting-textarea:focus{border-color:var(--accent);outline:none}
+    .ldsp-melon-setting-textarea::placeholder{color:var(--txt-mut);font-size:9px;white-space:pre-wrap}
+    .ldsp-melon-prompt-reset{margin-left:6px;cursor:pointer;color:var(--err);font-size:10px;opacity:.6;transition:all .15s}
+    .ldsp-melon-prompt-reset:hover{opacity:1;color:var(--err)}
+    .ldsp-melon-setting-prompt-actions{display:flex;gap:8px;margin-top:8px}
+    .ldsp-melon-setting-security{display:flex;align-items:center;gap:8px;padding:10px 12px;background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.15);border-radius:var(--r-md)}
+    .ldsp-melon-setting-security-icon{font-size:14px;flex-shrink:0}
+    .ldsp-melon-setting-security-text{font-size:10px;color:var(--txt-sec);line-height:1.4}
+    .ldsp-melon-setting-security-text strong{color:var(--ok);font-weight:600}
+    .ldsp-melon-setting-hint{font-size:9px;color:var(--txt-mut);margin-top:3px;line-height:1.4}
+    .ldsp-melon-setting-hint strong{color:var(--accent);font-weight:500}
+    .ldsp-melon-setting-subtitle{font-size:9px;color:var(--txt-mut);font-weight:400;margin-left:4px}
+    .ldsp-melon-setting-actions{margin-top:10px}
+    .ldsp-melon-prompt-status{font-size:9px;color:var(--txt-mut);margin-left:auto;font-weight:400}
+    .ldsp-melon-prompt-status.custom{color:var(--ok)}
+    .ldsp-melon-setting-danger{background:var(--err-bg);border-color:rgba(239,68,68,.15);padding:10px 12px}
+    .ldsp-melon-setting-danger .ldsp-melon-setting-title{color:var(--err);margin-bottom:2px}
+    .ldsp-melon-setting-danger-content{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .ldsp-melon-setting-danger-info{flex:1}
+    .ldsp-melon-setting-danger-desc{font-size:9px;color:var(--txt-sec)}
+    .ldsp-melon-setting-danger .ldsp-melon-setting-btn{flex:none;padding:8px 16px}
+    .ldsp-melon-btn-danger{background:linear-gradient(135deg,#ef4444,#dc2626) !important}
+    .ldsp-melon-btn-danger:hover{box-shadow:0 4px 12px rgba(239,68,68,.35) !important}
+    .ldsp-melon-warning{background:rgba(212,168,83,.1);border:1px solid rgba(212,168,83,.3);border-radius:var(--r-sm);padding:8px 10px;font-size:10px;color:var(--warn);margin-bottom:8px}
+    .ldsp-melon-not-topic{text-align:center;padding:40px 20px;color:var(--txt-mut)}
+    .ldsp-melon-not-topic-icon{font-size:36px;margin-bottom:10px}
+    .ldsp-melon-not-topic-text{font-size:12px;line-height:1.6}
+    .ldsp-melon-not-topic-hint{font-size:10px;color:var(--txt-mut);opacity:.7;margin-top:8px}
+    /* 全屏展开查看弹窗 - 独立的变量定义以支持body级挂载 */
+    .ldsp-melon-viewer-overlay{--bg:#12131a;--bg-card:rgba(24,26,36,.98);--bg-hover:rgba(38,42,56,.95);--bg-el:rgba(32,35,48,.88);--txt:#e4e6ed;--txt-sec:#9499ad;--txt-mut:#5d6275;--accent:#6b8cef;--border:rgba(255,255,255,.06);--r-sm:6px;--r-md:10px;--r-lg:14px;--err:#e07a8d;--err-bg:rgba(224,122,141,.12);position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:99999;display:flex;align-items:center;justify-content:center;animation:ldsp-viewer-fade-in .2s}
+    .ldsp-melon-viewer-overlay.light{--bg:rgba(250,251,254,.97);--bg-card:rgba(255,255,255,.98);--bg-hover:rgba(238,242,250,.96);--bg-el:rgba(245,247,252,.94);--txt:#1e2030;--txt-sec:#4a5068;--txt-mut:#8590a6;--accent:#5070d0;--border:rgba(0,0,0,.08);--err:#d45d6e;--err-bg:rgba(212,93,110,.08)}
+    @keyframes ldsp-viewer-fade-in{from{opacity:0}to{opacity:1}}
+    @keyframes ldsp-viewer-scale-in{from{transform:scale(.9);opacity:0}to{transform:scale(1);opacity:1}}
+    .ldsp-melon-viewer{position:absolute;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:0 20px 60px rgba(0,0,0,.5);display:flex;flex-direction:column;min-width:320px;min-height:240px;max-width:95vw;max-height:90vh;overflow:hidden;animation:ldsp-viewer-scale-in .2s}
+    .ldsp-melon-viewer-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:var(--bg);border-bottom:1px solid var(--border);cursor:move;user-select:none;flex-shrink:0}
+    .ldsp-melon-viewer-title{font-size:13px;font-weight:700;color:var(--txt);display:flex;align-items:center;gap:8px}
+    .ldsp-melon-viewer-title-icon{font-size:16px}
+    .ldsp-melon-viewer-actions{display:flex;gap:6px}
+    .ldsp-melon-viewer-btn{width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:var(--bg-el);border:1px solid var(--border);border-radius:var(--r-sm);font-size:12px;color:var(--txt-sec);cursor:pointer;transition:all .15s}
+    .ldsp-melon-viewer-btn:hover{background:var(--bg-hover);border-color:var(--accent);color:var(--accent)}
+    .ldsp-melon-viewer-close:hover{background:var(--err-bg);border-color:var(--err);color:var(--err)}
+    .ldsp-melon-viewer-body{flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--bg-card)}
+    .ldsp-melon-viewer-info{padding:12px 16px;background:var(--bg-el);border-bottom:1px solid var(--border);flex-shrink:0}
+    .ldsp-melon-viewer-topic-title{font-size:14px;font-weight:700;color:var(--txt);line-height:1.4;margin-bottom:6px}
+    .ldsp-melon-viewer-meta{display:flex;align-items:center;gap:8px;font-size:10px;color:var(--txt-mut)}
+    .ldsp-melon-viewer-mode{padding:2px 6px;border-radius:8px;font-weight:600;font-size:9px}
+    .ldsp-melon-viewer-mode.brief{background:rgba(34,197,94,.15);color:#22c55e}
+    .ldsp-melon-viewer-mode.detailed{background:rgba(107,140,239,.15);color:#6b8cef}
+    .ldsp-melon-viewer-content{flex:1;overflow-y:auto;padding:16px;background:var(--bg-card);color:var(--txt)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown{font-size:13px;line-height:1.7;color:var(--txt)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-p{color:var(--txt)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown strong{color:var(--accent)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-h2,.ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-h3,.ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-h4{color:var(--txt);border-color:var(--border)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-quote{background:var(--bg-el);border-left-color:var(--accent);color:var(--txt-sec)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-inline-code{background:var(--bg-el);color:var(--txt)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-codeblock{background:var(--bg);border:1px solid var(--border);color:var(--txt);padding:10px;border-radius:6px;overflow-x:auto}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-ul,.ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-ol{margin:8px 0;padding-left:20px}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-li,.ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-oli{margin:4px 0;color:var(--txt)}
+    .ldsp-melon-viewer-content .ldsp-melon-markdown .ldsp-melon-hr{border:none;border-top:1px solid var(--border);margin:12px 0}
+    .ldsp-melon-viewer-content::-webkit-scrollbar{width:6px}
+    .ldsp-melon-viewer-content::-webkit-scrollbar-track{background:var(--bg)}
+    .ldsp-melon-viewer-content::-webkit-scrollbar-thumb{background:var(--txt-mut);border-radius:3px}
+    .ldsp-melon-viewer-content::-webkit-scrollbar-thumb:hover{background:var(--txt-sec)}
+    /* 调整大小手柄 */
+    .ldsp-melon-resize-handle{position:absolute;background:transparent}
+    .ldsp-melon-resize-handle-e{top:10px;right:0;width:6px;height:calc(100% - 20px);cursor:e-resize}
+    .ldsp-melon-resize-handle-s{bottom:0;left:10px;width:calc(100% - 20px);height:6px;cursor:s-resize}
+    .ldsp-melon-resize-handle-se{bottom:0;right:0;width:16px;height:16px;cursor:se-resize}
+    .ldsp-melon-resize-handle-se::before{content:'';position:absolute;right:3px;bottom:3px;width:8px;height:8px;border-right:2px solid var(--txt-mut);border-bottom:2px solid var(--txt-mut);opacity:.5}
+    .ldsp-melon-resize-handle-w{top:10px;left:0;width:6px;height:calc(100% - 20px);cursor:w-resize}
+    .ldsp-melon-resize-handle-n{top:0;left:10px;width:calc(100% - 20px);height:6px;cursor:n-resize}
+    .ldsp-melon-resize-handle-nw{top:0;left:0;width:16px;height:16px;cursor:nw-resize}
+    .ldsp-melon-resize-handle-ne{top:0;right:0;width:16px;height:16px;cursor:ne-resize}
+    .ldsp-melon-resize-handle-sw{bottom:0;left:0;width:16px;height:16px;cursor:sw-resize}
+    /* 自定义确认对话框 */
+    .ldsp-melon-confirm-dialog{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:100;animation:ldsp-fade-in .15s}
+    .ldsp-melon-confirm-content{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-lg);padding:20px;width:85%;max-width:280px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.2);animation:ldsp-scale-in .2s}
+    @keyframes ldsp-fade-in{from{opacity:0}to{opacity:1}}
+    @keyframes ldsp-scale-in{from{transform:scale(.9);opacity:0}to{transform:scale(1);opacity:1}}
+    .ldsp-melon-confirm-icon{font-size:32px;margin-bottom:12px}
+    .ldsp-melon-confirm-message{font-size:12px;color:var(--txt);line-height:1.6;margin-bottom:16px}
+    .ldsp-melon-confirm-actions{display:flex;gap:10px}
+    .ldsp-melon-confirm-btn{flex:1;padding:10px 16px;border:none;border-radius:var(--r-sm);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s}
+    .ldsp-melon-confirm-cancel{background:var(--bg-el);color:var(--txt-sec);border:1px solid var(--border)}
+    .ldsp-melon-confirm-cancel:hover{background:var(--bg);border-color:var(--txt-mut)}
+    .ldsp-melon-confirm-ok{background:var(--err);color:#fff}
+    .ldsp-melon-confirm-ok:hover{background:#dc2626;box-shadow:0 4px 12px rgba(239,68,68,.3)}
+    .ldsp-user-meta{display:flex;align-items:center;flex-wrap:wrap;margin-top:2px}
+    .ldsp-follow-stats{display:flex;gap:6px;padding:2px 0}
+    .ldsp-follow-combined{display:inline-flex;align-items:center;gap:3px;padding:2px 0;font-size:10px;color:var(--txt-mut)}
+    .ldsp-follow-part{cursor:pointer;transition:color .15s;font-weight:500}
+    .ldsp-follow-part:hover{color:var(--accent)}
+    .ldsp-follow-sep{color:var(--txt-mut);margin:0 1px}
+    .ldsp-follow-num-following,.ldsp-follow-num-followers{font-weight:600;color:var(--txt-sec);transition:color .15s}
+    .ldsp-follow-part:hover .ldsp-follow-num-following,.ldsp-follow-part:hover .ldsp-follow-num-followers{color:var(--accent)}
+    .ldsp-join-days{display:inline-flex;align-items:center;font-size:10px;color:var(--txt-mut);margin-left:6px;cursor:pointer;transition:color .15s}
+    .ldsp-join-days:hover{color:var(--accent)}
+    .ldsp-join-days-num{font-weight:600;color:var(--txt-sec);margin:0 2px;transition:color .15s}
+    .ldsp-join-days:hover .ldsp-join-days-num{color:var(--accent)}
+    .ldsp-follow-stat{display:flex;align-items:center;gap:3px;padding:2px 6px;background:var(--bg-el);border:1px solid var(--border);border-radius:12px;font-size:9px;color:var(--txt-sec);cursor:pointer;transition:all .15s}
+    .ldsp-follow-stat:hover{background:var(--bg-hover);border-color:var(--accent);color:var(--accent)}
+    .ldsp-follow-stat:active{transform:scale(.98)}
+    .ldsp-follow-stat-icon{display:flex;align-items:center;justify-content:center;width:12px;height:12px;opacity:.7}
+    .ldsp-follow-stat-icon svg{width:11px;height:11px;stroke-width:2}
+    .ldsp-follow-stat:hover .ldsp-follow-stat-icon{opacity:1}
+    .ldsp-follow-stat:hover .ldsp-follow-stat-icon svg{stroke:var(--accent)}
+    .ldsp-follow-stat-num{font-weight:700;color:var(--txt);font-size:10px}
+    .ldsp-follow-stat-label{font-weight:500;font-size:9px}
+    .ldsp-follow-overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--bg);border-radius:0 0 var(--r-lg) var(--r-lg);z-index:10;display:none;flex-direction:column;overflow:hidden}
+    .ldsp-follow-overlay.show{display:flex}
+    .ldsp-follow-header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg-card);border-bottom:1px solid var(--border);flex-shrink:0}
+    .ldsp-follow-title{font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;color:var(--txt)}
+    .ldsp-follow-title svg{width:16px;height:16px;stroke:var(--accent);stroke-width:2}
+    .ldsp-follow-close{width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:var(--bg-el);border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--txt-sec);cursor:pointer;transition:background .15s,color .15s}
+    .ldsp-follow-close:hover{background:var(--err-bg);color:var(--err);border-color:var(--err)}
+    .ldsp-follow-tabs{display:flex;border-bottom:1px solid var(--border);background:var(--bg-card);flex-shrink:0}
+    .ldsp-follow-tab{flex:1;display:flex;align-items:center;justify-content:center;gap:4px;padding:9px 10px;font-size:10px;font-weight:600;color:var(--txt-mut);border-bottom:2px solid transparent;cursor:pointer;transition:color .15s,border-color .15s,background .15s}
+    .ldsp-follow-tab:hover:not(.active){background:var(--bg-hover)}
+    .ldsp-follow-tab.active{color:var(--accent);border-color:var(--accent)}
+    .ldsp-follow-tab-icon{display:flex;align-items:center;justify-content:center;width:14px;height:14px}
+    .ldsp-follow-tab-icon svg{width:13px;height:13px;stroke-width:2}
+    .ldsp-follow-tab.active .ldsp-follow-tab-icon svg{stroke:var(--accent)}
+    .ldsp-follow-tab-count{padding:1px 6px;background:var(--bg-el);border-radius:10px;font-size:10px;font-weight:700;color:var(--txt-sec)}
+    .ldsp-follow-tab.active .ldsp-follow-tab-count{background:var(--accent);color:#fff}
+    .ldsp-follow-body{flex:1;overflow-y:auto;padding:10px;background:var(--bg)}
+    .ldsp-follow-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:40px 20px;color:var(--txt-mut)}
+    .ldsp-follow-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:40px 20px;text-align:center;color:var(--txt-mut)}
+    .ldsp-follow-empty-icon{width:48px;height:48px;opacity:.4}
+    .ldsp-follow-empty-icon svg{width:100%;height:100%;stroke-width:1.5}
+    .ldsp-follow-list{display:flex;flex-direction:column;gap:5px}
+    .ldsp-follow-item{display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-md);cursor:pointer;transition:all .15s;text-decoration:none;position:relative;overflow:hidden}
+    .ldsp-follow-item::before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--accent);opacity:0;transition:opacity .15s}
+    .ldsp-follow-item:hover{background:var(--bg-hover);border-color:rgba(107,140,239,.4);box-shadow:0 2px 8px rgba(107,140,239,.08)}
+    .ldsp-follow-item:hover::before{opacity:1}
+    .ldsp-follow-avatar-wrap{flex-shrink:0;position:relative}
+    .ldsp-follow-avatar{width:36px;height:36px;border-radius:50%;object-fit:cover;background:var(--bg-el);border:2px solid var(--border);transition:border-color .15s,transform .15s}
+    .ldsp-follow-item:hover .ldsp-follow-avatar{border-color:var(--accent);transform:scale(1.05)}
+    .ldsp-follow-user-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+    .ldsp-follow-user-name{font-size:12px;font-weight:600;color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ldsp-follow-item:hover .ldsp-follow-user-name{color:var(--accent)}
+    .ldsp-follow-user-id{font-size:10px;color:var(--txt-mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ldsp-follow-arrow{flex-shrink:0;width:20px;height:20px;display:flex;align-items:center;justify-content:center;color:var(--txt-mut);opacity:.4;transition:opacity .15s,transform .15s}
+    .ldsp-follow-arrow svg{width:14px;height:14px}
+    .ldsp-follow-item:hover .ldsp-follow-arrow{opacity:1;transform:translateX(2px);color:var(--accent)}
+    .ldsp-activity-content{flex:1;overflow-y:auto;padding:8px}
+    .ldsp-topic-list{display:flex;flex-direction:column;gap:6px}
+    .ldsp-topic-list-enhanced .ldsp-topic-item{display:flex;flex-direction:row;align-items:center;gap:8px;padding:10px;background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--r-md);cursor:pointer;transition:all .15s ease;text-decoration:none}
+    .ldsp-topic-item:hover{background:var(--bg-hover);border-color:rgba(107,140,239,.5);border-left-color:#5a7de0;transform:translateX(2px);box-shadow:0 2px 8px rgba(107,140,239,.1)}
+    .ldsp-topic-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+    .ldsp-topic-header{display:flex;flex-direction:column;gap:4px}
+    .ldsp-topic-title-row{display:flex;align-items:center;gap:5px;min-width:0}
+    .ldsp-topic-badges{display:flex;gap:3px;flex-shrink:0}
+    .ldsp-topic-badge{padding:1px 4px;border-radius:6px;font-size:8px;font-weight:600;line-height:1.2}
+    .ldsp-badge-unread{background:var(--accent);color:#fff}
+    .ldsp-badge-new{background:#10b981;color:#fff}
+    .ldsp-topic-title{font-size:12px;font-weight:600;color:var(--txt);line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+    .ldsp-topic-item:hover .ldsp-topic-title{color:var(--accent)}
+    .ldsp-topic-info{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-height:16px}
+    .ldsp-topic-tags{display:flex;gap:3px;flex-wrap:wrap}
+    .ldsp-topic-tag{padding:1px 6px;background:rgba(107,140,239,.08);border:1px solid rgba(107,140,239,.2);border-radius:8px;font-size:8px;color:#5a7de0;max-width:55px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ldsp-topic-tag-more{padding:1px 5px;background:rgba(107,140,239,.15);border:1px solid rgba(107,140,239,.3);border-radius:8px;font-size:8px;color:#4a6bc9;font-weight:600}
+    .ldsp-topic-footer{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+    .ldsp-topic-posters{display:flex;align-items:center;flex-shrink:0}
+    .ldsp-topic-avatar{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--bg-card);margin-left:-5px;object-fit:cover;background:var(--bg-el)}
+    .ldsp-topic-avatar:first-child{margin-left:0}
+    .ldsp-poster-op{border-color:var(--accent)}
+    .ldsp-poster-latest{border-color:#10b981}
+    .ldsp-topic-posters-more{margin-left:2px;font-size:8px;color:var(--txt-mut)}
+    .ldsp-topic-stats{display:flex;align-items:center;gap:6px;flex:1;justify-content:flex-end;flex-wrap:nowrap;min-width:0}
+    .ldsp-topic-stat{display:flex;align-items:center;gap:2px;font-size:9px;color:var(--txt-mut);white-space:nowrap;flex-shrink:0}
+    .ldsp-topic-stat svg{width:10px;height:10px;stroke-width:2;opacity:.6;flex-shrink:0}
+    .ldsp-topic-stat em{font-style:normal}
+    .ldsp-stat-like{color:#ef4444}
+    .ldsp-stat-like svg{stroke:#ef4444;opacity:.8}
+    .ldsp-topic-time{font-size:9px;color:var(--txt-mut);opacity:.8;white-space:nowrap;flex-shrink:0}
+    .ldsp-topic-thumbnail{width:48px;height:48px;flex-shrink:0;border-radius:6px;overflow:hidden;background:var(--bg-el)}
+    .ldsp-topic-thumbnail img{width:100%;height:100%;object-fit:cover;transition:transform .15s}
+    .ldsp-topic-item:hover .ldsp-topic-thumbnail img{transform:scale(1.05)}
+    .ldsp-bookmark-list{display:flex;flex-direction:column;gap:8px}
+    .ldsp-bookmark-item{display:flex;flex-direction:column;gap:6px;padding:10px;background:var(--bg-card);border:1px solid var(--border);border-left:3px solid #f59e0b;border-radius:var(--r-md);cursor:pointer;transition:all .15s ease;text-decoration:none}
+    .ldsp-bookmark-item:hover{background:var(--bg-hover);border-color:rgba(245,158,11,.5);border-left-color:#eab308;transform:translateX(2px);box-shadow:0 2px 8px rgba(245,158,11,.1)}
+    .ldsp-bookmark-title{font-size:12px;font-weight:600;color:var(--txt);line-height:1.4;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+    .ldsp-bookmark-item:hover .ldsp-bookmark-title{color:#b45309}
+    .ldsp-bookmark-meta{display:flex;flex-wrap:wrap;gap:8px;font-size:9px;color:var(--txt-mut);align-items:center}
+    .ldsp-bookmark-time{display:flex;align-items:center;gap:3px;white-space:nowrap}
+    .ldsp-bookmark-time svg{width:10px;height:10px;stroke-width:2;flex-shrink:0;opacity:.6}
+    .ldsp-bookmark-tags{display:flex;flex-wrap:wrap;gap:3px}
+    .ldsp-bookmark-tag{padding:1px 6px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px;font-size:8px;color:#b45309;max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ldsp-bookmark-tag-more{padding:1px 5px;background:rgba(245,158,11,.15);border:1px solid rgba(245,158,11,.3);border-radius:8px;font-size:8px;color:#92400e;font-weight:600}
+    .ldsp-bookmark-excerpt{font-size:10px;color:var(--txt-sec);line-height:1.5;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;padding:6px 0 0;word-break:break-word;border-top:1px dashed var(--border);margin-top:2px}
+    .ldsp-bookmark-excerpt *{all:revert;font-size:inherit;line-height:inherit;color:inherit;margin:0;padding:0;border:none;background:none;box-shadow:none}
+    .ldsp-bookmark-excerpt img{display:inline-block!important;max-width:18px!important;max-height:18px!important;vertical-align:middle!important;margin:0 2px!important;border-radius:2px!important}
+    .ldsp-bookmark-excerpt a{color:var(--accent)!important;text-decoration:none!important}
+    .ldsp-bookmark-excerpt a:hover{text-decoration:underline!important}
+    .ldsp-bookmark-excerpt .emoji{width:18px!important;height:18px!important;vertical-align:middle!important}
+    .ldsp-bookmark-excerpt .lightbox,.ldsp-bookmark-excerpt .lightbox img{display:inline!important;max-width:18px!important;max-height:18px!important}
+    .ldsp-bookmark-excerpt .anchor{display:none!important}
+    .ldsp-reply-list{display:flex;flex-direction:column;gap:8px}
+    .ldsp-reply-item{display:flex;flex-direction:column;gap:6px;padding:10px;background:var(--bg-card);border:1px solid var(--border);border-left:3px solid #10b981;border-radius:var(--r-md);cursor:pointer;transition:all .15s ease}
+    .ldsp-reply-item:hover{background:var(--bg-hover);border-color:rgba(16,185,129,.5);border-left-color:#059669;transform:translateX(2px);box-shadow:0 2px 8px rgba(16,185,129,.1)}
+    .ldsp-reply-title{font-size:12px;font-weight:600;color:var(--txt);line-height:1.4;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+    .ldsp-reply-item:hover .ldsp-reply-title{color:#059669}
+    .ldsp-reply-meta{display:flex;flex-wrap:wrap;gap:8px;font-size:9px;color:var(--txt-mut);align-items:center}
+    .ldsp-reply-time,.ldsp-reply-to{display:flex;align-items:center;gap:3px;white-space:nowrap}
+    .ldsp-reply-time svg,.ldsp-reply-to svg{width:10px;height:10px;stroke-width:2;flex-shrink:0;opacity:.6}
+    .ldsp-reply-to{color:#10b981;font-weight:500}
+    .ldsp-reply-excerpt{font-size:10px;color:var(--txt-sec);line-height:1.5;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;padding:6px 0 0;word-break:break-word;border-top:1px dashed var(--border);margin-top:2px}
+    .ldsp-reply-excerpt *{all:revert;font-size:inherit;line-height:inherit;color:inherit;margin:0;padding:0;border:none;background:none;box-shadow:none}
+    .ldsp-reply-excerpt img{display:inline-block!important;max-width:16px!important;max-height:16px!important;vertical-align:middle!important;margin:0 2px!important;border-radius:2px!important}
+    .ldsp-reply-excerpt a{color:var(--accent)!important;text-decoration:none!important}
+    .ldsp-reply-excerpt a:hover{text-decoration:underline!important}
+    .ldsp-reply-excerpt .emoji{width:16px!important;height:16px!important;vertical-align:middle!important}
+    .ldsp-reply-excerpt .lightbox,.ldsp-reply-excerpt .lightbox img{display:inline!important;max-width:16px!important;max-height:16px!important}
+    .ldsp-reply-excerpt .anchor{display:none!important}
+    .ldsp-like-list{display:flex;flex-direction:column;gap:8px}
+    .ldsp-like-item{display:flex;flex-direction:column;gap:6px;padding:10px;background:var(--bg-card);border:1px solid var(--border);border-left:3px solid #ef4444;border-radius:var(--r-md);cursor:pointer;transition:all .15s ease}
+    .ldsp-like-item:hover{background:var(--bg-hover);border-color:rgba(239,68,68,.5);border-left-color:#dc2626;transform:translateX(2px);box-shadow:0 2px 8px rgba(239,68,68,.1)}
+    .ldsp-like-title{font-size:12px;font-weight:600;color:var(--txt);line-height:1.4;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+    .ldsp-like-item:hover .ldsp-like-title{color:#dc2626}
+    .ldsp-like-meta{display:flex;flex-wrap:wrap;gap:8px;font-size:9px;color:var(--txt-mut);align-items:center}
+    .ldsp-like-time,.ldsp-like-author{display:flex;align-items:center;gap:3px;white-space:nowrap}
+    .ldsp-like-time svg,.ldsp-like-author svg{width:10px;height:10px;stroke-width:2;flex-shrink:0;opacity:.6}
+    .ldsp-like-author{color:#ef4444;font-weight:500}
+    .ldsp-like-author svg{fill:#ef4444;stroke:none;opacity:.8}
+    .ldsp-like-excerpt{font-size:10px;color:var(--txt-sec);line-height:1.5;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;padding:6px 0 0;word-break:break-word;border-top:1px dashed var(--border);margin-top:2px}
+    .ldsp-like-excerpt *{all:revert;font-size:inherit;line-height:inherit;color:inherit;margin:0;padding:0;border:none;background:none;box-shadow:none}
+    .ldsp-like-excerpt img{display:inline-block!important;max-width:16px!important;max-height:16px!important;vertical-align:middle!important;margin:0 2px!important;border-radius:2px!important}
+    .ldsp-like-excerpt a{color:var(--accent)!important;text-decoration:none!important}
+    .ldsp-like-excerpt a:hover{text-decoration:underline!important}
+    .ldsp-like-excerpt .emoji{width:16px!important;height:16px!important;vertical-align:middle!important}
+    .ldsp-like-excerpt .lightbox,.ldsp-like-excerpt .lightbox img{display:inline!important;max-width:16px!important;max-height:16px!important}
+    .ldsp-like-excerpt .anchor{display:none!important}
+    .ldsp-mytopic-list{display:flex;flex-direction:column;gap:8px}
+    .ldsp-mytopic-item{display:flex;flex-direction:column;gap:5px;padding:10px;background:var(--bg-card);border:1px solid var(--border);border-left:3px solid #8b5cf6;border-radius:var(--r-md);cursor:pointer;transition:all .15s ease;text-decoration:none}
+    .ldsp-mytopic-item:hover{background:var(--bg-hover);border-color:rgba(139,92,246,.5);border-left-color:#7c3aed;transform:translateX(2px);box-shadow:0 2px 8px rgba(139,92,246,.1)}
+    .ldsp-mytopic-item.closed{opacity:.7}
+    .ldsp-mytopic-item.closed .ldsp-mytopic-title{text-decoration:line-through;color:var(--txt-mut)}
+    .ldsp-mytopic-header{display:flex;align-items:flex-start;gap:6px}
+    .ldsp-mytopic-title{flex:1;font-size:12px;font-weight:600;color:var(--txt);line-height:1.4;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+    .ldsp-mytopic-item:hover .ldsp-mytopic-title{color:#7c3aed}
+    .ldsp-mytopic-icons{display:flex;gap:3px;flex-shrink:0}
+    .ldsp-mytopic-status{display:flex;align-items:center;justify-content:center;width:14px;height:14px}
+    .ldsp-mytopic-status svg{width:11px;height:11px;fill:#8b5cf6}
+    .ldsp-mytopic-status.ldsp-mytopic-closed svg{fill:var(--txt-mut);stroke:var(--txt-mut);stroke-width:2}
+    .ldsp-mytopic-row{display:flex;align-items:center;flex-wrap:nowrap;gap:6px}
+    .ldsp-mytopic-tags{display:flex;flex-wrap:wrap;gap:3px;flex:1;min-width:0}
+    .ldsp-mytopic-tag{padding:1px 6px;background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.2);border-radius:8px;font-size:8px;color:#7c3aed;max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ldsp-mytopic-tag-more{padding:1px 5px;background:rgba(139,92,246,.15);border:1px solid rgba(139,92,246,.3);border-radius:8px;font-size:8px;color:#6d28d9;font-weight:600}
+    .ldsp-mytopic-time{display:flex;align-items:center;gap:3px;font-size:8px;color:var(--txt-mut);flex-shrink:0;white-space:nowrap}
+    .ldsp-mytopic-time svg{width:9px;height:9px;stroke-width:2;flex-shrink:0;opacity:.7}
+    .ldsp-mytopic-meta{display:flex;align-items:center;gap:8px;font-size:9px;color:var(--txt-mut);padding-top:5px;border-top:1px solid var(--border)}
+    .ldsp-mytopic-stat{display:flex;align-items:center;gap:2px;white-space:nowrap}
+    .ldsp-mytopic-stat svg{width:11px;height:11px;stroke-width:2;flex-shrink:0}
+    .ldsp-mytopic-likes{color:#ef4444}
+    .ldsp-mytopic-likes svg{stroke:#ef4444}
+    .ldsp-mytopic-meta-right{display:flex;align-items:center;gap:6px;margin-left:auto;font-size:8px;white-space:nowrap}
+    .ldsp-reaction-list{display:flex;flex-direction:column;gap:8px}
+    .ldsp-reaction-item{display:flex;flex-direction:column;gap:6px;padding:10px;background:var(--bg-card);border:1px solid var(--border);border-left:3px solid #06b6d4;border-radius:var(--r-md);cursor:pointer;transition:all .15s ease}
+    .ldsp-reaction-item:hover{background:var(--bg-hover);border-color:rgba(6,182,212,.5);border-left-color:#0891b2;transform:translateX(2px);box-shadow:0 2px 8px rgba(6,182,212,.1)}
+    .ldsp-reaction-header{display:flex;align-items:center;gap:8px}
+    .ldsp-reaction-icon{font-size:16px;flex-shrink:0;display:flex;align-items:center;justify-content:center;width:24px;height:24px;background:rgba(6,182,212,.1);border-radius:6px}
+    .ldsp-reaction-title{flex:1;font-size:12px;font-weight:600;color:var(--txt);line-height:1.4;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+    .ldsp-reaction-item:hover .ldsp-reaction-title{color:#0891b2}
+    .ldsp-reaction-meta{display:flex;flex-wrap:wrap;gap:8px;font-size:9px;color:var(--txt-mut);align-items:center}
+    .ldsp-reaction-avatar{width:16px;height:16px;border-radius:50%;flex-shrink:0;object-fit:cover}
+    .ldsp-reaction-author{display:flex;align-items:center;gap:3px;white-space:nowrap;color:#06b6d4;font-weight:500}
+    .ldsp-reaction-time{display:flex;align-items:center;gap:3px;white-space:nowrap}
+    .ldsp-reaction-time svg{width:10px;height:10px;stroke-width:2;flex-shrink:0;opacity:.6}
+    .ldsp-reaction-count{padding:1px 5px;background:rgba(6,182,212,.15);border:1px solid rgba(6,182,212,.3);border-radius:8px;font-size:8px;color:#0891b2;font-weight:600}
+    .ldsp-reaction-excerpt{font-size:10px;color:var(--txt-sec);line-height:1.5;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;padding:6px 0 0;word-break:break-word;border-top:1px dashed var(--border);margin-top:2px}
+    .ldsp-reaction-excerpt *{all:revert;font-size:inherit;line-height:inherit;color:inherit;margin:0;padding:0;border:none;background:none;box-shadow:none}
+    .ldsp-reaction-excerpt img{display:inline-block!important;max-width:16px!important;max-height:16px!important;vertical-align:middle!important;margin:0 2px!important;border-radius:2px!important}
+    .ldsp-reaction-excerpt a{color:var(--accent)!important;text-decoration:none!important}
+    .ldsp-reaction-excerpt a:hover{text-decoration:underline!important}
+    .ldsp-reaction-excerpt .emoji{width:16px!important;height:16px!important;vertical-align:middle!important}
+    .ldsp-reaction-excerpt .lightbox,.ldsp-reaction-excerpt .lightbox img{display:inline!important;max-width:16px!important;max-height:16px!important}
+    .ldsp-reaction-excerpt .anchor{display:none!important}
+    /* 活动内容区响应式 */
+    @media (max-width:380px){.ldsp-activity-content{padding:8px}.ldsp-topic-list{gap:6px}.ldsp-topic-item{padding:10px;gap:8px}.ldsp-topic-title{font-size:12px}.ldsp-topic-footer{gap:6px}.ldsp-topic-stats{gap:6px}.ldsp-topic-stat{font-size:9px}.ldsp-topic-time{font-size:9px}.ldsp-topic-thumbnail{width:48px;height:48px}.ldsp-bookmark-list,.ldsp-reply-list,.ldsp-like-list,.ldsp-reaction-list,.ldsp-mytopic-list{gap:8px}.ldsp-bookmark-item,.ldsp-reply-item,.ldsp-like-item,.ldsp-reaction-item,.ldsp-mytopic-item{padding:10px}.ldsp-bookmark-title,.ldsp-reply-title,.ldsp-like-title,.ldsp-reaction-title,.ldsp-mytopic-title{font-size:12px}.ldsp-bookmark-meta,.ldsp-reply-meta,.ldsp-like-meta,.ldsp-reaction-meta,.ldsp-mytopic-meta{gap:10px;font-size:9px}.ldsp-follow-stats{gap:6px}.ldsp-follow-stat{padding:3px 6px;font-size:9px}.ldsp-follow-tab{padding:8px 10px;font-size:10px}.ldsp-follow-item{padding:10px;gap:10px}.ldsp-follow-avatar{width:36px;height:36px}.ldsp-follow-user-name{font-size:12px}}
+    @media (max-width:320px){.ldsp-activity-content{padding:6px}.ldsp-topic-list{gap:4px}.ldsp-topic-item{padding:8px;gap:6px}.ldsp-topic-title{font-size:11px}.ldsp-topic-footer{gap:4px}.ldsp-topic-stats{gap:4px}.ldsp-topic-stat{font-size:8px}.ldsp-topic-stat svg{width:9px;height:9px}.ldsp-topic-time{font-size:8px}.ldsp-topic-thumbnail{width:40px;height:40px}.ldsp-topic-avatar{width:14px;height:14px;margin-left:-4px}.ldsp-topic-tag{max-width:45px;font-size:7px}.ldsp-bookmark-list,.ldsp-reply-list,.ldsp-like-list,.ldsp-reaction-list,.ldsp-mytopic-list{gap:6px}.ldsp-bookmark-item,.ldsp-reply-item,.ldsp-like-item,.ldsp-reaction-item,.ldsp-mytopic-item{padding:8px}.ldsp-bookmark-title,.ldsp-reply-title,.ldsp-like-title,.ldsp-reaction-title,.ldsp-mytopic-title{font-size:10px}.ldsp-bookmark-meta,.ldsp-reply-meta,.ldsp-like-meta,.ldsp-reaction-meta,.ldsp-mytopic-meta{gap:8px;font-size:8px}.ldsp-bookmark-excerpt,.ldsp-reply-excerpt,.ldsp-like-excerpt,.ldsp-reaction-excerpt{font-size:9px;-webkit-line-clamp:2}.ldsp-bookmark-tag,.ldsp-reply-to,.ldsp-like-author,.ldsp-reaction-author,.ldsp-mytopic-tag{font-size:7px}.ldsp-bookmark-time svg,.ldsp-reply-time svg,.ldsp-like-time svg,.ldsp-reaction-time svg,.ldsp-mytopic-time svg{width:9px;height:9px}.ldsp-follow-stats{gap:4px}.ldsp-follow-stat{padding:2px 4px;font-size:8px}.ldsp-follow-stat-icon{width:10px;height:10px}.ldsp-follow-stat-icon svg{width:9px;height:9px}.ldsp-follow-stat-num{font-size:9px}.ldsp-follow-tab{padding:7px 8px;font-size:9px}.ldsp-follow-tab-icon{width:12px;height:12px}.ldsp-follow-tab-icon svg{width:11px;height:11px}.ldsp-follow-tab-count{font-size:8px;padding:1px 4px}.ldsp-follow-item{padding:8px;gap:8px}.ldsp-follow-avatar{width:32px;height:32px}.ldsp-follow-user-name{font-size:11px}.ldsp-follow-user-id{font-size:9px}}
+    @media (max-width:280px){.ldsp-topic-thumbnail{display:none}.ldsp-topic-posters{display:none}.ldsp-topic-stats{justify-content:flex-start}.ldsp-topic-tags{display:none}.ldsp-bookmark-tags,.ldsp-mytopic-tags{display:none}.ldsp-bookmark-excerpt,.ldsp-reply-excerpt,.ldsp-like-excerpt,.ldsp-reaction-excerpt{-webkit-line-clamp:2}.ldsp-follow-stat-label{display:none}.ldsp-follow-arrow{display:none}.ldsp-follow-tab-text{display:none}.ldsp-activity-content{padding:4px}.ldsp-topic-item{padding:6px}.ldsp-topic-title{font-size:10px}.ldsp-bookmark-item,.ldsp-reply-item,.ldsp-like-item,.ldsp-reaction-item,.ldsp-mytopic-item{padding:6px}.ldsp-bookmark-title,.ldsp-reply-title,.ldsp-like-title,.ldsp-reaction-title,.ldsp-mytopic-title{font-size:9px}.ldsp-follow-item{padding:6px;gap:6px}.ldsp-follow-avatar{width:28px;height:28px}.ldsp-follow-user-name{font-size:10px}.ldsp-reaction-icon{width:20px;height:20px;font-size:14px}}
+    .ldsp-load-more{display:flex;align-items:center;justify-content:center;padding:12px;color:var(--txt-sec);font-size:10px}
+    .ldsp-load-more.loading::after{content:'';width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:ldsp-spin .8s linear infinite;margin-left:6px}
+    .ldsp-activity-placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;text-align:center;color:var(--txt-mut)}
+    .ldsp-activity-placeholder-icon{font-size:32px;margin-bottom:10px;opacity:.5}
+    .ldsp-activity-placeholder-text{font-size:11px}
+    .ldsp-tooltip{position:fixed;z-index:2147483647;max-width:220px;padding:6px 10px;background:linear-gradient(135deg,rgba(30,32,48,.96),rgba(24,26,38,.98));color:#e8eaf0;font-size:11px;font-weight:500;line-height:1.4;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.3),0 0 0 1px rgba(255,255,255,.06);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);pointer-events:none;opacity:0;transform:translateY(4px);transition:opacity .15s ease,transform .15s ease;white-space:pre-line;word-break:break-word}
+    .ldsp-tooltip.show{opacity:1;transform:translateY(0)}
+    .ldsp-tooltip::before{content:'';position:absolute;width:8px;height:8px;background:inherit;transform:rotate(45deg);box-shadow:-1px -1px 0 rgba(255,255,255,.06)}
+    .ldsp-tooltip.top::before{bottom:-4px;left:50%;margin-left:-4px}
+    .ldsp-tooltip.bottom::before{top:-4px;left:50%;margin-left:-4px}
+    .ldsp-tooltip.left::before{bottom:-4px;right:12px}
+    .ldsp-tooltip.right::before{bottom:-4px;left:12px}
+    #ldsp-panel.light .ldsp-tooltip{background:linear-gradient(135deg,rgba(255,255,255,.98),rgba(248,250,254,.98));color:#2d3148;box-shadow:0 4px 16px rgba(0,0,0,.12),0 0 0 1px rgba(0,0,0,.06)}
+    #ldsp-panel.light .ldsp-tooltip::before{box-shadow:-1px -1px 0 rgba(0,0,0,.04)}`;
+            }
+        };
+        
+        // ==================== Tooltip 管理器 ====================
+        const Tooltip = {
+            el: null,
+            timer: null,
+            currentTarget: null,
+            
+            init() {
+                if (this.el) return;
+                this.el = document.createElement('div');
+                this.el.className = 'ldsp-tooltip';
+                document.body.appendChild(this.el);
+            },
+            
+            show(target, text, delay = 400) {
+                if (!text || !target) return;
+                this.hide();
+                this.currentTarget = target;
+                this.timer = setTimeout(() => {
+                    if (this.currentTarget !== target) return;
+                    this.el.textContent = text;
+                    this.el.classList.remove('show', 'top', 'bottom', 'left', 'right');
+                    
+                    // 先显示以获取尺寸
+                    this.el.style.visibility = 'hidden';
+                    this.el.style.display = 'block';
+                    
+                    const rect = target.getBoundingClientRect();
+                    const tipRect = this.el.getBoundingClientRect();
+                    const padding = 8;
+                    
+                    // 计算位置（优先显示在上方）
+                    let top, left;
+                    const spaceAbove = rect.top;
+                    const spaceBelow = window.innerHeight - rect.bottom;
+                    
+                    if (spaceAbove >= tipRect.height + padding || spaceAbove > spaceBelow) {
+                        // 显示在上方
+                        top = rect.top - tipRect.height - padding;
+                        this.el.classList.add('top');
+                    } else {
+                        // 显示在下方
+                        top = rect.bottom + padding;
+                        this.el.classList.add('bottom');
+                    }
+                    
+                    // 水平居中，但不超出屏幕
+                    left = rect.left + (rect.width - tipRect.width) / 2;
+                    if (left < padding) {
+                        left = padding;
+                        this.el.classList.add('right');
+                    } else if (left + tipRect.width > window.innerWidth - padding) {
+                        left = window.innerWidth - tipRect.width - padding;
+                        this.el.classList.add('left');
+                    }
+                    
+                    // 确保不超出顶部
+                    if (top < padding) top = padding;
+                    
+                    this.el.style.top = `${top}px`;
+                    this.el.style.left = `${left}px`;
+                    this.el.style.visibility = '';
+                    
+                    // 添加面板主题类
+                    const panel = document.getElementById('ldsp-panel');
+                    if (panel?.classList.contains('light')) {
+                        this.el.closest('body').querySelector('.ldsp-tooltip')?.classList.add('light-theme');
+                    }
+                    
+                    requestAnimationFrame(() => this.el.classList.add('show'));
+                }, delay);
+            },
+            
+            hide() {
+                if (this.timer) {
+                    clearTimeout(this.timer);
+                    this.timer = null;
+                }
+                this.currentTarget = null;
+                if (this.el) {
+                    this.el.classList.remove('show');
+                }
+            },
+            
+            // 绑定到面板
+            bindToPanel(panel) {
+                this.init();
+                
+                // 使用事件委托
+                panel.addEventListener('mouseenter', (e) => {
+                    const target = e.target.closest('[title], [data-tip]');
+                    if (!target) return;
+                    const text = target.dataset.tip || target.getAttribute('title');
+                    if (text) {
+                        // 临时移除 title 防止浏览器默认提示
+                        if (target.hasAttribute('title')) {
+                            target.dataset.tip = text;
+                            target.removeAttribute('title');
+                        }
+                        this.show(target, text);
+                    }
+                }, true);
+                
+                panel.addEventListener('mouseleave', (e) => {
+                    const target = e.target.closest('[data-tip]');
+                    if (target) this.hide();
+                }, true);
+                
+                // 滚动和点击时隐藏
+                panel.addEventListener('scroll', () => this.hide(), true);
+                panel.addEventListener('click', () => this.hide(), true);
+            }
+        };
+
+        // ==================== LDC 积分管理器 ====================
+        // 仅在 linux.do 站点可用，用于显示 credit.linux.do 的积分信息
+        class LDCManager {
+            static CACHE_KEY = 'ldsp_ldc_cache';
+            static TRANS_CACHE_KEY = 'ldsp_ldc_trans_cache';
+            static CACHE_TTL = 10 * 60 * 1000; // 缓存 10 分钟
+            
+            // 交易类型定义
+            static TRANS_TYPES = [
+                { id: '', label: '全部', icon: '📋' },
+                { id: 'receive', label: '收益', icon: '📥' },
+                { id: 'payment', label: '支出', icon: '📤' },
+                { id: 'transfer', label: '转移', icon: '🔄' },
+                { id: 'community', label: '社区划转', icon: '🏛️' },
+                { id: 'online', label: '在线流转', icon: '🌐' }
+            ];
+            // 时间范围定义
+            static TIME_RANGES = [
+                { id: 'today', label: '今日' },
+                { id: '7days', label: '近7天' },
+                { id: '30days', label: '近30天' },
+                { id: 'all', label: '所有' }
+            ];
+
+            constructor(panelBody, renderer) {
+                this.panelBody = panelBody;
+                this.renderer = renderer;
+                this.overlay = null;
+                this._isLoading = false;
+                this._activeTab = 'overview'; // overview | transactions
+                this._transactionData = { orders: [], page: 1, total: 0, hasMore: false };
+                this._selectedOrder = null; // 当前选中的交易详情
+                this._userId = null; // 当前用户的 LDC user_id
+                // 筛选条件
+                this._transFilter = {
+                    timeRange: '7days', // today | 7days | 30days | all
+                    type: '' // '' = 全部
+                };
+                // iOS Safari 检测
+                this._isIOSSafari = /iPad|iPhone|iPod/.test(navigator.userAgent) && 
+                    /WebKit/.test(navigator.userAgent) && 
+                    !/CriOS|FxiOS|OPiOS|EdgiOS/.test(navigator.userAgent);
+                this._storageAccessGranted = false;
+            }
+            
+            // 检测并请求 Storage Access（iOS Safari 跨站 Cookie 问题）
+            async _requestStorageAccess() {
+                // 非 iOS Safari 不需要
+                if (!this._isIOSSafari) return true;
+                
+                // 已授权
+                if (this._storageAccessGranted) return true;
+                
+                // 检查是否支持 Storage Access API
+                if (!document.hasStorageAccess || !document.requestStorageAccess) {
+                    Logger.warn('[LDCManager] Storage Access API not supported');
+                    return false;
+                }
+                
+                try {
+                    // 先检查是否已有权限
+                    const hasAccess = await document.hasStorageAccess();
+                    if (hasAccess) {
+                        this._storageAccessGranted = true;
+                        return true;
+                    }
+                    
+                    // 请求权限（需要用户交互触发）
+                    await document.requestStorageAccess();
+                    this._storageAccessGranted = true;
+                    Logger.info('[LDCManager] Storage access granted');
+                    return true;
+                } catch (e) {
+                    Logger.warn('[LDCManager] Storage access request failed:', e);
+                    return false;
+                }
+            }
+
+            init() {
+                this._createOverlay();
+            }
+
+            _createOverlay() {
+                this.overlay = document.createElement('div');
+                this.overlay.className = 'ldsp-ldc-overlay';
+                this.overlay.innerHTML = `
+                    <div class="ldsp-ldc-header">
+                        <div class="ldsp-ldc-title">🍟 LDC 积分</div>
+                        <div class="ldsp-ldc-header-actions">
+                            <a href="https://credit.linux.do/home" target="_blank" class="ldsp-ldc-link">LINUX DO CREDIT</a>
+                            <button class="ldsp-ldc-refresh" title="刷新">
+                                <svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                            </button>
+                            <div class="ldsp-ldc-close">×</div>
+                        </div>
+                    </div>
+                    <div class="ldsp-ldc-tabs">
+                        <div class="ldsp-ldc-tab active" data-tab="overview">📊 概览</div>
+                        <div class="ldsp-ldc-tab" data-tab="transactions">📜 交易记录</div>
+    
+                    </div>
+                    <div class="ldsp-ldc-body">
+                        <div class="ldsp-ldc-loading">
+                            <div class="ldsp-spinner"></div>
+                            <div>加载中...</div>
+                        </div>
+                    </div>`;
+                if (this.panelBody) {
+                    this.panelBody.appendChild(this.overlay);
+                }
+                this._bindEvents();
+            }
+
+            _bindEvents() {
+                this.overlay.querySelector('.ldsp-ldc-close').addEventListener('click', () => this.hide());
+                this.overlay.querySelector('.ldsp-ldc-refresh').addEventListener('click', () => {
+                    if (this._activeTab === 'overview') {
+                        this._fetchData(true);
+                    } else if (this._activeTab === 'transactions') {
+                        this._fetchTransactions(true);
+                    }
+                    // 支持页面不需要刷新
+                });
+                // Tab 切换
+                this.overlay.querySelectorAll('.ldsp-ldc-tab').forEach(tab => {
+                    tab.addEventListener('click', () => {
+                        const tabId = tab.dataset.tab;
+                        if (tabId !== this._activeTab) {
+                            this._switchTab(tabId);
+                        }
+                    });
+                });
+                // ESC 键关闭
+                this._escHandler = (e) => {
+                    if (e.key === 'Escape' && this.overlay.classList.contains('show')) {
+                        if (this._selectedOrder) {
+                            this._closeOrderDetail();
+                        } else {
+                            this.hide();
+                        }
+                    }
+                };
+                document.addEventListener('keydown', this._escHandler);
+            }
+
+            _switchTab(tabId) {
+                this._activeTab = tabId;
+                this._selectedOrder = null;
+                this.overlay.querySelectorAll('.ldsp-ldc-tab').forEach(t => {
+                    t.classList.toggle('active', t.dataset.tab === tabId);
+                });
+                if (tabId === 'overview') {
+                    if (!this._loadCache()) {
+                        this._fetchData();
+                    }
+                } else if (tabId === 'transactions') {
+                    this._fetchTransactions();
+                }
+            }
+
+            show() {
+                this.overlay.classList.add('show');
+                this._activeTab = 'overview';
+                this._selectedOrder = null;
+                // 重置 tab 状态
+                this.overlay.querySelectorAll('.ldsp-ldc-tab').forEach(t => {
+                    t.classList.toggle('active', t.dataset.tab === 'overview');
+                });
+                // 尝试从缓存加载，如果缓存过期则重新获取
+                if (!this._loadCache()) {
+                    this._fetchData();
+                }
+            }
+
+            hide() {
+                this.overlay.classList.remove('show');
+                this._selectedOrder = null;
+            }
+
+            _loadCache() {
+                try {
+                    const cache = GM_getValue(LDCManager.CACHE_KEY, null);
+                    if (cache && (Date.now() - cache.time < LDCManager.CACHE_TTL)) {
+                        this._renderOverview(cache);
+                        return true;
+                    }
+                } catch (e) {
+                    Logger.warn('[LDCManager] Load cache failed:', e);
+                }
+                return false;
+            }
+
+            _saveCache(data) {
+                try {
+                    GM_setValue(LDCManager.CACHE_KEY, { ...data, time: Date.now() });
+                } catch (e) {
+                    Logger.warn('[LDCManager] Save cache failed:', e);
+                }
+            }
+
+            async _fetchData(forceRefresh = false) {
+                if (this._isLoading) return;
+                this._isLoading = true;
+                
+                const body = this.overlay.querySelector('.ldsp-ldc-body');
+                const refreshBtn = this.overlay.querySelector('.ldsp-ldc-refresh');
+                
+                refreshBtn?.classList.add('spinning');
+                body.innerHTML = `<div class="ldsp-ldc-loading"><div class="ldsp-spinner"></div><div>加载中...</div></div>`;
+
+                try {
+                    // 获取用户信息
+                    const userInfo = await this._fetchUserInfo();
+                    if (!userInfo || userInfo._authError) {
+                        // iOS Safari 特殊处理：显示授权引导
+                        if (this._isIOSSafari) {
+                            this._showIOSAuthGuide();
+                        } else {
+                            this._showError('请先登录 credit.linux.do', true);
+                        }
+                        return;
+                    }
+                    if (userInfo._timeoutError) {
+                        this._showError('请求超时，请检查网络后重试');
+                        return;
+                    }
+                    if (userInfo._networkError) {
+                        this._showError('网络连接失败，请稍后重试');
+                        return;
+                    }
+
+                    // 保存用户ID用于判断交易记录的收入/支出
+                    this._userId = userInfo.id || userInfo.user_id || null;
+                    
+                    const data = {
+                        username: userInfo.nickname || userInfo.username || 'User',
+                        avatarUrl: userInfo.avatar_url || '',
+                        credits: userInfo.available_balance || '0',
+                        dailyLimit: userInfo.remain_quota || '0',
+                        incomeTotal: userInfo.total_receive || '0',
+                        expenseTotal: userInfo.total_payment || '0',
+                        dailyStats: [],
+                        updateTime: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+                    };
+
+                    // 获取每日统计
+                    await this._fetchDailyStats(data);
+                    
+                    this._renderOverview(data);
+                    this._saveCache(data);
+                } catch (e) {
+                    Logger.error('[LDCManager] Fetch error:', e);
+                    this._showError('网络错误，请稍后重试');
+                } finally {
+                    this._isLoading = false;
+                    refreshBtn?.classList.remove('spinning');
+                }
+            }
+            
+            // iOS Safari 限制提示界面
+            _showIOSAuthGuide() {
+                const body = this.overlay.querySelector('.ldsp-ldc-body');
+                const refreshBtn = this.overlay.querySelector('.ldsp-ldc-refresh');
+                refreshBtn?.classList.remove('spinning');
+                this._isLoading = false;
+                
+                body.innerHTML = `
+                    <div class="ldsp-ldc-ios-guide">
+                        <div class="ldsp-ldc-ios-icon">🔒</div>
+                        <div class="ldsp-ldc-ios-title">iOS Safari 隐私限制</div>
+                        <div class="ldsp-ldc-ios-desc">
+                            iOS Safari 的 <strong>智能防跟踪 (ITP)</strong> 功能会阻止跨站点 Cookie，导致无法在此处获取 LDC 数据。这是 Apple 的安全策略，非程序问题。
+                        </div>
+                        <div class="ldsp-ldc-ios-solutions">
+                            <div class="ldsp-ldc-ios-solution">
+                                <div class="ldsp-ldc-ios-solution-title">✅ 推荐方案</div>
+                                <div class="ldsp-ldc-ios-solution-desc">直接访问 LDC 官网查看积分</div>
+                                <a href="https://credit.linux.do/home" target="_blank" class="ldsp-ldc-ios-btn primary">
+                                    打开 LDC 官网 ↗
+                                </a>
+                            </div>
+                            <div class="ldsp-ldc-ios-solution alt">
+                                <div class="ldsp-ldc-ios-solution-title">🔄 备选方案</div>
+                                <div class="ldsp-ldc-ios-solution-desc">使用 Chrome、Edge 或 Firefox (iOS) 浏览器访问本页面</div>
+                            </div>
+                        </div>
+                        <div class="ldsp-ldc-ios-tip">
+                            💡 此限制仅影响 LDC 积分功能，其他功能正常使用
+                        </div>
+                    </div>`;
+            }
+
+            _fetchUserInfo() {
+                return new Promise((resolve) => {
+                    GM_xmlhttpRequest({
+                        method: 'GET',
+                        url: 'https://credit.linux.do/api/v1/oauth/user-info',
+                        withCredentials: true,
+                        timeout: 15000,
+                        headers: {
+                            'Accept': 'application/json, text/plain, */*',
+                            'Referer': 'https://credit.linux.do/home'
+                        },
+                        onload: (response) => {
+                            if (response.status === 200) {
+                                try {
+                                    const json = JSON.parse(response.responseText);
+                                    if (json && json.data) {
+                                        resolve(json.data);
+                                        return;
+                                    }
+                                } catch (e) {
+                                    Logger.warn('[LDCManager] Parse user info error:', e);
+                                }
+                            } else if (response.status === 401 || response.status === 403) {
+                                resolve({ _authError: true });
+                                return;
+                            }
+                            resolve(null);
+                        },
+                        onerror: () => resolve({ _networkError: true }),
+                        ontimeout: () => resolve({ _timeoutError: true })
+                    });
+                });
+            }
+
+            async _fetchDailyStats(data) {
+                return new Promise((resolve) => {
+                    GM_xmlhttpRequest({
+                        method: 'GET',
+                        url: 'https://credit.linux.do/api/v1/dashboard/stats/daily?days=7',
+                        withCredentials: true,
+                        timeout: 15000,
+                        headers: {
+                            'Accept': 'application/json, text/plain, */*',
+                            'Referer': 'https://credit.linux.do/home'
+                        },
+                        onload: (response) => {
+                            if (response.status === 200) {
+                                try {
+                                    const json = JSON.parse(response.responseText);
+                                    if (json && json.data && Array.isArray(json.data)) {
+                                        data.dailyStats = json.data.map(item => ({
+                                            date: item.date,
+                                            dateShort: item.date.substring(5).replace('-', '/'),
+                                            income: parseFloat(item.income) || 0,
+                                            expense: parseFloat(item.expense) || 0
+                                        }));
+                                    }
+                                } catch (e) {
+                                    Logger.warn('[LDCManager] Parse daily stats error:', e);
+                                }
+                            }
+                            resolve();
+                        },
+                        onerror: () => resolve(),
+                        ontimeout: () => resolve()
+                    });
+                });
+            }
+
+            _renderOverview(data) {
+                const body = this.overlay.querySelector('.ldsp-ldc-body');
+                
+                // 计算7天统计
+                const stats7d = data.dailyStats.reduce((acc, d) => ({
+                    income: acc.income + d.income,
+                    expense: acc.expense + d.expense
+                }), { income: 0, expense: 0 });
+
+                // 生成迷你柱状图
+                const maxVal = Math.max(...data.dailyStats.flatMap(d => [d.income, d.expense]), 1);
+                const chartHtml = data.dailyStats.length > 0 ? `
+                    <div class="ldsp-ldc-chart">
+                        <div class="ldsp-ldc-chart-bars">
+                            ${data.dailyStats.map(d => {
+                                const incomeH = Math.round((d.income / maxVal) * 100);
+                                const expenseH = Math.round((d.expense / maxVal) * 100);
+                                return `<div class="ldsp-ldc-chart-col" title="${d.dateShort}\n收入: +${d.income.toFixed(2)}\n支出: -${d.expense.toFixed(2)}">
+                                    <div class="ldsp-ldc-chart-bar-group">
+                                        <div class="ldsp-ldc-chart-bar income" style="height:${incomeH}%"></div>
+                                        <div class="ldsp-ldc-chart-bar expense" style="height:${expenseH}%"></div>
+                                    </div>
+                                    <span class="ldsp-ldc-chart-label">${d.dateShort.split('/')[1]}</span>
+                                </div>`;
+                            }).join('')}
+                        </div>
+                        <div class="ldsp-ldc-chart-legend">
+                            <span class="ldsp-ldc-legend-item income"><i></i>收入</span>
+                            <span class="ldsp-ldc-legend-item expense"><i></i>支出</span>
+                        </div>
+                    </div>` : '';
+
+                body.innerHTML = `
+                    <div class="ldsp-ldc-balance-card">
+                        <div class="ldsp-ldc-balance-label">可用余额</div>
+                        <div class="ldsp-ldc-balance-value">${Utils.escapeHtml(data.credits)}</div>
+                        <div class="ldsp-ldc-balance-sub">今日剩余额度: ${Utils.escapeHtml(data.dailyLimit)}</div>
+                    </div>
+                    <div class="ldsp-ldc-stats-grid">
+                        <div class="ldsp-ldc-stat-card income">
+                            <div class="ldsp-ldc-stat-icon">📈</div>
+                            <div class="ldsp-ldc-stat-info">
+                                <div class="ldsp-ldc-stat-label">总收入</div>
+                                <div class="ldsp-ldc-stat-num">+${Utils.escapeHtml(data.incomeTotal)}</div>
+                            </div>
+                        </div>
+                        <div class="ldsp-ldc-stat-card expense">
+                            <div class="ldsp-ldc-stat-icon">📉</div>
+                            <div class="ldsp-ldc-stat-info">
+                                <div class="ldsp-ldc-stat-label">总支出</div>
+                                <div class="ldsp-ldc-stat-num">-${Utils.escapeHtml(data.expenseTotal)}</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="ldsp-ldc-section">
+                        <div class="ldsp-ldc-section-header">
+                            <span class="ldsp-ldc-section-title">📊 近7天收支</span>
+                            <span class="ldsp-ldc-section-summary">
+                                <em class="income">+${stats7d.income.toFixed(2)}</em>
+                                <em class="expense">-${stats7d.expense.toFixed(2)}</em>
+                            </span>
+                        </div>
+                        ${chartHtml || '<div class="ldsp-ldc-empty">暂无数据</div>'}
+                    </div>
+                    <div class="ldsp-ldc-footer">
+                        <span class="ldsp-ldc-update-time">更新于 ${Utils.escapeHtml(data.updateTime)}</span>
+                    </div>`;
+            }
+
+            // 获取时间范围
+            _getTimeRange() {
+                const now = new Date();
+                const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+                let startTime, endTime;
+                
+                // endTime 是明天的开始，确保包含今天
+                endTime = new Date(todayStart);
+                endTime.setDate(endTime.getDate() + 1);
+
+                switch (this._transFilter.timeRange) {
+                    case 'today':
+                        startTime = todayStart;
+                        break;
+                    case '7days':
+                        startTime = new Date(todayStart);
+                        startTime.setDate(startTime.getDate() - 6);
+                        break;
+                    case '30days':
+                        startTime = new Date(todayStart);
+                        startTime.setDate(startTime.getDate() - 29);
+                        break;
+                    case 'all':
+                    default:
+                        // 所有：从一年前开始
+                        startTime = new Date(todayStart);
+                        startTime.setFullYear(startTime.getFullYear() - 1);
+                        break;
+                }
+
+                // 格式化为 ISO 字符串带时区
+                const formatDate = (d) => {
+                    const pad = n => n.toString().padStart(2, '0');
+                    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T00:00:00+08:00`;
+                };
+
+                return {
+                    startTime: formatDate(startTime),
+                    endTime: formatDate(endTime)
+                };
+            }
+
+            // 获取交易记录
+            async _fetchTransactions(forceRefresh = false, loadMore = false) {
+                if (this._isLoading) return;
+                this._isLoading = true;
+
+                const body = this.overlay.querySelector('.ldsp-ldc-body');
+                const refreshBtn = this.overlay.querySelector('.ldsp-ldc-refresh');
+
+                if (!loadMore) {
+                    refreshBtn?.classList.add('spinning');
+                    this._transactionData = { orders: [], page: 1, total: 0, hasMore: false };
+                    this._renderTransactionsUI(true); // 显示加载状态
+                }
+
+                const page = loadMore ? this._transactionData.page + 1 : 1;
+
+                try {
+                    const result = await this._fetchTransactionPage(page);
+                    if (result._authError) {
+                        this._showError('请先登录 credit.linux.do', true);
+                        return;
+                    }
+                    if (result._error) {
+                        this._showError(result._error);
+                        return;
+                    }
+
+                    if (loadMore) {
+                        this._transactionData.orders = [...this._transactionData.orders, ...result.orders];
+                    } else {
+                        this._transactionData.orders = result.orders;
+                    }
+                    this._transactionData.page = page;
+                    this._transactionData.total = result.total;
+                    this._transactionData.hasMore = this._transactionData.orders.length < result.total;
+
+                    this._renderTransactionsUI();
+                } catch (e) {
+                    Logger.error('[LDCManager] Fetch transactions error:', e);
+                    if (!loadMore) {
+                        this._showError('网络错误，请稍后重试');
+                    }
+                } finally {
+                    this._isLoading = false;
+                    refreshBtn?.classList.remove('spinning');
+                }
+            }
+
+            _fetchTransactionPage(page) {
+                return new Promise((resolve) => {
+                    const { startTime, endTime } = this._getTimeRange();
+                    const payload = {
+                        page: page,
+                        page_size: 20,
+                        startTime,
+                        endTime
+                    };
+                    // 如果选了类型，加入 type
+                    if (this._transFilter.type) {
+                        payload.type = this._transFilter.type;
+                    }
+
+                    GM_xmlhttpRequest({
+                        method: 'POST',
+                        url: 'https://credit.linux.do/api/v1/order/transactions',
+                        withCredentials: true,
+                        timeout: 15000,
+                        headers: {
+                            'Accept': 'application/json, text/plain, */*',
+                            'Content-Type': 'application/json',
+                            'Referer': 'https://credit.linux.do/home'
+                        },
+                        data: JSON.stringify(payload),
+                        onload: (response) => {
+                            if (response.status === 200) {
+                                try {
+                                    const json = JSON.parse(response.responseText);
+                                    if (json && json.data) {
+                                        resolve({
+                                            orders: json.data.orders || [],
+                                            total: json.data.total || 0
+                                        });
+                                        return;
+                                    }
+                                } catch (e) {
+                                    Logger.warn('[LDCManager] Parse transactions error:', e);
+                                }
+                                resolve({ _error: '解析数据失败' });
+                            } else if (response.status === 401 || response.status === 403) {
+                                resolve({ _authError: true });
+                            } else {
+                                resolve({ _error: '获取数据失败' });
+                            }
+                        },
+                        onerror: () => resolve({ _error: '网络连接失败' }),
+                        ontimeout: () => resolve({ _error: '请求超时' })
+                    });
+                });
+            }
+
+            _renderTransactionsUI(isLoading = false) {
+                const body = this.overlay.querySelector('.ldsp-ldc-body');
+                const { orders, total, hasMore } = this._transactionData;
+
+                // 使用提取的方法获取筛选器 HTML
+                const filterHtml = this._getFilterHtml();
+
+                // 列表内容
+                let contentHtml;
+                if (isLoading) {
+                    contentHtml = `<div class="ldsp-ldc-loading"><div class="ldsp-spinner"></div><div>加载中...</div></div>`;
+                } else if (orders.length === 0) {
+                    // 根据筛选条件显示不同的空状态提示
+                    const timeLabel = LDCManager.TIME_RANGES.find(t => t.id === this._transFilter.timeRange)?.label || '';
+                    const typeLabel = this._transFilter.type ? (LDCManager.TRANS_TYPES.find(t => t.id === this._transFilter.type)?.label || '') : '';
+                    const filterHint = timeLabel + (typeLabel ? ` · ${typeLabel}` : '');
+                    contentHtml = `
+                        <div class="ldsp-ldc-empty-state">
+                            <div class="ldsp-ldc-empty-icon">📭</div>
+                            <div class="ldsp-ldc-empty-text">暂无交易记录</div>
+                            ${filterHint ? `<div class="ldsp-ldc-empty-hint">筛选条件：${filterHint}</div>` : ''}
+                        </div>`;
+                } else {
+                    const listHtml = orders.map(order => {
+                        // 判断是收入还是支出：根据当前用户是 payee（收款方）还是 payer（付款方）
+                        const typeInfo = LDCManager.TRANS_TYPES.find(t => t.id === order.type) || { icon: '📋', label: order.type, id: '' };
+                        // 如果当前用户是 payee（收款方），则为收入；如果是 payer（付款方），则为支出
+                        const isIncome = this._userId ? 
+                            (order.payee_user_id === this._userId) : 
+                            // 回退方案：如果没有 userId，通过 type 和 payer_user_id 判断
+                            (order.type === 'receive' || order.type === 'community' || order.payer_user_id === 0);
+                        const amount = parseFloat(order.amount) || 0;
+                        const time = this._formatTime(order.trade_time || order.created_at);
+                        const orderName = order.order_name || order.app_name || '未知';
+                        const typeClass = order.type ? `type-${order.type}` : 'type-default';
+                        
+                        return `
+                            <div class="ldsp-ldc-trans-item" data-order-id="${order.id}">
+                                <div class="ldsp-ldc-trans-icon">${typeInfo.icon}</div>
+                                <div class="ldsp-ldc-trans-info">
+                                    <div class="ldsp-ldc-trans-name">${Utils.escapeHtml(orderName)}</div>
+                                    <div class="ldsp-ldc-trans-meta">
+                                        <span>${Utils.escapeHtml(time)}</span>
+                                        <span class="ldsp-ldc-trans-type ${typeClass}">${typeInfo.label}</span>
+                                    </div>
+                                </div>
+                                <div class="ldsp-ldc-trans-amount ${isIncome ? 'income' : 'expense'}">
+                                    ${isIncome ? '+' : '-'}${amount.toFixed(2)}
+                                </div>
+                            </div>`;
+                    }).join('');
+
+                    const loadedCount = orders.length;
+                    const loadMoreText = hasMore ? `加载更多 (${loadedCount}/${total})` : '';
+                    contentHtml = `
+                        <div class="ldsp-ldc-trans-summary">共 ${total} 条记录${loadedCount < total ? `，已加载 ${loadedCount} 条` : ''}</div>
+                        <div class="ldsp-ldc-trans-list">${listHtml}</div>
+                        ${hasMore ? `<button class="ldsp-ldc-load-more">${loadMoreText}</button>` : ''}`;
+                }
+
+                body.innerHTML = `
+                    ${filterHtml}
+                    <div class="ldsp-ldc-trans-content">${contentHtml}</div>`;
+
+                // 绑定筛选器事件
+                this._bindFilterEvents(body);
+                // 绑定交易列表事件
+                this._bindTransactionEvents();
+            }
+
+            _bindTransactionEvents() {
+                const body = this.overlay.querySelector('.ldsp-ldc-body');
+
+                // 交易项点击
+                body.querySelectorAll('.ldsp-ldc-trans-item').forEach(item => {
+                    item.addEventListener('click', () => {
+                        const orderId = item.dataset.orderId;
+                        const order = this._transactionData.orders.find(o => String(o.id) === orderId);
+                        if (order) this._showOrderDetail(order);
+                    });
+                });
+
+                // 加载更多
+                const loadMoreBtn = body.querySelector('.ldsp-ldc-load-more');
+                loadMoreBtn?.addEventListener('click', async () => {
+                    if (loadMoreBtn.classList.contains('loading')) return;
+                    loadMoreBtn.classList.add('loading');
+                    loadMoreBtn.innerHTML = '<div class="ldsp-mini-spin" style="width:14px;height:14px"></div> 加载中...';
+                    await this._fetchTransactions(false, true);
+                });
+            }
+
+            _renderTransactions() {
+                this._renderTransactionsUI();
+            }
+
+            _showOrderDetail(order) {
+                this._selectedOrder = order;
+                const body = this.overlay.querySelector('.ldsp-ldc-body');
+                const amount = parseFloat(order.amount) || 0;
+                const time = this._formatTime(order.trade_time || order.created_at, true);
+                const typeInfo = LDCManager.TRANS_TYPES.find(t => t.id === order.type) || { icon: '📋', label: order.type };
+                const typeClass = order.type ? `type-${order.type}` : 'type-default';
+                // 判断是收入还是支出：根据当前用户是 payee（收款方）还是 payer（付款方）
+                const isIncome = this._userId ? 
+                    (order.payee_user_id === this._userId) : 
+                    (order.type === 'receive' || order.type === 'community' || order.payer_user_id === 0);
+                
+                body.innerHTML = `
+                    <div class="ldsp-ldc-detail">
+                        <div class="ldsp-ldc-detail-header">
+                            <button class="ldsp-ldc-back-btn">← 返回</button>
+                            <span>交易详情</span>
+                        </div>
+                        <div class="ldsp-ldc-detail-amount ${isIncome ? 'income-bg' : 'expense-bg'}">
+                            <div class="ldsp-ldc-detail-amount-value ${isIncome ? 'income' : 'expense'}">${isIncome ? '+' : '-'}${amount.toFixed(2)}</div>
+                            <div class="ldsp-ldc-detail-amount-label">LDC</div>
+                        </div>
+                        <div class="ldsp-ldc-detail-card">
+                            <div class="ldsp-ldc-detail-row">
+                                <span class="label">交易状态</span>
+                                <span class="value status-${order.status}">${order.status === 'success' ? '✓ 成功' : order.status}</span>
+                            </div>
+                            <div class="ldsp-ldc-detail-row">
+                                <span class="label">交易类型</span>
+                                <span class="value"><span class="ldsp-ldc-trans-type ${typeClass}" style="font-size:11px">${typeInfo.icon} ${typeInfo.label}</span></span>
+                            </div>
+                            <div class="ldsp-ldc-detail-row">
+                                <span class="label">订单名称</span>
+                                <span class="value">${Utils.escapeHtml(order.order_name || '—')}</span>
+                            </div>
+                            ${order.app_name ? `
+                            <div class="ldsp-ldc-detail-row">
+                                <span class="label">应用名称</span>
+                                <span class="value">${Utils.escapeHtml(order.app_name)}</span>
+                            </div>` : ''}
+                            <div class="ldsp-ldc-detail-row">
+                                <span class="label">交易时间</span>
+                                <span class="value">${Utils.escapeHtml(time)}</span>
+                            </div>
+                            <div class="ldsp-ldc-detail-row">
+                                <span class="label">订单号</span>
+                                <span class="value mono">${Utils.escapeHtml(order.order_no || '—')}</span>
+                            </div>
+                            ${order.payee_username ? `
+                            <div class="ldsp-ldc-detail-row">
+                                <span class="label">收款方</span>
+                                <span class="value">${Utils.escapeHtml(order.payee_username)}</span>
+                            </div>` : ''}
+                            ${order.payer_username ? `
+                            <div class="ldsp-ldc-detail-row">
+                                <span class="label">付款方</span>
+                                <span class="value">${Utils.escapeHtml(order.payer_username)}</span>
+                            </div>` : ''}
+                            ${order.remark ? `
+                            <div class="ldsp-ldc-detail-row">
+                                <span class="label">备注</span>
+                                <span class="value">${Utils.escapeHtml(order.remark)}</span>
+                            </div>` : ''}
+                            ${order.app_homepage_url ? `
+                            <div class="ldsp-ldc-detail-row">
+                                <span class="label">应用链接</span>
+                                <a class="value link" href="${Utils.escapeHtml(order.app_homepage_url)}" target="_blank">${Utils.escapeHtml(order.app_homepage_url)}</a>
+                            </div>` : ''}
+                        </div>
+                    </div>`;
+
+                body.querySelector('.ldsp-ldc-back-btn')?.addEventListener('click', () => {
+                    this._closeOrderDetail();
+                });
+            }
+
+            _closeOrderDetail() {
+                this._selectedOrder = null;
+                this._renderTransactions();
+            }
+
+            _formatTime(timeStr, full = false) {
+                if (!timeStr) return '—';
+                try {
+                    const d = new Date(timeStr);
+                    if (full) {
+                        return d.toLocaleString('zh-CN', { 
+                            year: 'numeric', month: '2-digit', day: '2-digit',
+                            hour: '2-digit', minute: '2-digit', second: '2-digit'
+                        });
+                    }
+                    return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+                } catch {
+                    return '—';
+                }
+            }
+
+            _showError(msg, showLogin = false) {
+                const body = this.overlay.querySelector('.ldsp-ldc-body');
+                const refreshBtn = this.overlay.querySelector('.ldsp-ldc-refresh');
+                refreshBtn?.classList.remove('spinning');
+                this._isLoading = false;
+                
+                // 根据错误类型选择图标
+                let errorIcon = '😕';
+                if (msg.includes('超时')) errorIcon = '⏱️';
+                else if (msg.includes('网络')) errorIcon = '🌐';
+                else if (msg.includes('登录')) errorIcon = '🔐';
+                
+                const loginBtn = showLogin
+                    ? `<a href="https://credit.linux.do" target="_blank" class="ldsp-ldc-login-btn">去登录 →</a>`
+                    : '';
+                
+                // 交易记录页面保留筛选器
+                const isTransTab = this._activeTab === 'transactions';
+                const filterHtml = isTransTab ? this._getFilterHtml() : '';
+                
+                body.innerHTML = `
+                    ${filterHtml}
+                    <div class="ldsp-ldc-error">
+                        <div class="ldsp-ldc-error-icon">${errorIcon}</div>
+                        <div class="ldsp-ldc-error-msg">${Utils.escapeHtml(msg)}</div>
+                        ${loginBtn}
+                        <button class="ldsp-ldc-retry-btn">🔄 重试</button>
+                    </div>`;
+                
+                // 绑定筛选器事件（如果有）
+                if (isTransTab) {
+                    this._bindFilterEvents(body);
+                }
+                
+                body.querySelector('.ldsp-ldc-retry-btn')?.addEventListener('click', () => {
+                    if (this._activeTab === 'overview') {
+                        this._fetchData(true);
+                    } else {
+                        this._fetchTransactions(true);
+                    }
+                });
+            }
+
+            // 获取筛选器HTML（用于错误状态时保留筛选器）
+            _getFilterHtml() {
+                const timeRangeHtml = LDCManager.TIME_RANGES.map(t => 
+                    `<div class="ldsp-ldc-filter-chip${this._transFilter.timeRange === t.id ? ' active' : ''}" data-time="${t.id}">${t.label}</div>`
+                ).join('');
+                const typeHtml = LDCManager.TRANS_TYPES.map(t => 
+                    `<div class="ldsp-ldc-filter-chip${this._transFilter.type === t.id ? ' active' : ''}" data-type="${t.id}">${t.icon} ${t.label}</div>`
+                ).join('');
+                return `
+                    <div class="ldsp-ldc-filter-section">
+                        <div class="ldsp-ldc-filter-row">
+                            <span class="ldsp-ldc-filter-label">时间</span>
+                            <div class="ldsp-ldc-filter-chips">${timeRangeHtml}</div>
+                        </div>
+                        <div class="ldsp-ldc-filter-row">
+                            <span class="ldsp-ldc-filter-label">类型</span>
+                            <div class="ldsp-ldc-filter-chips ldsp-ldc-filter-chips-wrap">${typeHtml}</div>
+                        </div>
+                    </div>`;
+            }
+
+            // 绑定筛选器事件
+            _bindFilterEvents(container) {
+                container.querySelectorAll('[data-time]').forEach(chip => {
+                    chip.addEventListener('click', () => {
+                        const timeId = chip.dataset.time;
+                        if (timeId !== this._transFilter.timeRange) {
+                            this._transFilter.timeRange = timeId;
+                            this._fetchTransactions(true);
+                        }
+                    });
+                });
+                container.querySelectorAll('[data-type]').forEach(chip => {
+                    chip.addEventListener('click', () => {
+                        const typeId = chip.dataset.type;
+                        if (typeId !== this._transFilter.type) {
+                            this._transFilter.type = typeId;
+                            this._fetchTransactions(true);
+                        }
+                    });
+                });
+            }
+
+            destroy() {
+                if (this._escHandler) {
+                    document.removeEventListener('keydown', this._escHandler);
+                    this._escHandler = null;
+                }
+                if (this.overlay) {
+                    this.overlay.remove();
+                    this.overlay = null;
+                }
+            }
+        }
+
+        // ==================== 关注/粉丝管理器 ====================
+        class FollowManager {
+            static CACHE_KEY = 'ldsp_follow_cache';
+            
+            // SVG 图标定义
+            static ICONS = {
+                // 关注：人+右箭头（表示我关注的人/向外关注）
+                following: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="10" cy="8" r="4"/><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M19 8h4m-2-2v4"/></svg>',
+                // 粉丝：人+心形（表示喜欢我的人）
+                followers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="10" cy="8" r="4"/><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M19.5 10.5c-.6-.6-1.5-.6-2.1 0l-.4.4-.4-.4c-.6-.6-1.5-.6-2.1 0-.6.6-.6 1.5 0 2.1l2.5 2.4 2.5-2.4c.6-.6.6-1.5 0-2.1z"/></svg>',
+                // 用户组图标（用于标题）
+                users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><circle cx="17" cy="10" r="3"/><path d="M21 21v-1.5a3 3 0 0 0-3-3h-1"/></svg>',
+                // 单人图标（用于空状态）
+                user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v2"/></svg>'
+            };
+            
+            constructor(network, storage, panelBody, renderer) {
+                this.network = network;
+                this.storage = storage;
+                this.panelBody = panelBody;
+                this.renderer = renderer;
+                this.overlay = null;
+                this.following = [];
+                this.followers = [];
+                this.followingCount = 0;
+                this.followersCount = 0;
+                this.cakedate = null;
+                this.animatedAvatar = null;
+                this._loaded = false;
+                this._loading = false;
+                this._profileLoaded = false;
+            }
+
+            async init() {
+                // 先从缓存加载数量显示
+                this._loadFromCache();
+                this._createOverlay();
+            }
+            
+            // 从本地缓存加载
+            _loadFromCache() {
+                try {
+                    const username = this.storage.getUser();
+                    if (!username) return;
+                    
+                    const cacheKey = `${FollowManager.CACHE_KEY}_${CURRENT_SITE.prefix}_${username}`;
+                    const cached = GM_getValue(cacheKey, null);
+                    if (cached && typeof cached === 'object') {
+                        this.followingCount = cached.followingCount || 0;
+                        this.followersCount = cached.followersCount || 0;
+                        this.cakedate = cached.cakedate || null;
+                        this.animatedAvatar = cached.animatedAvatar || null;
+                        // 立即更新显示
+                        this._updateStats();
+                        this._updateDays();
+                    }
+                } catch (e) {
+                    // 缓存读取失败，忽略
+                }
+            }
+            
+            // 保存到本地缓存
+            _saveToCache() {
+                try {
+                    const username = this.storage.getUser();
+                    if (!username) return;
+                    
+                    const cacheKey = `${FollowManager.CACHE_KEY}_${CURRENT_SITE.prefix}_${username}`;
+                    GM_setValue(cacheKey, {
+                        followingCount: this.followingCount,
+                        followersCount: this.followersCount,
+                        cakedate: this.cakedate,
+                        animatedAvatar: this.animatedAvatar,
+                        time: Date.now()
+                    });
+                } catch (e) {
+                    // 缓存写入失败，忽略
+                }
+            }
+
+            _createOverlay() {
+                this.overlay = document.createElement('div');
+                this.overlay.className = 'ldsp-follow-overlay';
+                this.overlay.innerHTML = `
+                    <div class="ldsp-follow-header">
+                        <div class="ldsp-follow-title">${FollowManager.ICONS.users} 关注与粉丝</div>
+                        <div class="ldsp-follow-close">×</div>
+                    </div>
+                    <div class="ldsp-follow-tabs">
+                        <div class="ldsp-follow-tab active" data-tab="following">
+                            <span class="ldsp-follow-tab-icon">${FollowManager.ICONS.following}</span>
+                            <span class="ldsp-follow-tab-text">关注</span>
+                            <span class="ldsp-follow-tab-count">${this.followingCount}</span>
+                        </div>
+                        <div class="ldsp-follow-tab" data-tab="followers">
+                            <span class="ldsp-follow-tab-icon">${FollowManager.ICONS.followers}</span>
+                            <span class="ldsp-follow-tab-text">粉丝</span>
+                            <span class="ldsp-follow-tab-count">${this.followersCount}</span>
+                        </div>
+                    </div>
+                    <div class="ldsp-follow-body"></div>`;
+                if (this.panelBody) {
+                    this.panelBody.appendChild(this.overlay);
+                }
+                this._bindEvents();
+            }
+
+            _bindEvents() {
+                this.overlay.querySelector('.ldsp-follow-close').addEventListener('click', () => this.hide());
+                document.addEventListener('keydown', e => {
+                    if (e.key === 'Escape' && this.overlay.classList.contains('show')) this.hide();
+                });
+                this.overlay.querySelectorAll('.ldsp-follow-tab').forEach(tab => {
+                    tab.addEventListener('click', () => {
+                        this.overlay.querySelectorAll('.ldsp-follow-tab').forEach(t => t.classList.remove('active'));
+                        tab.classList.add('active');
+                        const tabName = tab.dataset.tab;
+                        this._renderList(tabName);
+                    });
+                });
+            }
+
+            async loadData(forceRefresh = false) {
+                if (this._loading) return;
+                if (this._loaded && !forceRefresh) return;
+                
+                this._loading = true;
+                const username = this.storage.getUser();
+                if (!username) {
+                    this._loading = false;
+                    return;
+                }
+
+                // 保存旧的数量用于比较
+                const oldFollowingCount = this.followingCount;
+                const oldFollowersCount = this.followersCount;
+
+                const baseUrl = `https://${CURRENT_SITE.domain}`;
+                
+                try {
+                    const [followingRes, followersRes] = await Promise.all([
+                        this.network.fetchJson(`${baseUrl}/u/${username}/follow/following`),
+                        this.network.fetchJson(`${baseUrl}/u/${username}/follow/followers`)
+                    ]);
+                    
+                    this.following = Array.isArray(followingRes) ? followingRes : [];
+                    this.followers = Array.isArray(followersRes) ? followersRes : [];
+                    this.followingCount = this.following.length;
+                    this.followersCount = this.followers.length;
+                    this._loaded = true;
+                    
+                    // 检查是否有变化，有变化则更新缓存
+                    if (this.followingCount !== oldFollowingCount || this.followersCount !== oldFollowersCount) {
+                        this._saveToCache();
+                    }
+                    
+                    // 更新显示
+                    this._updateStats();
+                    this._updateTabCounts();
+                } catch (e) {
+                    Logger.warn('Failed to load follow data:', e.message);
+                    // 加载失败时保持缓存的数量，不清零
+                } finally {
+                    this._loading = false;
+                }
+            }
+            
+            // 加载用户 profile 数据（cakedate, animated_avatar）
+            async loadProfile() {
+                if (this._profileLoaded) return;
+                
+                const username = this.storage.getUser();
+                if (!username) return;
+                
+                const baseUrl = `https://${CURRENT_SITE.domain}`;
+                
+                try {
+                    const profileRes = await this.network.fetchJson(`${baseUrl}/u/${encodeURIComponent(username)}.json`);
+                    if (profileRes && profileRes.user) {
+                        const user = profileRes.user;
+                        let hasChanges = false;
+                        
+                        // 获取 cakedate
+                        if (user.cakedate && user.cakedate !== this.cakedate) {
+                            this.cakedate = user.cakedate;
+                            this._updateDays();
+                            hasChanges = true;
+                        }
+                        
+                        // 获取 animated_avatar
+                        if (user.animated_avatar) {
+                            const animatedUrl = user.animated_avatar.startsWith('http') 
+                                ? user.animated_avatar 
+                                : `${baseUrl}${user.animated_avatar}`;
+                            // 只有动态头像变化时才更新
+                            if (animatedUrl !== this.animatedAvatar) {
+                                this.animatedAvatar = animatedUrl;
+                                // 通过 renderer 渲染头像
+                                if (this.renderer) {
+                                    this.renderer.renderAvatar(animatedUrl);
+                                }
+                                hasChanges = true;
+                            }
+                        }
+                        
+                        this._profileLoaded = true;
+                        if (hasChanges) {
+                            this._saveToCache();
+                        }
+                    }
+                } catch (e) {
+                    Logger.warn('Failed to load user profile:', e.message);
+                }
+            }
+            
+            // 更新注册天数显示
+            _updateDays() {
+                const daysNumEl = document.querySelector('.ldsp-join-days-num');
+                const siteEl = document.querySelector('.ldsp-join-days-site');
+                const joinDaysEl = document.querySelector('.ldsp-join-days');
+                
+                if (!this.cakedate) {
+                    if (joinDaysEl) joinDaysEl.style.display = 'none';
+                    return;
+                }
+                
+                try {
+                    const joinDate = new Date(this.cakedate);
+                    const now = new Date();
+                    const diffTime = Math.abs(now - joinDate);
+                    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                    const siteShort = CURRENT_SITE.domain === 'linux.do' ? 'L站' : 'IF站';
+                    const siteFull = CURRENT_SITE.domain === 'linux.do' ? 'Linux.do' : 'IDCFlare';
+                    if (siteEl) siteEl.textContent = siteShort;
+                    if (daysNumEl) daysNumEl.textContent = diffDays;
+                    if (joinDaysEl) {
+                        joinDaysEl.style.display = '';
+                        // 设置悬浮提示：于xxxx年xx月xx日加入xx站
+                        const year = joinDate.getFullYear();
+                        const month = joinDate.getMonth() + 1;
+                        const day = joinDate.getDate();
+                        joinDaysEl.title = `于${year}年${month}月${day}日加入${siteFull}`;
+                    }
+                } catch (e) {
+                    if (joinDaysEl) joinDaysEl.style.display = 'none';
+                }
+            }
+
+            _updateStats() {
+                // 支持新的合并按钮样式
+                const combinedEl = document.querySelector('.ldsp-follow-combined');
+                if (combinedEl) {
+                    const followingNum = combinedEl.querySelector('.ldsp-follow-num-following');
+                    const followersNum = combinedEl.querySelector('.ldsp-follow-num-followers');
+                    if (followingNum) followingNum.textContent = this.followingCount;
+                    if (followersNum) followersNum.textContent = this.followersCount;
+                }
+                // 兼容旧样式
+                const statsEl = document.querySelector('.ldsp-follow-stats');
+                if (statsEl) {
+                    const following = statsEl.querySelector('.ldsp-follow-stat-following .ldsp-follow-stat-num');
+                    const followers = statsEl.querySelector('.ldsp-follow-stat-followers .ldsp-follow-stat-num');
+                    if (following) following.textContent = this.followingCount;
+                    if (followers) followers.textContent = this.followersCount;
+                }
+            }
+
+            _updateTabCounts() {
+                const followingTab = this.overlay.querySelector('.ldsp-follow-tab[data-tab="following"] .ldsp-follow-tab-count');
+                const followersTab = this.overlay.querySelector('.ldsp-follow-tab[data-tab="followers"] .ldsp-follow-tab-count');
+                if (followingTab) followingTab.textContent = this.followingCount;
+                if (followersTab) followersTab.textContent = this.followersCount;
+            }
+
+            async show() {
+                this.overlay.classList.add('show');
+                const body = this.overlay.querySelector('.ldsp-follow-body');
+                body.innerHTML = '<div class="ldsp-follow-loading"><div class="ldsp-spinner"></div><div>加载中...</div></div>';
+                
+                // 加载数据（如果还没加载）
+                if (!this._loaded) {
+                    await this.loadData();
+                }
+                
+                // 渲染当前激活的tab
+                const activeTab = this.overlay.querySelector('.ldsp-follow-tab.active');
+                this._renderList(activeTab?.dataset.tab || 'following');
+            }
+
+            hide() {
+                this.overlay.classList.remove('show');
+            }
+
+            _renderList(type = 'following') {
+                const body = this.overlay.querySelector('.ldsp-follow-body');
+                const list = type === 'following' ? this.following : this.followers;
+                const emptyText = type === 'following' ? '还没有关注任何人' : '还没有粉丝';
+                const emptyIcon = type === 'following' ? FollowManager.ICONS.user : FollowManager.ICONS.followers;
+                
+                if (list.length === 0) {
+                    body.innerHTML = `
+                        <div class="ldsp-follow-empty">
+                            <div class="ldsp-follow-empty-icon">${emptyIcon}</div>
+                            <div>${emptyText}</div>
+                        </div>`;
+                    return;
+                }
+
+                const baseUrl = `https://${CURRENT_SITE.domain}`;
+                body.innerHTML = `
+                    <div class="ldsp-follow-list">
+                        ${list.map(user => {
+                            const avatarUrl = this._getAvatarUrl(user.avatar_template, user.animated_avatar, 64);
+                            const displayName = user.name || user.username;
+                            return `
+                                <a href="${baseUrl}/u/${user.username}" target="_blank" class="ldsp-follow-item" data-username="${user.username}">
+                                    <div class="ldsp-follow-avatar-wrap">
+                                        <img class="ldsp-follow-avatar" src="${avatarUrl}" alt="${Utils.escapeHtml(user.username)}" loading="lazy">
+                                    </div>
+                                    <div class="ldsp-follow-user-info">
+                                        <div class="ldsp-follow-user-name">${Utils.escapeHtml(displayName)}</div>
+                                        <div class="ldsp-follow-user-id">@${Utils.escapeHtml(user.username)}</div>
+                                    </div>
+                                    <div class="ldsp-follow-arrow">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M9 18l6-6-6-6"/>
+                                        </svg>
+                                    </div>
+                                </a>`;
+                        }).join('')}
+                    </div>`;
+            }
+
+            _getAvatarUrl(template, animatedAvatar, size = 64) {
+                if (!template) return '';
+                // 优先使用动画头像
+                if (animatedAvatar) {
+                    return `https://${CURRENT_SITE.domain}${animatedAvatar}`;
+                }
+                // 替换size占位符
+                let url = template.replace('{size}', size);
+                // 如果是相对路径，添加域名
+                if (url.startsWith('/')) {
+                    url = `https://${CURRENT_SITE.domain}${url}`;
+                }
+                return url;
+            }
+
+            getStats() {
+                return {
+                    following: this.followingCount,
+                    followers: this.followersCount
+                };
+            }
+
+            destroy() {
+                if (this.overlay) {
+                    this.overlay.remove();
+                    this.overlay = null;
+                }
+            }
+        }
+
+        // ==================== 面板渲染器 ====================
+        class Renderer {
+            constructor(panel) {
+                this.panel = panel;
+                this.prevValues = new Map();
+                this.lastPct = -1;
+            }
+
+            // 渲染用户信息
+            renderUser(name, level, isOK, reqs, displayName = null) {
+                const done = reqs.filter(r => r.isSuccess).length;
+                const $ = this.panel.$;
+                // XSS 防护：使用 textContent 而不是 innerHTML，并清理输入
+                const safeName = Utils.sanitize(name, 30);
+                const safeDisplayName = Utils.sanitize(displayName, 100);
+                // 如果有 displayName 则显示 displayName + @username，否则只显示 username
+                if (safeDisplayName && safeDisplayName !== safeName) {
+                    $.userDisplayName.textContent = safeDisplayName;
+                    $.userHandle.textContent = `@${safeName}`;
+                    $.userHandle.style.display = '';
+                } else {
+                    $.userDisplayName.textContent = safeName;
+                    $.userHandle.textContent = '';
+                    $.userHandle.style.display = 'none';
+                }
+            }
+
+            // 渲染需求列表
+            renderReqs(reqs, level = null) {
+                const done = reqs.filter(r => r.isSuccess).length;
+                const remain = reqs.length - done;
+                const pct = Math.round(done / reqs.length * 100);
+                const cfg = Screen.getConfig();
+                const r = (cfg.ringSize / 2) - 8;
+                const circ = 2 * Math.PI * r;
+                const off = circ * (1 - pct / 100);
+                const anim = this.lastPct === -1 || this.lastPct !== pct || this.panel.animRing;
+                this.lastPct = pct;
+                this.panel.animRing = false;
+                
+                // 使用缓存的level或传入的level
+                // v3.4.7: 确保 level 是数字类型，避免字符串拼接 bug (如 "2" + 1 = "21")
+                // 注意：不能用 || 2，因为 0 级用户会被错误地当作 2 级
+                // 优先级：传入的 level > panel.cachedLevel > OAuth userInfo > 默认值 2
+                const parsedLevel = level !== null ? parseInt(level, 10) : NaN;
+                let currentLevel;
+                if (!isNaN(parsedLevel)) {
+                    currentLevel = parsedLevel;
+                } else if (this.panel.cachedLevel !== undefined) {
+                    currentLevel = this.panel.cachedLevel;
+                } else {
+                    // 尝试从 OAuth 用户信息获取（Tab 切换时的 fallback）
+                    const oauthUser = this.panel.oauth?.getUserInfo?.();
+                    const oauthLevel = oauthUser?.trust_level ?? oauthUser?.trustLevel;
+                    currentLevel = typeof oauthLevel === 'number' ? oauthLevel : 2;
+                }
+                if (level !== null && !isNaN(parsedLevel)) this.panel.cachedLevel = currentLevel;
+                
+                // 普通用户最高只能升级到LV3，LV4需要管理员手动授予
+                const maxTargetLevel = 3;
+                const canUpgrade = currentLevel < maxTargetLevel;
+                const targetLevel = canUpgrade ? currentLevel + 1 : currentLevel;
+                
+                let tipText, tipClass;
+                if (!canUpgrade) {
+                    tipText = currentLevel >= 4 ? '🏆 已达最高等级' : '🎖️ 已达普通用户最高等级';
+                    tipClass = 'max';
+                } else if (remain > 0) {
+                    tipText = `⏳ 距升级还需完成 ${remain} 项要求`;
+                    tipClass = 'progress';
+                } else {
+                    tipText = '🎉 已满足升级条件';
+                    tipClass = 'ok';
+                }
+
+                const confettiColors = ['#5070d0', '#5bb5a6', '#f97316', '#22c55e', '#eab308', '#ec4899', '#f43f5e', '#6b8cef'];
+                const confettiPieces = pct === 100 ? Array.from({length: 28}, (_, i) => {
+                    const color = confettiColors[i % confettiColors.length];
+                    const angle = (i / 28) * 360 + (Math.random() - 0.5) * 25;
+                    const rad = angle * Math.PI / 180;
+                    const dist = 55 + Math.random() * 45;
+                    const tx = Math.cos(rad) * dist;
+                    const ty = Math.sin(rad) * dist * 0.7;
+                    const drift = (Math.random() - 0.5) * 40;
+                    const rot = (Math.random() - 0.5) * 900;
+                    const delay = Math.random() * 0.06;
+                    const shape = ['\u25cf', '\u25a0', '\u2605', '\u2764', '\u2728', '\u2740'][Math.floor(Math.random() * 6)];
+                    return `<span class="ldsp-confetti-piece" style="color:${color};--tx:${tx}px;--ty:${ty}px;--drift:${drift}px;--rot:${rot}deg;animation-delay:${delay}s">${shape}</span>`;
+                }).join('') : '';
+
+                // 使用数组构建HTML（避免多次字符串拼接）
+                const htmlParts = [];
+                htmlParts.push(`<div class="ldsp-ring${pct === 100 ? ' complete' : ''}">`);
+                if (pct === 100) htmlParts.push(`<div class="ldsp-confetti">${confettiPieces}</div>`);
+                htmlParts.push(`
+                    <div class="ldsp-ring-stat">
+                        <div class="ldsp-ring-stat-val ok">✓${done}</div>
+                        <div class="ldsp-ring-stat-lbl">已达标</div>
+                    </div>
+                    <div class="ldsp-ring-center">
+                        <div class="ldsp-ring-wrap">
+                            <svg width="${cfg.ringSize}" height="${cfg.ringSize}" viewBox="0 0 ${cfg.ringSize} ${cfg.ringSize}">
+                                <defs><linearGradient id="ldsp-grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#5070d0"/><stop offset="100%" style="stop-color:#5bb5a6"/></linearGradient></defs>
+                                <circle class="ldsp-ring-bg" cx="${cfg.ringSize/2}" cy="${cfg.ringSize/2}" r="${r}"/>
+                                <circle class="ldsp-ring-fill${anim ? ' anim' : ''}" cx="${cfg.ringSize/2}" cy="${cfg.ringSize/2}" r="${r}" stroke-dasharray="${circ}" stroke-dashoffset="${anim ? circ : off}" style="--circ:${circ};--off:${off}"/>
+                            </svg>
+                            <div class="ldsp-ring-txt"><div class="ldsp-ring-val${anim ? ' anim' : ''}">${pct}%</div><div class="ldsp-ring-lbl">完成度</div></div>
+                        </div>
+                        <div class="ldsp-ring-lvl lv${currentLevel}">${canUpgrade ? `Lv${currentLevel} → Lv${targetLevel}` : `Lv${currentLevel} ★`}</div>
+                    </div>
+                    <div class="ldsp-ring-stat">
+                        <div class="ldsp-ring-stat-val fail">○${remain}</div>
+                        <div class="ldsp-ring-stat-lbl">待完成</div>
+                    </div>
+                </div>
+                <div class="ldsp-ring-tip ${tipClass}">${tipText}</div>`);
+
+                // 批量处理需求项（减少Map查询和字符串操作）
+                for (const r of reqs) {
+                    const name = Utils.simplifyName(r.name);
+                    const prev = this.prevValues.get(r.name);
+                    const upd = prev !== undefined && prev !== r.currentValue;
+                    const changeHtml = r.change 
+                        ? `<span class="ldsp-item-chg ${r.change > 0 ? 'up' : 'down'}">${r.change > 0 ? '+' : ''}${r.change}</span>` 
+                        : '';
+                    htmlParts.push(`<div class="ldsp-item ${r.isSuccess ? 'ok' : 'fail'}">
+                        <span class="ldsp-item-icon">${r.isSuccess ? '✓' : '○'}</span>
+                        <span class="ldsp-item-name">${name}</span>
+                        <div class="ldsp-item-vals">
+                            <span class="ldsp-item-cur${upd ? ' upd' : ''}">${r.currentValue}</span>
+                            <span class="ldsp-item-sep">/</span>
+                            <span class="ldsp-item-req">${r.requiredValue}</span>
+                        </div>
+                        ${changeHtml}
+                    </div>`);
+                    this.prevValues.set(r.name, r.currentValue);
+                }
+
+                // 添加底部了解信任等级的提示链接
+                htmlParts.push(`<a class="ldsp-learn-trust" href="https://linux.do/t/topic/2460" target="_blank" rel="noopener">了解论坛信任等级 →</a>`);
+
+                this.panel.$.reqs.innerHTML = htmlParts.join('');
+                
+                // 100%时，等圆环动画完成后触发撒花
+                if (pct === 100 && anim) {
+                    setTimeout(() => {
+                        const ring = this.panel.$.reqs.querySelector('.ldsp-ring.complete');
+                        if (ring) ring.classList.add('anim-done');
+                    }, 950); // 等待圆环动画
+                } else if (pct === 100) {
+                    setTimeout(() => {
+                        const ring = this.panel.$.reqs.querySelector('.ldsp-ring.complete');
+                        if (ring) ring.classList.add('anim-done');
+                    }, 50);
+                }
+            }
+            // 渲染头像
+            renderAvatar(url) {
+                const wrap = this.panel.$.user.querySelector('.ldsp-avatar-wrap');
+                if (!wrap) return;
+                const el = wrap.querySelector('.ldsp-avatar-ph, .ldsp-avatar');
+                if (!el) return;
+                const img = document.createElement('img');
+                img.className = 'ldsp-avatar';
+                img.src = url;
+                img.alt = 'Avatar';
+                img.onerror = () => {
+                    const ph = document.createElement('div');
+                    ph.className = 'ldsp-avatar-ph';
+                    ph.textContent = '👤';
+                    img.replaceWith(ph);
+                };
+                el.replaceWith(img);
+            }
+
+            // 渲染趋势标签页
+            renderTrends(currentTab) {
+                const tabs = [
+                    { id: 'today', icon: '☀️', label: '今日' },
+                    { id: 'week', icon: '📅', label: '本周' },
+                    { id: 'month', icon: '📊', label: '本月' },
+                    { id: 'year', icon: '📈', label: '本年' },
+                    { id: 'all', icon: '🌐', label: '全部' }
+                ];
+                this.panel.$.trends.innerHTML = `
+                    <div class="ldsp-subtabs">${tabs.map(t => 
+                        `<div class="ldsp-subtab${currentTab === t.id ? ' active' : ''}" data-tab="${t.id}">${t.icon} ${t.label}</div>`
+                    ).join('')}</div>
+                    <div class="ldsp-trend-content"></div>`;
+            }
+
+            // 获取趋势字段
+            getTrendFields(reqs) {
+                return CONFIG.TREND_FIELDS.map(f => {
+                    const req = reqs.find(r => r.name.includes(f.search));
+                    return req ? { ...f, req, name: req.name } : null;
+                }).filter(Boolean);
+            }
+
+            // 渲染今日趋势
+            renderTodayTrend(reqs, readingTime, todayData) {
+                if (!todayData) {
+                    return `<div class="ldsp-empty"><div class="ldsp-empty-icon">☀️</div><div class="ldsp-empty-txt">今日首次访问<br>数据将从现在开始统计</div></div>`;
+                }
+
+                const now = new Date();
+                const start = new Date(todayData.startTs);
+                const startStr = `${start.getHours()}:${String(start.getMinutes()).padStart(2, '0')}`;
+                const nowStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}`;
+                const lv = Utils.getReadingLevel(readingTime);
+                const pct = Math.min(readingTime / 600 * 100, 100);
+
+                // 阅读时间基础信息（所有用户都可见）
+                let html = `
+                    <div class="ldsp-time-info">今日 00:00 ~ ${nowStr} (首次记录于 ${startStr})</div>
+                    <div class="ldsp-rd-stats" style="background:${lv.bg.replace('0.15', '0.08')}">
+                        <div class="ldsp-rd-stats-icon">${lv.icon}</div>
+                        <div class="ldsp-rd-stats-info"><div class="ldsp-rd-stats-val">${Utils.formatReadingTime(readingTime)}</div><div class="ldsp-rd-stats-lbl">今日累计阅读</div></div>
+                        <div class="ldsp-rd-stats-badge" style="background:${lv.bg};color:${lv.color};box-shadow:0 3px 12px ${lv.bg.replace('0.15','0.4')},inset 0 1px 0 rgba(255,255,255,.25)">${lv.label}</div>
+                    </div>
+                    <div class="ldsp-rd-prog">
+                        <div class="ldsp-rd-prog-hdr"><span class="ldsp-rd-prog-title">📖 阅读目标 (10小时)</span><span class="ldsp-rd-prog-val">${Math.round(pct)}%</span></div>
+                        <div class="ldsp-rd-prog-bar"><div class="ldsp-rd-prog-fill" style="width:${pct}%;background:${lv.bg.replace('0.15', '1')}"></div></div>
+                    </div>`;
+
+                // 升级要求变化明细（仅当有reqs时显示）
+                if (reqs && reqs.length > 0) {
+                    const changes = reqs.map(r => ({
+                        name: Utils.simplifyName(r.name),
+                        diff: r.currentValue - (todayData.startData[r.name] || 0)
+                    })).filter(c => c.diff !== 0).sort((a, b) => b.diff - a.diff);
+
+                    const pos = changes.filter(c => c.diff > 0).length;
+                    const neg = changes.filter(c => c.diff < 0).length;
+
+                    html += `
+                    <div class="ldsp-today-stats">
+                        <div class="ldsp-today-stat"><div class="ldsp-today-stat-val">${pos}</div><div class="ldsp-today-stat-lbl">📈 增长项</div></div>
+                        <div class="ldsp-today-stat"><div class="ldsp-today-stat-val">${neg}</div><div class="ldsp-today-stat-lbl">📉 下降项</div></div>
+                    </div>`;
+
+                    if (changes.length > 0) {
+                        html += `<div class="ldsp-chart"><div class="ldsp-chart-title">📊 今日变化明细</div><div class="ldsp-changes">${
+                            changes.map(c => `<div class="ldsp-chg-row"><span class="ldsp-chg-name">${c.name}</span><span class="ldsp-chg-val ${c.diff > 0 ? 'up' : 'down'}">${c.diff > 0 ? '+' : ''}${c.diff}</span></div>`).join('')
+                        }</div></div>`;
+                    } else {
+                        html += `<div class="ldsp-no-chg">今日暂无数据变化</div>`;
+                    }
+                }
+
+                return html;
+            }
+
+            // 渲染周趋势
+            renderWeekTrend(history, reqs, historyMgr, tracker) {
+                // 阅读时间图表始终显示
+                let html = this._renderWeekChart(tracker);
+
+                // 升级要求趋势（仅当有reqs时显示）
+                if (reqs && reqs.length > 0) {
+                    const weekAgo = Date.now() - 7 * 86400000;
+                    const recent = history.filter(h => h.ts > weekAgo);
+                    if (recent.length >= 1) {
+                        const daily = historyMgr.aggregateDaily(recent, reqs, 7);
+                        const fields = this.getTrendFields(reqs);
+                        const trends = [];
+
+                        for (const f of fields) {
+                            const data = this._calcDailyTrend(daily, f.name, 7);
+                            if (data.values.some(v => v > 0)) {
+                                trends.push({ label: f.label, ...data, current: f.req.currentValue });
+                            }
+                        }
+
+                        if (trends.length > 0) {
+                            html += `<div class="ldsp-chart"><div class="ldsp-chart-title">📈 本周每日增量<span class="ldsp-chart-sub">每日累积量</span></div>`;
+                            html += this._renderSparkRows(trends);
+                            if (trends[0].dates.length > 0) {
+                                html += `<div class="ldsp-date-labels">${trends[0].dates.map(d => `<span class="ldsp-date-lbl">${d}</span>`).join('')}</div>`;
+                            }
+                            html += `</div>`;
+                        }
+                    }
+                }
+
+                return html;
+            }
+
+            // 渲染月趋势
+            renderMonthTrend(history, reqs, historyMgr, tracker) {
+                // 阅读时间图表始终显示
+                let html = this._renderMonthChart(tracker);
+
+                // 升级要求趋势（仅当有reqs时显示）
+                if (reqs && reqs.length > 0 && history.length >= 1) {
+                    const weekly = historyMgr.aggregateWeekly(history, reqs);
+                    const fields = this.getTrendFields(reqs);
+                    const trends = [];
+
+                    for (const f of fields) {
+                        const data = this._calcWeeklyTrend(weekly, f.name);
+                        if (data.values.length > 0) {
+                            trends.push({ label: f.label, ...data, current: f.req.currentValue });
+                        }
+                    }
+
+                    if (trends.length > 0) {
+                        html += `<div class="ldsp-chart"><div class="ldsp-chart-title">📈 本月每周增量<span class="ldsp-chart-sub">每周累积量</span></div>`;
+                        html += this._renderSparkRows(trends, true);
+                        if (trends[0].labels?.length > 0) {
+                            html += `<div class="ldsp-date-labels" style="padding-left:60px">${trends[0].labels.map(l => `<span class="ldsp-date-lbl">${l}</span>`).join('')}</div>`;
+                        }
+                        html += `</div>`;
+                    }
+                }
+
+                return html;
+            }
+
+            // 渲染年趋势
+            renderYearTrend(history, reqs, historyMgr, tracker) {
+                // 阅读热力图始终显示
+                let html = this._renderYearChart(tracker);
+
+                // 升级要求趋势（仅当有reqs时显示）
+                if (reqs && reqs.length > 0) {
+                    const yearAgo = Date.now() - 365 * 86400000;
+                    const recent = history.filter(h => h.ts > yearAgo);
+                    if (recent.length >= 1) {
+                        const monthly = historyMgr.aggregateMonthly(recent, reqs);
+                        const fields = this.getTrendFields(reqs);
+                        const trends = [];
+
+                        for (const f of fields) {
+                            const data = this._calcMonthlyTrend(monthly, f.name);
+                            if (data.values.some(v => v > 0)) {
+                                trends.push({ label: f.label, ...data, current: f.req.currentValue });
+                            }
+                        }
+
+                        if (trends.length > 0) {
+                            html += `<div class="ldsp-chart"><div class="ldsp-chart-title">📊 本年每月增量<span class="ldsp-chart-sub">每月累积量</span></div>`;
+                            trends.forEach(t => {
+                                const max = Math.max(...t.values, 1);
+                                const bars = t.values.map((v, i) => `<div class="ldsp-spark-bar" style="height:${Math.max(v / max * 16, 2)}px" data-v="${v}" title="${i + 1}月: ${v}"></div>`).join('');
+                                html += `<div class="ldsp-spark-row"><span class="ldsp-spark-lbl">${t.label}</span><div class="ldsp-spark-bars" style="max-width:100%">${bars}</div><span class="ldsp-spark-val">${t.current}</span></div>`;
+                            });
+                            html += `</div>`;
+                        }
+                    }
+                }
+
+                return html;
+            }
+
+            // 渲染全部趋势
+            renderAllTrend(history, reqs, tracker) {
+                const total = tracker.getTotalTime();
+                const readingData = tracker.storage.get('readingTime', null);
+                const actualReadingDays = readingData?.dailyData ? Object.keys(readingData.dailyData).length : 1;
+                const avg = Math.round(total / Math.max(actualReadingDays, 1));
+                const lv = Utils.getReadingLevel(avg);
+
+                // 阅读时间统计（始终显示）
+                let html = `<div class="ldsp-time-info">共记录 <span>${actualReadingDays}</span> 天阅读数据</div>`;
+
+                if (total > 0) {
+                    html += `<div class="ldsp-rd-stats" style="background:${lv.bg.replace('0.15', '0.08')}">
+                        <div class="ldsp-rd-stats-icon">${lv.icon}</div>
+                        <div class="ldsp-rd-stats-info"><div class="ldsp-rd-stats-val">${Utils.formatReadingTime(total)}</div><div class="ldsp-rd-stats-lbl">累计阅读时间 · 日均 ${Utils.formatReadingTime(avg)}</div></div>
+                        <div class="ldsp-rd-stats-badge" style="background:${lv.bg};color:${lv.color};box-shadow:0 3px 12px ${lv.bg.replace('0.15','0.4')},inset 0 1px 0 rgba(255,255,255,.25)">${lv.label}</div>
+                    </div>`;
+                }
+
+                // 升级要求统计（仅当有reqs和history时显示）
+                if (reqs && reqs.length > 0 && history.length >= 1) {
+                    const oldest = history[0], newest = history.at(-1);
+                    const recordDays = history.length;
+                    const spanDays = Math.ceil((Date.now() - oldest.ts) / 86400000);
+
+                    if (spanDays > actualReadingDays) {
+                        html = html.replace(`共记录 <span>${actualReadingDays}</span> 天阅读数据`, 
+                            `共记录 <span>${recordDays}</span> 天数据${spanDays > recordDays ? ` · 跨度 ${spanDays} 天` : ''}`);
+                    }
+
+                    // 累计变化统计
+                    const changes = reqs.map(r => ({
+                        name: Utils.simplifyName(r.name),
+                        diff: (newest.data[r.name] || 0) - (oldest.data[r.name] || 0),
+                        current: r.currentValue,
+                        required: r.requiredValue,
+                        isSuccess: r.isSuccess
+                    })).filter(c => c.diff !== 0 || c.current > 0);
+
+                    if (changes.length > 0) {
+                        html += `<div class="ldsp-chart"><div class="ldsp-chart-title">📊 累计变化 <span style="font-size:9px;color:var(--txt-mut);font-weight:normal">(${recordDays}天)</span></div><div class="ldsp-changes">${
+                            changes.map(c => {
+                                const diffText = c.diff !== 0 ? `<span class="ldsp-chg-val ${c.diff > 0 ? 'up' : 'down'}">${c.diff > 0 ? '+' : ''}${c.diff}</span>` : '';
+                                return `<div class="ldsp-chg-row"><span class="ldsp-chg-name">${c.name}</span><span class="ldsp-chg-cur">${c.current}/${c.required}</span>${diffText}</div>`;
+                            }).join('')
+                        }</div></div>`;
+                    }
+
+                    // 如果有足够的历史数据，显示更多统计
+                    if (recordDays >= 2) {
+                        const dailyAvgChanges = reqs.map(r => ({
+                            name: Utils.simplifyName(r.name),
+                            avg: Math.round(((newest.data[r.name] || 0) - (oldest.data[r.name] || 0)) / Math.max(recordDays - 1, 1) * 10) / 10
+                        })).filter(c => c.avg > 0);
+
+                        if (dailyAvgChanges.length > 0) {
+                            html += `<div class="ldsp-chart"><div class="ldsp-chart-title">📈 日均增量</div><div class="ldsp-changes">${
+                                dailyAvgChanges.map(c => `<div class="ldsp-chg-row"><span class="ldsp-chg-name">${c.name}</span><span class="ldsp-chg-val up">+${c.avg}</span></div>`).join('')
+                            }</div></div>`;
+                        }
+                    }
+                }
+
+                return html;
+            }
+
+            _renderSparkRows(trends, isWeekly = false) {
+                let html = '';
+                for (const t of trends) {
+                    const max = Math.max(...t.values, 1);
+                    const bars = t.values.map((v, i) => {
+                        const h = Math.max(v / max * 20, 2);
+                        const op = isWeekly && i === t.values.length - 1 ? 1 : (isWeekly ? 0.6 : '');
+                        return `<div class="ldsp-spark-bar" style="height:${h}px${op ? `;opacity:${op}` : ''}" data-v="${v}"></div>`;
+                    }).join('');
+                    html += `<div class="ldsp-spark-row"><span class="ldsp-spark-lbl">${t.label}</span><div class="ldsp-spark-bars">${bars}</div><span class="ldsp-spark-val">${t.current}</span></div>`;
+                }
+                return html;
+            }
+
+            _renderWeekChart(tracker) {
+                const days = tracker.getWeekHistory();
+                const max = Math.max(...days.map(d => d.minutes), 60);
+                const total = days.reduce((s, d) => s + d.minutes, 0);
+                const avg = Math.round(total / 7);
+
+                const bars = days.map(d => {
+                    const h = Math.max(d.minutes / max * 45, 3);
+                    return `<div class="ldsp-rd-day"><div class="ldsp-rd-day-bar" style="height:${h}px;opacity:${d.isToday ? 1 : 0.7}" data-t="${Utils.formatReadingTime(d.minutes)}"></div><span class="ldsp-rd-day-lbl">${d.day}</span></div>`;
+                }).join('');
+
+                return `<div class="ldsp-chart"><div class="ldsp-chart-title">⏱️ 7天阅读时间<span class="ldsp-chart-sub">共 ${Utils.formatReadingTime(total)} · 日均 ${Utils.formatReadingTime(avg)}</span></div><div class="ldsp-rd-week">${bars}</div></div>`;
+            }
+
+            _renderMonthChart(tracker) {
+                const today = new Date();
+                const [year, month, currentDay] = [today.getFullYear(), today.getMonth(), today.getDate()];
+                const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+                let max = 1, total = 0;
+                const days = [];
+
+                for (let d = 1; d <= daysInMonth; d++) {
+                    const key = new Date(year, month, d).toDateString();
+                    const isToday = d === currentDay;
+                    const isFuture = d > currentDay;
+                    const mins = isFuture ? 0 : (isToday ? tracker.getTodayTime() : tracker.getTimeForDate(key));
+                    if (!isFuture) { max = Math.max(max, mins); total += mins; }
+                    days.push({ d, mins: Math.max(mins, 0), isToday, isFuture });
+                }
+
+                const avg = currentDay > 0 ? Math.round(total / currentDay) : 0;
+                // 日期标签字号根据天数动态调整
+                const lblFontSize = daysInMonth >= 31 ? '7px' : (daysInMonth >= 28 ? '8px' : '9px');
+                const bars = days.map(day => {
+                    const h = max > 0 ? (day.mins > 0 ? Math.max(day.mins / max * 45, 2) : 1) : 1;
+                    const op = day.isFuture ? 0.35 : (day.isToday ? 1 : 0.75);
+                    const timeStr = day.isFuture ? '0分钟 (未到)' : Utils.formatReadingTime(day.mins);
+                    return `<div class="ldsp-rd-day" style="margin:0 1px;flex:1;min-width:2px"><div class="ldsp-rd-day-bar" style="height:${h}px;opacity:${op};background:var(--accent2);width:100%;border-radius:3px 3px 0 0" data-t="${day.d}日: ${timeStr}"></div><div class="ldsp-rd-day-lbl" style="margin-top:3px;font-size:${lblFontSize}">${day.d}</div></div>`;
+                }).join('');
+
+                return `<div class="ldsp-chart"><div class="ldsp-chart-title">⏱️ 本月阅读时间<span class="ldsp-chart-sub">共 ${Utils.formatReadingTime(total)} · 日均 ${Utils.formatReadingTime(avg)}</span></div><div class="ldsp-rd-week" style="height:100px;align-items:flex-end;gap:1px">${bars}</div></div>`;
+            }
+
+            _renderYearChart(tracker) {
+                const today = new Date();
+                const year = today.getFullYear();
+                const data = tracker.getYearData();
+
+                const jan1 = new Date(year, 0, 1);
+                const blanks = jan1.getDay() === 0 ? 6 : jan1.getDay() - 1;
+
+                let total = 0;
+                data.forEach(m => total += m);
+
+                const days = Array(blanks).fill({ empty: true });
+                let d = new Date(jan1);
+                while (d <= today) {
+                    days.push({
+                        date: new Date(d),
+                        mins: Math.max(data.get(d.toDateString()) || 0, 0),
+                        month: d.getMonth(),
+                        day: d.getDate()
+                    });
+                    d.setDate(d.getDate() + 1);
+                }
+
+                const COLS = 14;
+                while (days.length % COLS) days.push({ empty: true });
+
+                const rows = [];
+                for (let i = 0; i < days.length; i += COLS) {
+                    rows.push(days.slice(i, i + COLS));
+                }
+
+                const monthRows = new Map();
+                rows.forEach((r, i) => {
+                    r.forEach(day => {
+                        if (!day.empty) {
+                            const m = day.month;
+                            if (!monthRows.has(m)) monthRows.set(m, { start: i, end: i });
+                            else monthRows.get(m).end = i;
+                        }
+                    });
+                });
+
+                const labels = new Map();
+                monthRows.forEach((info, m) => {
+                    const mid = Math.floor((info.start + info.end) / 2);
+                    if (!labels.has(mid)) labels.set(mid, CONFIG.MONTHS[m]);
+                });
+
+                let html = `<div class="ldsp-chart"><div class="ldsp-chart-title">⏱️ 本年阅读时间<span class="ldsp-chart-sub">共 ${Utils.formatReadingTime(total)}</span></div><div class="ldsp-year-heatmap"><div class="ldsp-year-wrap">`;
+
+                rows.forEach((row, i) => {
+                    const lbl = labels.get(i) || '';
+                    html += `<div class="ldsp-year-row"><span class="ldsp-year-month">${lbl}</span><div class="ldsp-year-cells">`;
+                    row.forEach(day => {
+                        if (day.empty) {
+                            html += `<div class="ldsp-year-cell empty"></div>`;
+                        } else {
+                            const lv = Utils.getHeatmapLevel(day.mins);
+                            html += `<div class="ldsp-year-cell l${lv}"><div class="ldsp-year-tip">${day.month + 1}/${day.day}<br>${Utils.formatReadingTime(day.mins)}</div></div>`;
+                        }
+                    });
+                    html += `</div></div>`;
+                });
+
+                html += `</div><div class="ldsp-heatmap-legend"><span>&lt;1分</span>`;
+                const legendColors = ['rgba(107,140,239,.1)', 'rgba(180,230,210,.35)', 'rgba(130,215,180,.5)', 'rgba(90,195,155,.65)', 'linear-gradient(135deg,#6dcfa5,#50c090)'];
+                for (let i = 0; i <= 4; i++) html += `<div class="ldsp-heatmap-legend-cell" style="background:${legendColors[i]}"></div>`;
+                html += `<span>&gt;5小时</span></div></div></div>`;
+
+                return html;
+            }
+
+            _calcDailyTrend(daily, name, maxDays) {
+                const sorted = [...daily.keys()].sort((a, b) => new Date(a) - new Date(b)).slice(-maxDays);
+                return {
+                    values: sorted.map(d => Math.max(daily.get(d)[name] || 0, 0)),
+                    dates: sorted.map(d => Utils.formatDate(new Date(d).getTime(), 'short'))
+                };
+            }
+
+            _calcWeeklyTrend(weekly, name) {
+                const sorted = [...weekly.keys()].sort((a, b) => a - b);
+                return {
+                    values: sorted.map(i => Math.max(weekly.get(i).data[name] || 0, 0)),
+                    labels: sorted.map(i => weekly.get(i).label)
+                };
+            }
+
+            _calcMonthlyTrend(monthly, name) {
+                const sorted = [...monthly.keys()].sort((a, b) => new Date(a) - new Date(b));
+                return {
+                    values: sorted.map(m => Math.max(monthly.get(m)[name] || 0, 0)),
+                    dates: sorted.map(m => `${new Date(m).getMonth() + 1}月`)
+                };
+            }
+
+            // Toast 提示
+            showToast(msg) {
+                const toast = document.createElement('div');
+                toast.className = 'ldsp-toast';
+                toast.innerHTML = msg;
+                this.panel.el.appendChild(toast);
+                requestAnimationFrame(() => toast.classList.add('show'));
+                setTimeout(() => {
+                    toast.classList.remove('show');
+                    setTimeout(() => toast.remove(), 300);
+                }, 4000);
+            }
+
+            // 登录提示模态框
+            showLoginPrompt(isUpgrade = false) {
+                const overlay = document.createElement('div');
+                overlay.className = 'ldsp-modal-overlay';
+                overlay.innerHTML = `
+                    <div class="ldsp-modal">
+                        <div class="ldsp-modal-hdr"><span class="ldsp-modal-icon">${isUpgrade ? '🎉' : '👋'}</span><span class="ldsp-modal-title">${isUpgrade ? '升级到 v3.0' : '欢迎使用 LDStatus Mini'}</span></div>
+                        <div class="ldsp-modal-body">
+                            ${isUpgrade ? `<p>v3.0 版本新增了 <strong>云同步</strong> 功能！</p><p>登录后，你的阅读数据将自动同步到云端，支持跨浏览器、跨设备访问。</p>` : `<p>登录 Linux.do 账号后可以：</p><ul><li>☁️ 阅读数据云端同步</li><li>🔄 跨浏览器/设备同步</li></ul>`}
+                        </div>
+                        <div class="ldsp-modal-footer">
+                            <button class="ldsp-modal-btn primary" id="ldsp-modal-login">🚀 立即登录</button>
+                            <button class="ldsp-modal-btn secondary" id="ldsp-modal-skip">稍后再说</button>
+                        </div>
+                        <div class="ldsp-modal-note">登录仅用于云同步，不登录也可正常使用本地功能</div>
+                    </div>`;
+                this.panel.el.appendChild(overlay);
+                requestAnimationFrame(() => overlay.classList.add('show'));
+                return overlay;
+            }
+
+            // 渲染排行榜
+            renderLeaderboard(tab, isLoggedIn, isJoined) {
+                const tabs = [
+                    { id: 'daily', label: '📅 日榜' },
+                    { id: 'weekly', label: '📊 周榜' },
+                    { id: 'monthly', label: '📈 月榜' }
+                ];
+                this.panel.$.leaderboard.innerHTML = `
+                    <div class="ldsp-subtabs">${tabs.map(t => 
+                        `<div class="ldsp-subtab${tab === t.id ? ' active' : ''}" data-lb="${t.id}">${t.label}</div>`
+                    ).join('')}</div>
+                    <div class="ldsp-lb-content"></div>`;
+            }
+
+            renderLeaderboardLogin() {
+                return `<div class="ldsp-lb-login">
+                    <div class="ldsp-lb-login-icon">🔐</div>
+                    <div class="ldsp-lb-login-title">需要登录</div>
+                    <div class="ldsp-lb-login-desc">登录后可以：<br>☁️ 阅读数据云端同步<br>🏆 查看/加入排行榜</div>
+                    <button class="ldsp-lb-btn primary" id="ldsp-lb-login">🚀 立即登录</button>
+                    <div class="ldsp-privacy-note"><span>🔒</span><span>仅获取基本信息，用于数据同步</span></div>
+                </div>`;
+            }
+
+            renderLeaderboardJoin() {
+                return `<div class="ldsp-join-prompt">
+                    <div class="ldsp-join-prompt-icon">🏆</div>
+                    <div class="ldsp-join-prompt-title">加入阅读排行榜</div>
+                    <div class="ldsp-join-prompt-desc">加入后可以查看排行榜，你的阅读时间将与其他用户一起展示<br>这是完全可选的，随时可以退出</div>
+                    <button class="ldsp-lb-btn primary" id="ldsp-lb-join">✨ 加入排行榜</button>
+                    <div class="ldsp-privacy-note"><span>🔒</span><span>仅展示用户名和阅读时间</span></div>
+                </div>`;
+            }
+
+            renderLeaderboardData(data, userId, isJoined, type = 'daily') {
+                // 从 CONFIG.CACHE 动态读取更新频率并格式化
+                const formatInterval = (ms) => {
+                    const mins = Math.round(ms / 60000);
+                    if (mins < 60) return `每 ${mins} 分钟更新`;
+                    const hours = Math.round(mins / 60);
+                    return `每 ${hours} 小时更新`;
+                };
+                const rules = {
+                    daily: formatInterval(CONFIG.CACHE.LEADERBOARD_DAILY_TTL),
+                    weekly: formatInterval(CONFIG.CACHE.LEADERBOARD_WEEKLY_TTL),
+                    monthly: formatInterval(CONFIG.CACHE.LEADERBOARD_MONTHLY_TTL)
+                };
+
+                if (!data?.rankings?.length) {
+                    return `<div class="ldsp-lb-empty"><div class="ldsp-lb-empty-icon">📭</div><div class="ldsp-lb-empty-txt">暂无排行数据<br>成为第一个上榜的人吧！</div></div>`;
+                }
+
+                let html = `<div class="ldsp-lb-period"><button class="ldsp-lb-refresh" data-type="${type}" title="手动刷新">🔄</button>${data.period ? `📅 统计周期: <span>${data.period}</span>` : ''}<span class="ldsp-update-rule">🔄 ${rules[type]}</span></div>`;
+
+                if (data.myRank && isJoined) {
+                    // 显示用户排名（无论是否在榜内都显示真实排名）
+                    const rankDisplay = data.myRank.rank ? `#${data.myRank.rank}` : (data.myRank.rank_display || '--');
+                    const inTopClass = data.myRank.in_top ? '' : ' not-in-top';
+                    const topLabel = data.myRank.in_top ? '' : '<span class="ldsp-not-in-top-hint">（未入榜）</span>';
+                    html += `<div class="ldsp-my-rank${inTopClass}"><div><div class="ldsp-my-rank-lbl">我的排名${topLabel}</div><div class="ldsp-my-rank-val">${rankDisplay}</div></div><div class="ldsp-my-rank-time">${Utils.formatReadingTime(data.myRank.minutes)}</div></div>`;
+                }
+
+                html += '<div class="ldsp-rank-list">';
+                const siteBaseUrl = `https://${CURRENT_SITE.domain}`;
+                data.rankings.forEach((user, i) => {
+                    const rank = i + 1;
+                    const isMe = userId && user.user_id === userId;
+                    const cls = [rank <= 3 ? `t${rank}` : '', isMe ? 'me' : ''].filter(Boolean).join(' ');
+                    const icon = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : rank;
+                    const avatar = user.avatar_url ? (user.avatar_url.startsWith('http') ? user.avatar_url : `${siteBaseUrl}${user.avatar_url}`) : '';
+                    // XSS 防护：转义用户名和显示名称
+                    const safeUsername = Utils.escapeHtml(Utils.sanitize(user.username, 30));
+                    const safeName = Utils.escapeHtml(Utils.sanitize(user.name, 100));
+                    const hasName = safeName && safeName.trim();
+                    const nameHtml = hasName 
+                        ? `<span class="ldsp-rank-display-name">${safeName}</span><span class="ldsp-rank-username">@${safeUsername}</span>`
+                        : `<span class="ldsp-rank-name-only">${safeUsername}</span>`;
+
+                    html += `<div class="ldsp-rank-item ${cls}" style="animation-delay:${i * 30}ms">
+                        <div class="ldsp-rank-num">${rank <= 3 ? icon : rank}</div>
+                        ${avatar ? `<img class="ldsp-rank-avatar" src="${avatar}" alt="${safeUsername}" onerror="this.outerHTML='<div class=\\'ldsp-rank-avatar\\' style=\\'display:flex;align-items:center;justify-content:center;font-size:12px\\'>👤</div>'">` : '<div class="ldsp-rank-avatar" style="display:flex;align-items:center;justify-content:center;font-size:12px">👤</div>'}
+                        <div class="ldsp-rank-info">${nameHtml}${isMe ? '<span class="ldsp-rank-me-tag">(我)</span>' : ''}</div>
+                        <div class="ldsp-rank-time">${Utils.formatReadingTime(user.minutes)}</div>
+                    </div>`;
+                });
+                html += '</div>';
+
+                if (isJoined) {
+                    html += `<div style="margin-top:12px;text-align:center"><button class="ldsp-lb-btn danger" id="ldsp-lb-quit" style="font-size:9px;padding:4px 8px">退出排行榜</button></div>`;
+                }
+
+                return html;
+            }
+
+            renderLeaderboardLoading() {
+                return `<div class="ldsp-mini-loader"><div class="ldsp-mini-spin"></div><div class="ldsp-mini-txt">加载排行榜...</div></div>`;
+            }
+
+            renderLeaderboardError(msg) {
+                return `<div class="ldsp-lb-empty"><div class="ldsp-lb-empty-icon">❌</div><div class="ldsp-lb-empty-txt">${msg}</div><button class="ldsp-lb-btn secondary" id="ldsp-lb-retry" style="margin-top:12px">🔄 重试</button></div>`;
+            }
+
+            // ========== 我的活动渲染 ==========
+            renderActivity(activeSubTab) {
+                const tabs = [
+                    { id: 'read', label: '已读', icon: '📖' },
+                    { id: 'bookmarks', label: '收藏', icon: '⭐' },
+                    { id: 'replies', label: '回复', icon: '💬' },
+                    { id: 'reactions', label: '互动', icon: '🤝' },
+                    { id: 'likes', label: '赞过', icon: '❤️' },
+                    { id: 'topics', label: '我的话题', icon: '📝' }
+                ];
+                this.panel.$.activity.innerHTML = `
+                    <div class="ldsp-subtabs">${tabs.map(t => 
+                        `<div class="ldsp-subtab${activeSubTab === t.id ? ' active' : ''}" data-activity="${t.id}">${t.icon} ${t.label}</div>`
+                    ).join('')}</div>
+                    <div class="ldsp-activity-content"></div>`;
+            }
+
+            renderActivityLoading() {
+                return `<div class="ldsp-mini-loader"><div class="ldsp-mini-spin"></div><div class="ldsp-mini-txt">加载中...</div></div>`;
+            }
+
+            renderActivityEmpty(icon, msg) {
+                return `<div class="ldsp-lb-empty"><div class="ldsp-lb-empty-icon">${icon}</div><div class="ldsp-lb-empty-txt">${msg}</div></div>`;
+            }
+
+            renderActivityError(msg) {
+                return `<div class="ldsp-lb-empty"><div class="ldsp-lb-empty-icon">❌</div><div class="ldsp-lb-empty-txt">${msg}</div><button class="ldsp-lb-btn secondary ldsp-activity-retry" style="margin-top:12px">🔄 重试</button></div>`;
+            }
+
+            renderTopicList(topics, hasMore) {
+                if (!topics || topics.length === 0) {
+                    return this.renderActivityEmpty('📭', '暂无已读话题');
+                }
+
+                // SVG 图标定义（更小更简洁）
+                const icons = {
+                    reply: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>',
+                    view: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
+                    like: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>'
+                };
+
+                // 获取头像URL
+                const getAvatarUrl = (user, size = 36) => {
+                    if (!user || !user.avatar_template) return '';
+                    let template = user.avatar_template;
+                    if (template.startsWith('/')) {
+                        template = `https://${CURRENT_SITE.domain}${template}`;
+                    }
+                    return template.replace('{size}', size);
+                };
+
+                // 获取缩略图URL
+                const getThumbnailUrl = (topic) => {
+                    if (!topic.thumbnails || topic.thumbnails.length === 0) return null;
+                    const small = topic.thumbnails.find(t => t.max_width && t.max_width <= 200);
+                    return small?.url || topic.thumbnails[topic.thumbnails.length - 1]?.url || topic.image_url;
+                };
+
+                let html = '<div class="ldsp-topic-list ldsp-topic-list-enhanced">';
+                topics.forEach((topic, i) => {
+                    const title = Utils.escapeHtml(topic.title || '无标题');
+                    const postsCount = topic.posts_count || 0;
+                    const views = topic.views || 0;
+                    const likeCount = topic.like_count || 0;
+                    const unread = topic.unread_posts || topic.unread || 0;
+                    const newPosts = topic.new_posts || 0;
+                    const tags = topic.tags || [];
+                    const relativeTime = Utils.formatRelativeTime(topic.bumped_at);
+                    const topicUrl = `https://${CURRENT_SITE.domain}/t/topic/${topic.id}`;
+                    const thumbnailUrl = getThumbnailUrl(topic);
+                    const posters = topic.postersInfo || [];
+                    
+                    // 未读/新回复标记（简化，只显示一个）
+                    let badgeHtml = '';
+                    if (unread > 0) {
+                        badgeHtml = `<span class="ldsp-topic-badge ldsp-badge-unread">${unread}</span>`;
+                    } else if (newPosts > 0) {
+                        badgeHtml = `<span class="ldsp-topic-badge ldsp-badge-new">${newPosts}</span>`;
+                    }
+
+                    // 标签（最多2个）
+                    let tagsHtml = '';
+                    if (tags.length > 0) {
+                        tagsHtml = `<div class="ldsp-topic-tags">${tags.slice(0, 2).map(tag => 
+                            `<span class="ldsp-topic-tag">${Utils.escapeHtml(tag)}</span>`
+                        ).join('')}${tags.length > 2 ? `<span class="ldsp-topic-tag-more">+${tags.length - 2}</span>` : ''}</div>`;
+                    }
+
+                    // 发帖人头像（最多3个，更小）
+                    let postersHtml = '';
+                    if (posters.length > 0) {
+                        postersHtml = '<div class="ldsp-topic-posters">';
+                        posters.slice(0, 3).forEach((poster, idx) => {
+                            const isOP = poster.description?.includes('原始发帖人');
+                            const isLatest = poster.extras?.includes('latest');
+                            const cls = isOP ? 'ldsp-poster-op' : (isLatest ? 'ldsp-poster-latest' : '');
+                            postersHtml += `<img src="${getAvatarUrl(poster)}" class="ldsp-topic-avatar ${cls}" title="${Utils.escapeHtml(poster.name || poster.username)}" style="z-index:${5-idx}" loading="lazy">`;
+                        });
+                        if (posters.length > 3) postersHtml += `<span class="ldsp-topic-posters-more">+${posters.length - 3}</span>`;
+                        postersHtml += '</div>';
+                    }
+                    
+                    // 缩略图
+                    const thumbHtml = thumbnailUrl ? `<div class="ldsp-topic-thumbnail"><img src="${thumbnailUrl}" loading="lazy"></div>` : '';
+                    
+                    html += `
+                        <a href="${topicUrl}" target="_blank" class="ldsp-topic-item" style="animation-delay:${i * 20}ms">
+                            <div class="ldsp-topic-main">
+                                <div class="ldsp-topic-header">
+                                    <div class="ldsp-topic-title-row">
+                                        ${badgeHtml ? `<div class="ldsp-topic-badges">${badgeHtml}</div>` : ''}
+                                        <div class="ldsp-topic-title" title="${title}">${title}</div>
+                                    </div>
+                                    <div class="ldsp-topic-info">
+                                        ${tagsHtml}
+                                    </div>
+                                </div>
+                                <div class="ldsp-topic-footer">
+                                    ${postersHtml}
+                                    <div class="ldsp-topic-stats">
+                                        <span class="ldsp-topic-stat" title="回复">${icons.reply}<em>${postsCount}</em></span>
+                                        <span class="ldsp-topic-stat" title="阅读">${icons.view}<em>${views >= 1000 ? (views/1000).toFixed(1)+'k' : views}</em></span>
+                                        ${likeCount > 0 ? `<span class="ldsp-topic-stat ldsp-stat-like" title="点赞">${icons.like}<em>${likeCount}</em></span>` : ''}
+                                        <span class="ldsp-topic-time">${relativeTime}</span>
+                                    </div>
+                                </div>
+                            </div>
+                            ${thumbHtml}
+                        </a>`;
+                });
+                html += '</div>';
+
+                if (hasMore) {
+                    html += '<div class="ldsp-load-more"><div class="ldsp-load-more-spinner"></div><span>加载更多...</span></div>';
+                }
+
+                return html;
+            }
+
+            renderBookmarkList(bookmarks, hasMore) {
+                if (!bookmarks || bookmarks.length === 0) {
+                    return this.renderActivityEmpty('⭐', '暂无收藏');
+                }
+
+                // SVG 图标定义
+                const icons = {
+                    clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
+                    calendar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
+                    bookmark: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>'
+                };
+
+                let html = '<div class="ldsp-bookmark-list">';
+                bookmarks.forEach((bookmark, i) => {
+                    const title = Utils.escapeHtml(bookmark.title || bookmark.fancy_title || '无标题');
+                    const tags = bookmark.tags || [];
+                    const bumpedAt = bookmark.bumped_at;
+                    const createdAt = bookmark.created_at;
+                    const relativeTime = Utils.formatRelativeTime(bumpedAt);
+                    const createdTime = Utils.formatDateTime(createdAt);
+                    const bookmarkUrl = bookmark.bookmarkable_url || '#';
+                    const excerpt = bookmark.excerpt || '';
+                    
+                    // 构建标签HTML
+                    let tagsHtml = '';
+                    if (tags.length > 0) {
+                        tagsHtml = `<div class="ldsp-bookmark-tags">${tags.slice(0, 4).map(tag => 
+                            `<span class="ldsp-bookmark-tag">${Utils.escapeHtml(tag)}</span>`
+                        ).join('')}${tags.length > 4 ? `<span class="ldsp-bookmark-tag-more">+${tags.length - 4}</span>` : ''}</div>`;
+                    }
+                    
+                    html += `
+                        <div class="ldsp-bookmark-item" data-url="${bookmarkUrl}" style="animation-delay:${i * 30}ms">
+                            <div class="ldsp-bookmark-title">${title}</div>
+                            <div class="ldsp-bookmark-meta">
+                                <span class="ldsp-bookmark-time" title="收藏时间">${icons.calendar}${createdTime || '--'}</span>
+                                <span class="ldsp-bookmark-time" title="最后活动">${icons.clock}${relativeTime || '--'}</span>
+                            </div>
+                            ${tagsHtml}
+                            ${excerpt ? `<div class="ldsp-bookmark-excerpt">${excerpt}</div>` : ''}
+                        </div>`;
+                });
+                html += '</div>';
+
+                if (hasMore) {
+                    html += '<div class="ldsp-load-more"><div class="ldsp-load-more-spinner"></div><span>加载更多...</span></div>';
+                }
+
+                return html;
+            }
+
+            renderReplyList(replies, hasMore) {
+                if (!replies || replies.length === 0) {
+                    return this.renderActivityEmpty('💬', '暂无回复');
+                }
+
+                // SVG 图标定义
+                const icons = {
+                    clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
+                    reply: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>'
+                };
+
+                let html = '<div class="ldsp-reply-list">';
+                replies.forEach((reply, i) => {
+                    const title = Utils.escapeHtml(reply.title || '无标题');
+                    const excerpt = reply.excerpt || '';
+                    const createdAt = reply.created_at;
+                    const relativeTime = Utils.formatRelativeTime(createdAt);
+                    const topicId = reply.topic_id;
+                    const postNumber = reply.post_number;
+                    const replyUrl = `https://${CURRENT_SITE.domain}/t/topic/${topicId}/${postNumber}`;
+                    const replyToPostNumber = reply.reply_to_post_number;
+                    
+                    html += `
+                        <div class="ldsp-reply-item" data-url="${replyUrl}" style="animation-delay:${i * 30}ms">
+                            <div class="ldsp-reply-title">${title}</div>
+                            <div class="ldsp-reply-meta">
+                                <span class="ldsp-reply-time" title="回复时间">${icons.clock}${relativeTime || '--'}</span>
+                                ${replyToPostNumber ? `<span class="ldsp-reply-to" title="回复楼层">${icons.reply}#${replyToPostNumber}</span>` : ''}
+                            </div>
+                            ${excerpt ? `<div class="ldsp-reply-excerpt">${excerpt}</div>` : ''}
+                        </div>`;
+                });
+                html += '</div>';
+
+                if (hasMore) {
+                    html += '<div class="ldsp-load-more"><div class="ldsp-load-more-spinner"></div><span>加载更多...</span></div>';
+                }
+
+                return html;
+            }
+
+            renderLikeList(likes, hasMore) {
+                if (!likes || likes.length === 0) {
+                    return this.renderActivityEmpty('❤️', '暂无赞过内容');
+                }
+
+                // SVG 图标定义
+                const icons = {
+                    clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
+                    heart: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>',
+                    user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>'
+                };
+
+                let html = '<div class="ldsp-like-list">';
+                likes.forEach((like, i) => {
+                    const title = Utils.escapeHtml(like.title || '无标题');
+                    const excerpt = like.excerpt || '';
+                    const createdAt = like.created_at;
+                    const relativeTime = Utils.formatRelativeTime(createdAt);
+                    const topicId = like.topic_id;
+                    const postNumber = like.post_number;
+                    const likeUrl = `https://${CURRENT_SITE.domain}/t/topic/${topicId}/${postNumber}`;
+                    const authorName = Utils.escapeHtml(like.name || like.username || '匿名');
+                    const authorUsername = like.username;
+                    
+                    html += `
+                        <div class="ldsp-like-item" data-url="${likeUrl}" style="animation-delay:${i * 30}ms">
+                            <div class="ldsp-like-title">${title}</div>
+                            <div class="ldsp-like-meta">
+                                <span class="ldsp-like-time" title="点赞时间">${icons.clock}${relativeTime || '--'}</span>
+                                <span class="ldsp-like-author" title="作者：@${authorUsername}">${icons.user}${authorName}</span>
+                            </div>
+                            ${excerpt ? `<div class="ldsp-like-excerpt">${excerpt}</div>` : ''}
+                        </div>`;
+                });
+                html += '</div>';
+
+                if (hasMore) {
+                    html += '<div class="ldsp-load-more"><div class="ldsp-load-more-spinner"></div><span>加载更多...</span></div>';
+                }
+
+                return html;
+            }
+
+            renderMyTopicList(topics, hasMore) {
+                if (!topics || topics.length === 0) {
+                    return this.renderActivityEmpty('📝', '暂无发布的话题');
+                }
+
+                // SVG 图标定义
+                const icons = {
+                    reply: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>',
+                    view: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
+                    heart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>',
+                    clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
+                    calendar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
+                    pin: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>',
+                    lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>'
+                };
+
+                let html = '<div class="ldsp-mytopic-list">';
+                topics.forEach((topic, i) => {
+                    const title = Utils.escapeHtml(topic.title || topic.fancy_title || '无标题');
+                    const postsCount = topic.posts_count || 0;
+                    const views = topic.views || 0;
+                    const likeCount = topic.like_count || 0;
+                    const tags = topic.tags || [];
+                    const bumpedAt = topic.bumped_at;
+                    const createdAt = topic.created_at;
+                    const relativeTime = Utils.formatRelativeTime(bumpedAt);
+                    const createdTime = Utils.formatDateTime(createdAt);
+                    const topicUrl = `https://${CURRENT_SITE.domain}/t/topic/${topic.id}`;
+                    const isPinned = topic.pinned;
+                    const isClosed = topic.closed;
+                    
+                    // 构建标签HTML
+                    let tagsHtml = '';
+                    if (tags.length > 0) {
+                        tagsHtml = `<div class="ldsp-mytopic-tags">${tags.slice(0, 3).map(tag => 
+                            `<span class="ldsp-mytopic-tag">${Utils.escapeHtml(tag)}</span>`
+                        ).join('')}${tags.length > 3 ? `<span class="ldsp-mytopic-tag-more">+${tags.length - 3}</span>` : ''}</div>`;
+                    }
+
+                    // 状态图标
+                    let statusIcons = '';
+                    if (isPinned) statusIcons += `<span class="ldsp-mytopic-status" title="已置顶">${icons.pin}</span>`;
+                    if (isClosed) statusIcons += `<span class="ldsp-mytopic-status ldsp-mytopic-closed" title="已关闭">${icons.lock}</span>`;
+                    
+                    html += `
+                        <a href="${topicUrl}" target="_blank" class="ldsp-mytopic-item${isClosed ? ' closed' : ''}" style="animation-delay:${i * 30}ms" title="${title}">
+                            <div class="ldsp-mytopic-header">
+                                <div class="ldsp-mytopic-title">${title}</div>
+                                ${statusIcons ? `<div class="ldsp-mytopic-icons">${statusIcons}</div>` : ''}
+                            </div>
+                            <div class="ldsp-mytopic-row">
+                                ${tagsHtml}
+                                <span class="ldsp-mytopic-time" title="创建时间">${icons.calendar}${createdTime || '--'}</span>
+                            </div>
+                            <div class="ldsp-mytopic-meta">
+                                <span class="ldsp-mytopic-stat" title="回复数">${icons.reply}${postsCount}</span>
+                                <span class="ldsp-mytopic-stat" title="浏览量">${icons.view}${views}</span>
+                                <span class="ldsp-mytopic-stat ldsp-mytopic-likes" title="点赞数">${icons.heart}${likeCount}</span>
+                                <div class="ldsp-mytopic-meta-right">
+                                    <span class="ldsp-mytopic-time" title="最后活动">${icons.clock}${relativeTime || '--'}</span>
+                                </div>
+                            </div>
+                        </a>`;
+                });
+                html += '</div>';
+
+                if (hasMore) {
+                    html += '<div class="ldsp-load-more"><div class="ldsp-load-more-spinner"></div><span>加载更多...</span></div>';
+                }
+
+                return html;
+            }
+
+            renderReactionList(reactions, hasMore) {
+                if (!reactions || reactions.length === 0) {
+                    return this.renderActivityEmpty('🎭', '暂无互动记录');
+                }
+
+                // SVG 图标定义
+                const icons = {
+                    clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
+                    reply: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>',
+                    user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+                    emoji: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>',
+                    topic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>'
+                };
+
+                // 获取头像URL
+                const getAvatarUrl = (user, size = 36) => {
+                    if (!user || !user.avatar_template) return '';
+                    let template = user.avatar_template;
+                    if (template.startsWith('/')) {
+                        template = `https://${CURRENT_SITE.domain}${template}`;
+                    }
+                    return template.replace('{size}', size);
+                };
+
+                // 获取表情图标
+                const getReactionIcon = (value) => {
+                    // 常见表情映射
+                    const emojiMap = {
+                        '+1': '👍',
+                        '-1': '👎',
+                        'laughing': '😂',
+                        'heart': '❤️',
+                        'open_mouth': '😮',
+                        'cry': '😢',
+                        'angry': '😠',
+                        'thinking': '🤔',
+                        'clap': '👏',
+                        'fire': '🔥',
+                        'tada': '🎉',
+                        'rocket': '🚀',
+                        'eyes': '👀',
+                        'confused': '😕',
+                        'star': '⭐',
+                        'pray': '🙏',
+                        'folded_hands': '🙏',
+                        'grinning_face': '😀',
+                        'rofl': '🤣',
+                        'melting_face': '🫠',
+                        'distorted_face': '🥴',
+                        'zany_face': '🤪'
+                    };
+                    // 先检查是否有直接映射
+                    if (emojiMap[value]) return emojiMap[value];
+                    // 尝试处理带前缀的表情（如 tieba_028, bili_102）
+                    const cleanValue = value.replace(/^(tieba_|bili_|twemoji_)/, '');
+                    if (emojiMap[cleanValue]) return emojiMap[cleanValue];
+                    // 默认返回原值（可能本身就是emoji）
+                    return value.length <= 4 ? value : '👍';
+                };
+
+                let html = '<div class="ldsp-reaction-list">';
+                reactions.forEach((reaction, i) => {
+                    const post = reaction.post || {};
+                    const postUser = post.user || {};
+                    const reactionData = reaction.reaction || {};
+                    
+                    const topicTitle = Utils.escapeHtml(post.topic_title || post.topic?.title || '无标题');
+                    const excerpt = post.excerpt || '';
+                    const createdAt = reaction.created_at;
+                    const relativeTime = Utils.formatRelativeTime(createdAt);
+                    const topicId = post.topic_id;
+                    const postNumber = post.post_number;
+                    const reactionUrl = `https://${CURRENT_SITE.domain}/t/topic/${topicId}/${postNumber}`;
+                    const authorName = Utils.escapeHtml(postUser.name || postUser.username || post.username || '匿名');
+                    const authorUsername = postUser.username || post.username;
+                    const authorAvatar = getAvatarUrl(postUser);
+                    const reactionValue = reactionData.reaction_value || '+1';
+                    const reactionIcon = getReactionIcon(reactionValue);
+                    const reactionCount = reactionData.reaction_users_count || 1;
+                    
+                    html += `
+                        <div class="ldsp-reaction-item" data-url="${reactionUrl}" style="animation-delay:${i * 30}ms">
+                            <div class="ldsp-reaction-header">
+                                <div class="ldsp-reaction-icon" title="${reactionValue}">${reactionIcon}</div>
+                                <div class="ldsp-reaction-title">${topicTitle}</div>
+                            </div>
+                            <div class="ldsp-reaction-meta">
+                                ${authorAvatar ? `<img src="${authorAvatar}" class="ldsp-reaction-avatar" loading="lazy">` : ''}
+                                <span class="ldsp-reaction-author" title="作者：@${authorUsername}">${authorName}</span>
+                                <span class="ldsp-reaction-time" title="互动时间">${icons.clock}${relativeTime || '--'}</span>
+                                ${reactionCount > 1 ? `<span class="ldsp-reaction-count" title="共${reactionCount}人">+${reactionCount - 1}</span>` : ''}
+                            </div>
+                            ${excerpt ? `<div class="ldsp-reaction-excerpt">${excerpt}</div>` : ''}
+                        </div>`;
+                });
+                html += '</div>';
+
+                if (hasMore) {
+                    html += '<div class="ldsp-load-more"><div class="ldsp-load-more-spinner"></div><span>加载更多...</span></div>';
+                }
+
+                return html;
+            }
+        }
+
+        // ==================== 我的活动管理器 ==
+        class ActivityManager {
+            constructor(network) {
+                this.network = network;
+                this._cache = new Map();
+                this._loading = new Map();
+                this._pageState = new Map(); // 记录每个子tab的分页状态
+            }
+
+            // 获取已读话题列表
+            async getReadTopics(page = 0) {
+                const cacheKey = `read_${page}`;
+                
+                // 检查缓存（1分钟有效）
+                const cached = this._cache.get(cacheKey);
+                if (cached && Date.now() - cached.time < 60000) {
+                    return cached.data;
+                }
+
+                // 防止重复请求
+                if (this._loading.get(cacheKey)) {
+                    return new Promise((resolve) => {
+                        const check = () => {
+                            if (!this._loading.get(cacheKey)) {
+                                resolve(this._cache.get(cacheKey)?.data);
+                            } else {
+                                setTimeout(check, 100);
+                            }
+                        };
+                        check();
+                    });
+                }
+
+                this._loading.set(cacheKey, true);
+
+                try {
+                    const url = page > 0 
+                        ? `https://${CURRENT_SITE.domain}/read.json?page=${page}`
+                        : `https://${CURRENT_SITE.domain}/read.json`;
+                    
+                    const response = await this.network.fetchJson(url, {
+                        headers: {
+                            'Accept': 'application/json, text/javascript, */*; q=0.01',
+                            'X-Requested-With': 'XMLHttpRequest',
+                            'Discourse-Present': 'true',
+                            'Discourse-Logged-In': 'true'
+                        },
+                        credentials: 'include'
+                    });
+
+                    if (!response || !response.topic_list) {
+                        throw new Error('无效的响应数据');
+                    }
+
+                    // 构建用户ID到用户信息的映射
+                    const usersMap = {};
+                    if (response.users && Array.isArray(response.users)) {
+                        response.users.forEach(user => {
+                            usersMap[user.id] = user;
+                        });
+                    }
+
+                    // 为每个话题附加发帖人信息
+                    const topics = (response.topic_list.topics || []).map(topic => {
+                        if (topic.posters && topic.posters.length > 0) {
+                            topic.postersInfo = topic.posters.map(poster => {
+                                const user = usersMap[poster.user_id];
+                                return user ? { ...user, description: poster.description, extras: poster.extras } : null;
+                            }).filter(Boolean);
+                        }
+                        return topic;
+                    });
+
+                    const result = {
+                        topics: topics,
+                        hasMore: !!response.topic_list.more_topics_url,
+                        page: page
+                    };
+
+                    this._cache.set(cacheKey, { data: result, time: Date.now() });
+                    return result;
+                } catch (e) {
+                    throw new Error(e.message || '获取已读话题失败');
+                } finally {
+                    this._loading.set(cacheKey, false);
+                }
+            }
+
+            // 获取收藏列表
+            async getBookmarks(page = 0, username) {
+                if (!username) throw new Error('未登录');
+                
+                const cacheKey = `bookmarks_${page}`;
+                
+                // 检查缓存（1分钟有效）
+                const cached = this._cache.get(cacheKey);
+                if (cached && Date.now() - cached.time < 60000) {
+                    return cached.data;
+                }
+
+                // 防止重复请求
+                if (this._loading.get(cacheKey)) {
+                    return new Promise((resolve) => {
+                        const check = () => {
+                            if (!this._loading.get(cacheKey)) {
+                                resolve(this._cache.get(cacheKey)?.data);
+                            } else {
+                                setTimeout(check, 100);
+                            }
+                        };
+                        check();
+                    });
+                }
+
+                this._loading.set(cacheKey, true);
+
+                try {
+                    const url = `https://${CURRENT_SITE.domain}/u/${encodeURIComponent(username)}/bookmarks.json?page=${page}`;
+                    
+                    const response = await this.network.fetchJson(url, {
+                        headers: {
+                            'Accept': 'application/json, text/javascript, */*; q=0.01',
+                            'X-Requested-With': 'XMLHttpRequest',
+                            'Discourse-Present': 'true',
+                            'Discourse-Logged-In': 'true'
+                        },
+                        credentials: 'include'
+                    });
+
+                    if (!response || !response.user_bookmark_list) {
+                        throw new Error('无效的响应数据');
+                    }
+
+                    const result = {
+                        bookmarks: response.user_bookmark_list.bookmarks || [],
+                        hasMore: !!response.user_bookmark_list.more_bookmarks_url,
+                        page: page
+                    };
+
+                    this._cache.set(cacheKey, { data: result, time: Date.now() });
+                    return result;
+                } catch (e) {
+                    throw new Error(e.message || '获取收藏列表失败');
+                } finally {
+                    this._loading.set(cacheKey, false);
+                }
+            }
+
+            // 获取回复列表
+            async getReplies(offset = 0, username) {
+                if (!username) throw new Error('未登录');
+                
+                const cacheKey = `replies_${offset}`;
+                
+                // 检查缓存（1分钟有效）
+                const cached = this._cache.get(cacheKey);
+                if (cached && Date.now() - cached.time < 60000) {
+                    return cached.data;
+                }
+
+                // 防止重复请求
+                if (this._loading.get(cacheKey)) {
+                    return new Promise((resolve) => {
+                        const check = () => {
+                            if (!this._loading.get(cacheKey)) {
+                                resolve(this._cache.get(cacheKey)?.data);
+                            } else {
+                                setTimeout(check, 100);
+                            }
+                        };
+                        check();
+                    });
+                }
+
+                this._loading.set(cacheKey, true);
+
+                try {
+                    const url = `https://${CURRENT_SITE.domain}/user_actions.json?offset=${offset}&username=${encodeURIComponent(username)}&filter=5`;
+                    
+                    const response = await this.network.fetchJson(url, {
+                        headers: {
+                            'Accept': 'application/json, text/javascript, */*; q=0.01',
+                            'X-Requested-With': 'XMLHttpRequest',
+                            'Discourse-Present': 'true',
+                            'Discourse-Logged-In': 'true'
+                        },
+                        credentials: 'include'
+                    });
+
+                    if (!response || !response.user_actions) {
+                        throw new Error('无效的响应数据');
+                    }
+
+                    const replies = response.user_actions || [];
+                    const result = {
+                        replies: replies,
+                        hasMore: replies.length >= 30, // 每页30条，如果返回30条说明可能还有更多
+                        offset: offset
+                    };
+
+                    this._cache.set(cacheKey, { data: result, time: Date.now() });
+                    return result;
+                } catch (e) {
+                    throw new Error(e.message || '获取回复列表失败');
+                } finally {
+                    this._loading.set(cacheKey, false);
+                }
+            }
+
+            // 获取赞过列表
+            async getLikes(offset = 0, username) {
+                if (!username) throw new Error('未登录');
+                
+                const cacheKey = `likes_${offset}`;
+                
+                // 检查缓存（1分钟有效）
+                const cached = this._cache.get(cacheKey);
+                if (cached && Date.now() - cached.time < 60000) {
+                    return cached.data;
+                }
+
+                // 防止重复请求
+                if (this._loading.get(cacheKey)) {
+                    return new Promise((resolve) => {
+                        const check = () => {
+                            if (!this._loading.get(cacheKey)) {
+                                resolve(this._cache.get(cacheKey)?.data);
+                            } else {
+                                setTimeout(check, 100);
+                            }
+                        };
+                        check();
+                    });
+                }
+
+                this._loading.set(cacheKey, true);
+
+                try {
+                    const url = `https://${CURRENT_SITE.domain}/user_actions.json?offset=${offset}&username=${encodeURIComponent(username)}&filter=1`;
+                    
+                    const response = await this.network.fetchJson(url, {
+                        headers: {
+                            'Accept': 'application/json, text/javascript, */*; q=0.01',
+                            'X-Requested-With': 'XMLHttpRequest',
+                            'Discourse-Present': 'true',
+                            'Discourse-Logged-In': 'true'
+                        },
+                        credentials: 'include'
+                    });
+
+                    if (!response || !response.user_actions) {
+                        throw new Error('无效的响应数据');
+                    }
+
+                    const likes = response.user_actions || [];
+                    const result = {
+                        likes: likes,
+                        hasMore: likes.length >= 30, // 每页30条，如果返回30条说明可能还有更多
+                        offset: offset
+                    };
+
+                    this._cache.set(cacheKey, { data: result, time: Date.now() });
+                    return result;
+                } catch (e) {
+                    throw new Error(e.message || '获取赞过列表失败');
+                } finally {
+                    this._loading.set(cacheKey, false);
+                }
+            }
+
+            // 获取我的话题列表
+            async getMyTopics(page = 0, username) {
+                if (!username) throw new Error('未登录');
+                
+                const cacheKey = `topics_${page}`;
+                
+                // 检查缓存（1分钟有效）
+                const cached = this._cache.get(cacheKey);
+                if (cached && Date.now() - cached.time < 60000) {
+                    return cached.data;
+                }
+
+                // 防止重复请求
+                if (this._loading.get(cacheKey)) {
+                    return new Promise((resolve) => {
+                        const check = () => {
+                            if (!this._loading.get(cacheKey)) {
+                                resolve(this._cache.get(cacheKey)?.data);
+                            } else {
+                                setTimeout(check, 100);
+                            }
+                        };
+                        check();
+                    });
+                }
+
+                this._loading.set(cacheKey, true);
+
+                try {
+                    const url = page > 0
+                        ? `https://${CURRENT_SITE.domain}/topics/created-by/${encodeURIComponent(username)}.json?page=${page}`
+                        : `https://${CURRENT_SITE.domain}/topics/created-by/${encodeURIComponent(username)}.json`;
+                    
+                    const response = await this.network.fetchJson(url, {
+                        headers: {
+                            'Accept': 'application/json, text/javascript, */*; q=0.01',
+                            'X-Requested-With': 'XMLHttpRequest',
+                            'Discourse-Present': 'true',
+                            'Discourse-Logged-In': 'true'
+                        },
+                        credentials: 'include'
+                    });
+
+                    if (!response || !response.topic_list) {
+                        throw new Error('无效的响应数据');
+                    }
+
+                    const topics = response.topic_list.topics || [];
+                    const result = {
+                        topics: topics,
+                        hasMore: topics.length >= 30, // 每页30条
+                        page: page
+                    };
+
+                    this._cache.set(cacheKey, { data: result, time: Date.now() });
+                    return result;
+                } catch (e) {
+                    throw new Error(e.message || '获取我的话题失败');
+                } finally {
+                    this._loading.set(cacheKey, false);
+                }
+            }
+
+            // 获取互动记录（reactions）
+            async getReactions(beforeId = null, username) {
+                if (!username) throw new Error('未登录');
+                
+                const cacheKey = `reactions_${beforeId || 'first'}`;
+                
+                // 检查缓存（1分钟有效）
+                const cached = this._cache.get(cacheKey);
+                if (cached && Date.now() - cached.time < 60000) {
+                    return cached.data;
+                }
+
+                // 防止重复请求
+                if (this._loading.get(cacheKey)) {
+                    return new Promise((resolve) => {
+                        const check = () => {
+                            if (!this._loading.get(cacheKey)) {
+                                resolve(this._cache.get(cacheKey)?.data);
+                            } else {
+                                setTimeout(check, 100);
+                            }
+                        };
+                        check();
+                    });
+                }
+
+                this._loading.set(cacheKey, true);
+
+                try {
+                    let url = `https://${CURRENT_SITE.domain}/discourse-reactions/posts/reactions.json?username=${encodeURIComponent(username)}`;
+                    if (beforeId) {
+                        url += `&before_reaction_user_id=${beforeId}`;
+                    }
+                    
+                    const response = await this.network.fetchJson(url, {
+                        headers: {
+                            'Accept': 'application/json, text/javascript, */*; q=0.01',
+                            'X-Requested-With': 'XMLHttpRequest',
+                            'Discourse-Present': 'true',
+                            'Discourse-Logged-In': 'true'
+                        },
+                        credentials: 'include'
+                    });
+
+                    if (!response || !Array.isArray(response)) {
+                        throw new Error('无效的响应数据');
+                    }
+
+                    const reactions = response || [];
+                    // 获取最后一条记录的 id 用于分页
+                    const lastId = reactions.length > 0 ? reactions[reactions.length - 1].id : null;
+                    
+                    const result = {
+                        reactions: reactions,
+                        hasMore: reactions.length >= 20, // 每页约20条，如果返回20条说明可能还有更多
+                        lastId: lastId
+                    };
+
+                    this._cache.set(cacheKey, { data: result, time: Date.now() });
+                    return result;
+                } catch (e) {
+                    throw new Error(e.message || '获取互动记录失败');
+                } finally {
+                    this._loading.set(cacheKey, false);
+                }
+            }
+
+            // 清除缓存和分页状态
+            clearCache(type) {
+                if (type) {
+                    // 清除特定类型的缓存
+                    for (const key of this._cache.keys()) {
+                        if (key.startsWith(type)) {
+                            this._cache.delete(key);
+                        }
+                    }
+                    // 同时清除分页状态
+                    this._pageState.delete(type);
+                } else {
+                    this._cache.clear();
+                    this._pageState.clear();
+                }
+            }
+
+            // 获取分页状态
+            getPageState(type) {
+                return this._pageState.get(type) || { page: 0, allTopics: [], hasMore: true };
+            }
+
+            // 设置分页状态
+            setPageState(type, state) {
+                this._pageState.set(type, state);
+            }
+        }
+
+        // ==================== 主面板类 ====================
+        class Panel {
+            constructor() {
+                this._initManagers();
+                this._initState();
+                this._initUI();
+                this._initCloudServices();
+                this._initEventListeners();
+            }
+            
+            // 初始化管理器实例
+            _initManagers() {
+                this.storage = new Storage();
+                this.network = new Network();
+                this.historyMgr = new HistoryManager(this.storage);
+                this.tracker = new ReadingTracker(this.storage);
+                this.notifier = new Notifier(this.storage);
+                this.activityMgr = new ActivityManager(this.network);
+
+                // 云同步相关
+                this.oauth = new OAuthManager(this.storage, this.network);
+                this.cloudSync = new CloudSyncManager(this.storage, this.oauth, this.tracker);
+                this.cloudSync.setHistoryManager(this.historyMgr);
+            }
+            
+            // 初始化状态变量
+            _initState() {
+                this.prevReqs = [];
+                this.trendTab = this.storage.getGlobal('trendTab', 'today');
+                // 兼容性：修复旧版本的无效 tab 值
+                if (!['today', 'week', 'month', 'year', 'all'].includes(this.trendTab)) {
+                    this.trendTab = 'today';
+                    this.storage.setGlobal('trendTab', 'today');
+                }
+                this.avatar = this.storage.get('userAvatar', null);
+                this.readingTime = 0;
+                this.username = null;
+                this.animRing = true;
+                this.cachedHistory = [];
+                this.cachedReqs = [];
+                this.loading = false;
+                this._readingTimer = null;
+                this._destroyed = false;  // 销毁标记
+                
+                // 我的活动相关状态
+                this.activitySubTab = 'read';  // 默认子tab
+                this._activityScrollHandler = null;  // 滚动事件处理器
+            }
+            
+            // 初始化 UI
+            _initUI() {
+                Styles.inject();
+                this._createPanel();
+                this.renderer = new Renderer(this);
+                this._bindEvents();
+                this._restore();
+                this.fetch();
+
+                // LDC 积分管理器初始化（仅 linux.do）
+                if (CURRENT_SITE.domain === 'linux.do') {
+                    this.ldcManager = new LDCManager(this.$.panelBody, this.renderer);
+                    this.ldcManager.init();
+                }
+                
+                // 关注/粉丝管理器初始化（包含头像缓存）
+                this.followManager = new FollowManager(this.network, this.storage, this.$.panelBody, this.renderer);
+                this.followManager.init();
+                // 从缓存加载头像（优先动态头像）
+                this._loadAvatarFromCache();
+                // 延迟懒加载关注/粉丝数据和用户profile
+                setTimeout(() => {
+                    this.followManager.loadData().catch(e => Logger.warn('FollowManager load error:', e));
+                    this.followManager.loadProfile().catch(e => Logger.warn('FollowManager profile error:', e));
+                }, 2000);
+            }
+            
+            // 初始化云服务
+            _initCloudServices() {
+                // 检查待处理的 OAuth 登录结果（统一同窗口模式）
+                let justLoggedIn = false;
+                if (this.oauth) {
+                    justLoggedIn = this._checkPendingOAuthLogin();
+                }
+                
+                // 注册同步状态回调
+                this.cloudSync.setSyncStateCallback(syncing => {
+                    if (this._destroyed) return;
+                    if (this.$.btnCloudSync) {
+                        this.$.btnCloudSync.disabled = syncing;
+                        this.$.btnCloudSync.textContent = syncing ? '⏳' : '☁️';
+                        this.$.btnCloudSync.title = syncing ? '同步中...' : '云同步';
+                    }
+                });
+
+                if (this.oauth.isLoggedIn() && !justLoggedIn) {
+                    this._initLoggedInUser();
+                } else if (!justLoggedIn) {
+                    this._checkLoginPrompt();
+                }
+            }
+            
+            // 初始化已登录用户
+            _initLoggedInUser() {
+                const oauthUser = this.oauth.getUserInfo();
+                if (oauthUser?.username) {
+                    const currentUser = this.storage.getUser();
+                    if (currentUser !== oauthUser.username) {
+                        this.storage.setUser(oauthUser.username);
+                        this.storage.invalidateCache();
+                        this.storage.migrate(oauthUser.username);
+                    }
+                    this._updateUserInfoFromOAuth(oauthUser);
+                }
+                // 串行化同步请求
+                this.cloudSync.onPageLoad()
+                    .then(() => this.cloudSync.syncRequirementsOnLoad())
+                    .catch(e => Logger.warn('CloudSync error:', e));
+                this._syncPrefs();
+                this._updateLoginUI();
+            }
+            
+            // 初始化事件监听器
+            _initEventListeners() {
+                // 窗口大小变化
+                this._resizeHandler = Utils.debounce(() => this._onResize(), 250);
+                window.addEventListener('resize', this._resizeHandler);
+                
+                // 订阅 Token 过期事件
+                EventBus.on('auth:expired', () => {
+                    this.renderer?.showToast('⚠️ 登录已过期，请重新登录');
+                    this._updateLoginUI();
+                });
+                
+                // 订阅阅读数据同步完成事件
+                EventBus.on('reading:synced', ({ merged, source }) => {
+                    Logger.log(`阅读数据已同步: ${merged} 天, 来源: ${source}`);
+                    // 更新本地阅读时间变量
+                    this.readingTime = this.tracker.getTodayTime();
+                    // 清除年度缓存
+                    this.tracker._yearCache = null;
+                    // 检查当前是否在趋势页面（通过 DOM 查询）
+                    const trendsActive = this.el?.querySelector('.ldsp-tab[data-tab="trends"].active');
+                    if (trendsActive) {
+                        // 使用缓存的历史和要求数据重新渲染趋势页面
+                        this._renderTrends(this.cachedHistory || [], this.cachedReqs || []);
+                    }
+                });
+            }
+            
+            _createPanel() {
+                this.el = document.createElement('div');
+                this.el.id = 'ldsp-panel';
+                this.el.setAttribute('role', 'complementary');
+                this.el.setAttribute('aria-label', `${CURRENT_SITE.name} 信任级别面板`);
+
+                this.el.innerHTML = `
+                    <div class="ldsp-hdr">
+                        <div class="ldsp-hdr-info">
+                            <div class="ldsp-site-wrap">
+                                <img class="ldsp-site-icon" src="${CURRENT_SITE.icon}" alt="${CURRENT_SITE.name}">
+                                <span class="ldsp-site-ver">v${GM_info.script.version}</span>
+                            </div>
+                            <div class="ldsp-hdr-text">
+                                <span class="ldsp-title">${CURRENT_SITE.name}</span>
+                                <span class="ldsp-ver"><span class="ldsp-app-name">LDStatus Mini</span></span>
+                            </div>
+                        </div>
+                        <div class="ldsp-hdr-btns">
+                            <button class="ldsp-cloud-sync" title="云同步" aria-label="云同步" style="display:none">☁️</button>
+                            <button class="ldsp-refresh" title="刷新数据" aria-label="刷新数据">🔄</button>
+                            <button class="ldsp-theme" title="切换主题" aria-label="切换主题">🌓</button>
+                            <button class="ldsp-toggle" title="折叠面板" aria-label="折叠面板"><span class="ldsp-toggle-arrow">◀</span><svg class="ldsp-toggle-logo" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="ldsp-logo-grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#8fa8f8"/><stop offset="100%" stop-color="#7ed4c4"/></linearGradient></defs><path d="M 31,4 A 28,28 0 1,1 11,52" fill="none" stroke="url(#ldsp-logo-grad)" stroke-width="8" stroke-linecap="round"/><rect x="25" y="26" width="12" height="12" rx="3" fill="url(#ldsp-logo-grad)" transform="rotate(45 31 32)"/></svg></button>
+                        </div>
+                    </div>
+                    <div class="ldsp-body">
+                        <div class="ldsp-announcement">
+                            <div class="ldsp-announcement-inner">
+                                <span class="ldsp-announcement-text"></span>
+                            </div>
+                        </div>
+                        <div class="ldsp-user">
+                            <div class="ldsp-user-left">
+                                <div class="ldsp-user-row">
+                                    <div class="ldsp-avatar-wrap" data-clickable><div class="ldsp-avatar-ph">👤</div></div>
+                                    <div class="ldsp-user-info">
+                                        <div class="ldsp-user-display-name">加载中...</div>
+                                        <div class="ldsp-user-handle"></div>
+                                    </div>
+                                </div>
+                                <div class="ldsp-user-meta">
+                                    <div class="ldsp-follow-combined">
+                                        <span class="ldsp-follow-part ldsp-follow-following" data-clickable data-tab="following" title="查看关注列表">关注 <span class="ldsp-follow-num-following">-</span></span>
+                                        <span class="ldsp-follow-sep">·</span>
+                                        <span class="ldsp-follow-part ldsp-follow-followers" data-clickable data-tab="followers" title="查看粉丝列表"><span class="ldsp-follow-num-followers">-</span> 粉丝</span>
+                                    </div>
+                                    <span class="ldsp-join-days">来<span class="ldsp-join-days-site"></span><span class="ldsp-join-days-num">-</span>天</span>
+                                </div>
+                                <div class="ldsp-user-actions-wrap">
+                                    <div class="ldsp-user-actions collapsed">
+                                        <div class="ldsp-action-btn ldsp-login-btn" data-clickable title="点击登录"><span class="ldsp-action-icon">🔑</span><span class="ldsp-action-text">点击登录</span></div>
+                                        <div class="ldsp-action-btn ldsp-logout-btn" data-clickable title="注销登录"><span class="ldsp-action-icon">⏻</span><span class="ldsp-action-text">注销</span></div>
+                                        ${CURRENT_SITE.domain === 'linux.do' ? '<div class="ldsp-action-btn ldsp-ldc-btn" data-clickable title="Linux Do Credit"><span class="ldsp-action-icon">🍟</span><span class="ldsp-action-text">LDC</span></div>' : ''}
+                                    </div>
+                                    <div class="ldsp-user-actions-toggle" data-clickable title="展开更多按钮"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg><span class="ldsp-toggle-text">展开更多</span></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="ldsp-tabs">
+                            <button class="ldsp-tab active" data-tab="reqs"><span class="ldsp-tab-icon">📋</span><span class="ldsp-tab-text">要求</span></button>
+                            <button class="ldsp-tab" data-tab="trends"><span class="ldsp-tab-icon">📈</span><span class="ldsp-tab-text">趋势</span></button>
+                            <button class="ldsp-tab" data-tab="activity"><span class="ldsp-tab-icon">👤</span><span class="ldsp-tab-text">我的</span></button>
+                        </div>
+                        <div class="ldsp-content">
+                            <div id="ldsp-reqs" class="ldsp-section active"><div class="ldsp-loading"><div class="ldsp-spinner"></div><div>加载中...</div></div></div>
+                            <div id="ldsp-trends" class="ldsp-section"><div class="ldsp-empty"><div class="ldsp-empty-icon">📊</div><div class="ldsp-empty-txt">暂无历史数据</div></div></div>
+                            ${this.hasLeaderboard ? '<div id="ldsp-leaderboard" class="ldsp-section"><div class="ldsp-loading"><div class="ldsp-spinner"></div><div>加载中...</div></div></div>' : ''}
+                            <div id="ldsp-activity" class="ldsp-section"><div class="ldsp-empty"><div class="ldsp-empty-icon">👤</div><div class="ldsp-empty-txt">选择一个分类查看</div></div></div>
+                        </div>
+                        <div class="ldsp-confirm-overlay">
+                            <div class="ldsp-confirm-box">
+                                <div class="ldsp-confirm-icon">⏻</div>
+                                <div class="ldsp-confirm-title">确认注销登录吗？</div>
+                                <div class="ldsp-confirm-msg">退出后排行榜和云同步功能将不可用</div>
+                                <div class="ldsp-confirm-btns">
+                                    <button class="ldsp-confirm-btn cancel">取消</button>
+                                    <button class="ldsp-confirm-btn confirm">确认注销</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="ldsp-resize-handle ldsp-resize-e"></div>
+                    <div class="ldsp-resize-handle ldsp-resize-s"></div>
+                    <div class="ldsp-resize-handle ldsp-resize-se"></div>`;
+
+                document.body.appendChild(this.el);
+                
+                // 初始化resize功能（仅桌面端）
+                this._initResize();
+                
+                // 绑定自定义 Tooltip
+                Tooltip.bindToPanel(this.el);
+
+
+                this.$ = {
+                    header: this.el.querySelector('.ldsp-hdr'),
+                    announcement: this.el.querySelector('.ldsp-announcement'),
+                    announcementText: this.el.querySelector('.ldsp-announcement-text'),
+                    user: this.el.querySelector('.ldsp-user'),
+                    userDisplayName: this.el.querySelector('.ldsp-user-display-name'),
+                    userHandle: this.el.querySelector('.ldsp-user-handle'),
+                    ldcBtn: this.el.querySelector('.ldsp-ldc-btn'),
+                    logoutBtn: this.el.querySelector('.ldsp-logout-btn'),
+                    loginBtn: this.el.querySelector('.ldsp-login-btn'),
+                    actionsArea: this.el.querySelector('.ldsp-user-actions'),
+                    actionsToggle: this.el.querySelector('.ldsp-user-actions-toggle'),
+                    confirmOverlay: this.el.querySelector('.ldsp-confirm-overlay'),
+                    confirmCancel: this.el.querySelector('.ldsp-confirm-btn.cancel'),
+                    confirmOk: this.el.querySelector('.ldsp-confirm-btn.confirm'),
+                    panelBody: this.el.querySelector('.ldsp-body'),
+                    tabs: this.el.querySelectorAll('.ldsp-tab'),
+                    sections: this.el.querySelectorAll('.ldsp-section'),
+                    reqs: this.el.querySelector('#ldsp-reqs'),
+                    trends: this.el.querySelector('#ldsp-trends'),
+                    leaderboard: this.el.querySelector('#ldsp-leaderboard'),
+                    activity: this.el.querySelector('#ldsp-activity'),
+                    btnToggle: this.el.querySelector('.ldsp-toggle'),
+                    btnRefresh: this.el.querySelector('.ldsp-refresh'),
+                    btnTheme: this.el.querySelector('.ldsp-theme'),
+                    btnCloudSync: this.el.querySelector('.ldsp-cloud-sync')
+                };
+            }
+
+            _bindEvents() {
+                // 拖拽（支持鼠标和触摸）
+                let dragging = false, ox, oy, moved = false, sx, sy;
+                const THRESHOLD = 5;
+
+                const getPos = e => e.touches ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : { x: e.clientX, y: e.clientY };
+
+                // 保存拖拽开始前的样式，以便在没有实际移动时恢复
+                let dragStartStyles = null;
+                
+                const startDrag = e => {
+                    if (!this.el.classList.contains('collapsed') && e.target.closest('button')) return;
+                    const p = getPos(e);
+                    dragging = true;
+                    moved = false;
+                    // 获取当前位置
+                    const rect = this.el.getBoundingClientRect();
+                    
+                    // 保存拖拽开始前的样式
+                    dragStartStyles = {
+                        left: this.el.style.left,
+                        right: this.el.style.right,
+                        top: this.el.style.top
+                    };
+                    
+                    this.el.classList.add('no-trans');
+                    // 统一切换到 left 定位进行拖拽
+                    this.el.style.left = rect.left + 'px';
+                    this.el.style.right = 'auto';
+                    ox = p.x - rect.left;
+                    oy = p.y - rect.top;
+                    sx = p.x;
+                    sy = p.y;
+                    e.preventDefault();
+                };
+
+                const updateDrag = e => {
+                    if (!dragging) return;
+                    const p = getPos(e);
+                    if (Math.abs(p.x - sx) > THRESHOLD || Math.abs(p.y - sy) > THRESHOLD) moved = true;
+                    const { innerWidth: vw, innerHeight: vh } = window;
+                    const w = this.el.offsetWidth, h = this.el.offsetHeight;
+                    this.el.style.left = Math.max(8, Math.min(p.x - ox, vw - w - 8)) + 'px';
+                    this.el.style.top = Math.max(8, Math.min(p.y - oy, vh - h - 8)) + 'px';
+                };
+
+                const endDrag = () => {
+                    if (!dragging) return;
+                    dragging = false;
+                    this.el.classList.remove('no-trans');
+                    
+                    // 如果没有实际移动，恢复拖拽开始前的样式
+                    // 这样点击折叠面板时就不会因为 hover 缩放导致位置偏移
+                    if (!moved) {
+                        if (dragStartStyles) {
+                            this.el.style.left = dragStartStyles.left;
+                            this.el.style.right = dragStartStyles.right;
+                            this.el.style.top = dragStartStyles.top;
+                        }
+                        dragStartStyles = null;
+                        return;
+                    }
+                    dragStartStyles = null;
+                    
+                    // 根据最终位置决定定位模式和展开方向
+                    const rect = this.el.getBoundingClientRect();
+                    const { innerWidth: vw } = window;
+                    const centerX = rect.left + rect.width / 2;
+                    const alignRight = centerX > vw / 2;
+                    
+                    if (alignRight) {
+                        // 切换到 right 定位
+                        const rightDist = Math.round(vw - rect.right);
+                        this.el.style.right = rightDist + 'px';
+                        this.el.style.left = 'auto';
+                    }
+                    // 左侧保持 left 定位（在 startDrag 中已设置）
+                    
+                    // 更新展开方向类
+                    this.el.classList.toggle('expand-left', alignRight);
+                    this.el.classList.toggle('expand-right', !alignRight);
+                    
+                    // 更新箭头方向
+                    this._updateArrow();
+                    
+                    this._savePosition();
+                };
+
+                // 鼠标事件
+                this.$.header.addEventListener('mousedown', e => !this.el.classList.contains('collapsed') && startDrag(e));
+                this.el.addEventListener('mousedown', e => this.el.classList.contains('collapsed') && startDrag(e));
+                document.addEventListener('mousemove', updateDrag);
+                document.addEventListener('mouseup', endDrag);
+                // 触摸事件（移动端拖拽）
+                this.$.header.addEventListener('touchstart', e => !this.el.classList.contains('collapsed') && startDrag(e), { passive: false });
+                this.el.addEventListener('touchstart', e => this.el.classList.contains('collapsed') && startDrag(e), { passive: false });
+                document.addEventListener('touchmove', updateDrag, { passive: false });
+                document.addEventListener('touchend', e => {
+                    const wasDragging = dragging;
+                    const isCollapsed = this.el.classList.contains('collapsed');
+                    endDrag();
+                    // 触摸未移动且是折叠状态，视为点击展开
+                    if (wasDragging && !moved && isCollapsed) {
+                        this._toggle();
+                    }
+                    // 移动端：清除折叠 logo 的 hover 残留效果
+                    if (isCollapsed && wasDragging) {
+                        this.el.classList.add('no-hover-effect');
+                        setTimeout(() => this.el.classList.remove('no-hover-effect'), 50);
+                    }
+                });
+
+                // 按钮事件
+                this.$.btnToggle.addEventListener('click', e => {
+                    e.stopPropagation();
+                    if (moved) { moved = false; return; }
+                    this._toggle();
+                });
+
+                this.$.btnRefresh.addEventListener('click', () => {
+                    if (this.loading) return;
+                    this.animRing = true;
+                    this.fetch();
+                });
+
+                this.$.btnTheme.addEventListener('click', () => this._switchTheme());
+                
+                // 彩蛋：点击头像打开GitHub仓库
+                this.$.user.addEventListener('click', e => {
+                    if (e.target.closest('.ldsp-avatar-wrap')) {
+                        window.open('https://github.com/THQDDQHT/LDStatusMini', '_blank');
+                    }
+                });
+                
+                // 注销登录按钮与确认弹窗
+                const showLogoutConfirm = () => {
+                    if (!this.hasLeaderboard || !this.oauth?.isLoggedIn()) {
+                        this.renderer.showToast('ℹ️ 当前未登录');
+                        return;
+                    }
+                    this.$.confirmOverlay?.classList.add('show');
+                };
+                const hideLogoutConfirm = () => {
+                    this.$.confirmOverlay?.classList.remove('show');
+                };
+                const doLogout = () => {
+                    hideLogoutConfirm();
+                    this.oauth.logout();
+                    this.leaderboard?.stopSync();
+                    this.renderer.showToast('✅ 已退出登录');
+                    this._updateLoginUI();
+                    this._renderLeaderboard();
+                };
+                // 注销按钮点击
+                this.$.logoutBtn?.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    showLogoutConfirm();
+                });
+                // 确认弹窗按钮
+                this.$.confirmCancel?.addEventListener('click', hideLogoutConfirm);
+                this.$.confirmOk?.addEventListener('click', doLogout);
+                // 点击遮罩关闭
+                this.$.confirmOverlay?.addEventListener('click', (e) => {
+                    if (e.target === this.$.confirmOverlay) hideLogoutConfirm();
+                });
+                
+                // 云同步按钮（状态由 CloudSyncManager 的回调自动管理）
+                this.$.btnCloudSync?.addEventListener('click', async () => {
+                    if (!this.hasLeaderboard || !this.oauth?.isLoggedIn()) return;
+                    if (this.cloudSync.isSyncing()) return;  // 正在同步中，忽略点击
+                    try {
+                        await this.cloudSync.fullSync();
+                        this.renderer.showToast('✅ 数据同步完成');
+                        // 显示成功状态
+                        if (this.$.btnCloudSync) {
+                            this.$.btnCloudSync.textContent = '✅';
+                            setTimeout(() => {
+                                if (this.$.btnCloudSync) this.$.btnCloudSync.textContent = '☁️';
+                            }, 1000);
+                        }
+                    } catch (e) {
+                        this.renderer.showToast(`❌ 同步失败: ${e.message || e}`);
+                        // 显示失败状态
+                        if (this.$.btnCloudSync) {
+                            this.$.btnCloudSync.textContent = '❌';
+                            setTimeout(() => {
+                                if (this.$.btnCloudSync) this.$.btnCloudSync.textContent = '☁️';
+                            }, 10000);
+                        }
+                    }
+                });
+
+                // LDC 积分按钮（仅 linux.do）
+                this.$.ldcBtn?.addEventListener('click', e => {
+                    e.stopPropagation();
+                    if (this.ldcManager) {
+                        this.ldcManager.show();
+                    }
+                });
+                
+                // 按钮区域展开/收起
+                this.$.actionsToggle?.addEventListener('click', e => {
+                    e.stopPropagation();
+                    const area = this.$.actionsArea;
+                    const toggle = this.$.actionsToggle;
+                    if (!area || !toggle) return;
+                    
+                    const isCollapsed = area.classList.contains('collapsed');
+                    if (isCollapsed) {
+                        area.classList.remove('collapsed');
+                        toggle.classList.add('expanded');
+                        toggle.querySelector('.ldsp-toggle-text').textContent = '收起';
+                    } else {
+                        area.classList.add('collapsed');
+                        toggle.classList.remove('expanded');
+                        toggle.querySelector('.ldsp-toggle-text').textContent = '展开更多';
+                    }
+                });
+                
+                // 检查按钮区域是否需要展开/收起功能（延迟执行以确保DOM已渲染）
+                requestAnimationFrame(() => this._checkActionsOverflow());
+                
+                // 关注/粉丝分别点击
+                this.el.querySelectorAll('.ldsp-follow-part').forEach(part => {
+                    part.addEventListener('click', e => {
+                        e.stopPropagation();
+                        const username = this.storage.getUser();
+                        if (!username) {
+                            this.renderer.showToast('⚠️ 请先登录论坛');
+                            return;
+                        }
+                        if (this.followManager) {
+                            // 根据点击的区域打开对应列表
+                            const tabName = part.dataset.tab || 'following';
+                            const tabs = this.followManager.overlay.querySelectorAll('.ldsp-follow-tab');
+                            tabs.forEach(t => t.classList.remove('active'));
+                            const targetTab = this.followManager.overlay.querySelector(`.ldsp-follow-tab[data-tab="${tabName}"]`);
+                            targetTab?.classList.add('active');
+                            this.followManager.show();
+                        }
+                    });
+                });
+                
+                // 兼容旧样式的关注/粉丝统计点击
+                this.el.querySelectorAll('.ldsp-follow-stat').forEach(stat => {
+                    stat.addEventListener('click', e => {
+                        e.stopPropagation();
+                        const username = this.storage.getUser();
+                        if (!username) {
+                            this.renderer.showToast('⚠️ 请先登录论坛');
+                            return;
+                        }
+                        if (this.followManager) {
+                            // 设置激活的tab
+                            const isFollowing = stat.classList.contains('ldsp-follow-stat-following');
+                            const tabs = this.followManager.overlay.querySelectorAll('.ldsp-follow-tab');
+                            tabs.forEach(t => t.classList.remove('active'));
+                            const targetTab = this.followManager.overlay.querySelector(`.ldsp-follow-tab[data-tab="${isFollowing ? 'following' : 'followers'}"]`);
+                            targetTab?.classList.add('active');
+                            this.followManager.show();
+                        }
+                    });
+                });
+                
+                // 标签页切换
+                this.$.tabs.forEach((tab, i) => {
+                    tab.addEventListener('click', () => {
+                        this.$.tabs.forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
+                        this.$.sections.forEach(s => s.classList.remove('active'));
+                        tab.classList.add('active');
+                        tab.setAttribute('aria-selected', 'true');
+                        this.el.querySelector(`#ldsp-${tab.dataset.tab}`).classList.add('active');
+
+                        if (tab.dataset.tab === 'reqs') {
+                            this.animRing = true;
+                            this.cachedReqs.length && this.renderer.renderReqs(this.cachedReqs);
+                        } else if (tab.dataset.tab === 'leaderboard') {
+                            this._renderLeaderboard();
+                        } else if (tab.dataset.tab === 'activity') {
+                            this._renderActivity();
+                        }
+                    });
+
+                    tab.addEventListener('keydown', e => {
+                        if (['ArrowRight', 'ArrowLeft'].includes(e.key)) {
+                            e.preventDefault();
+                            const next = e.key === 'ArrowRight' ? (i + 1) % this.$.tabs.length : (i - 1 + this.$.tabs.length) % this.$.tabs.length;
+                            this.$.tabs[next].click();
+                            this.$.tabs[next].focus();
+                        }
+                    });
+                });
+                
+                // 监听 Token 过期事件，刷新 UI
+                window.addEventListener('ldsp_token_expired', () => {
+                    this.renderer.showToast('⚠️ 登录已过期，请重新登录');
+                    this._renderLeaderboard();
+                });
+                
+                // 滚动条自动隐藏：滚动时显示，停止后隐藏
+                this._initScrollbarAutoHide();
+            }
+            
+            _initScrollbarAutoHide() {
+                // 使用闭包存储状态，避免污染实例属性
+                const timers = new WeakMap();
+                const showScrollbar = (el) => {
+                    if (this._programmaticScroll) return; // 忽略程序性滚动
+                    el.classList.add('scrolling');
+                    clearTimeout(timers.get(el));
+                    timers.set(el, setTimeout(() => el.classList.remove('scrolling'), 800));
+                };
+                // 事件委托：捕获所有可滚动元素的滚动事件
+                this.el.addEventListener('scroll', (e) => {
+                    const t = e.target;
+                    if (t.classList.contains('ldsp-content') || 
+                        t.classList.contains('ldsp-subtabs') || 
+                        t.classList.contains('ldsp-year-heatmap')) {
+                        showScrollbar(t);
+                    }
+                }, { capture: true, passive: true });
+            }
+            
+            // 程序性滚动（不显示滚动条）
+            _scrollTo(el, top) {
+                this._programmaticScroll = true;
+                el.scrollTop = top;
+                requestAnimationFrame(() => { this._programmaticScroll = false; });
+            }
+            
+            // 检查按钮区域是否需要展开/收起功能
+            _checkActionsOverflow() {
+                const area = this.$.actionsArea;
+                const toggle = this.$.actionsToggle;
+                if (!area || !toggle) return;
+                
+                // 获取所有可见的操作按钮（排除登录按钮，因为它和注销按钮互斥显示）
+                const buttons = Array.from(area.querySelectorAll('.ldsp-action-btn')).filter(btn => {
+                    const style = getComputedStyle(btn);
+                    return style.display !== 'none';
+                });
+                
+                if (buttons.length === 0) {
+                    toggle.classList.remove('show');
+                    area.classList.remove('collapsed');
+                    return;
+                }
+                
+                // 临时移除折叠状态来计算实际高度
+                const wasCollapsed = area.classList.contains('collapsed');
+                area.classList.remove('collapsed');
+                
+                // 强制重排以获取正确的布局信息
+                area.offsetHeight;
+                
+                // 通过比较按钮位置来判断行数
+                const firstBtn = buttons[0];
+                const firstTop = firstBtn.getBoundingClientRect().top;
+                let rows = 1;
+                let lastTop = firstTop;
+                
+                for (const btn of buttons) {
+                    const btnTop = btn.getBoundingClientRect().top;
+                    if (btnTop > lastTop + 5) { // 允许5px误差
+                        rows++;
+                        lastTop = btnTop;
+                    }
+                }
+                
+                // 超过2行则显示展开按钮并折叠（折叠后只显示1行）
+                if (rows > 2) {
+                    toggle.classList.add('show');
+                    area.classList.add('collapsed');
+                } else {
+                    toggle.classList.remove('show');
+                    area.classList.remove('collapsed');
+                }
+            }
+
+            _restore() {
+                const isCollapsed = this.storage.getGlobal('collapsed', false);
+                if (isCollapsed) {
+                    this.el.classList.add('collapsed');
+                }
+
+                const theme = this.storage.getGlobal('theme', 'light');
+                if (theme === 'light') this.el.classList.add('light');
+                this.$.btnTheme.textContent = theme === 'dark' ? '🌓' : '☀️';
+
+                requestAnimationFrame(() => {
+                    // _restorePosition 会设置位置和 expand-left/expand-right 类
+                    this._restorePosition();
+                    // 更新箭头方向
+                    this._updateArrow();
+                });
+            }
+
+            _updateExpandDir() {
+                const rect = this.el.getBoundingClientRect();
+                const center = rect.left + rect.width / 2;
+                const alignRight = center > innerWidth / 2;
+                this.el.classList.toggle('expand-left', alignRight);
+                this.el.classList.toggle('expand-right', !alignRight);
+            }
+            
+            _updateArrow() {
+                const isCollapsed = this.el.classList.contains('collapsed');
+                const alignRight = this.el.classList.contains('expand-left');
+                const arrow = this.$.btnToggle.querySelector('.ldsp-toggle-arrow');
+                if (arrow) {
+                    // 折叠时箭头指向展开方向，展开时箭头指向折叠方向
+                    if (isCollapsed) {
+                        arrow.textContent = alignRight ? '◀' : '▶';
+                    } else {
+                        arrow.textContent = alignRight ? '▶' : '◀';
+                    }
+                }
+            }
+
+            _onResize() {
+                const cfg = Screen.getConfig();
+                const el = this.el;
+                const isCollapsed = el.classList.contains('collapsed');
+                
+                // 窗口变化时恢复位置（会同时更新 expand-left/expand-right 类）
+                this._restorePosition();
+                
+                // 重新检测按钮区域溢出（延迟执行以确保布局已更新）
+                requestAnimationFrame(() => this._checkActionsOverflow());
+                
+                if (isCollapsed) return;
+                
+                // 更新CSS变量
+                el.style.setProperty('--w', `${cfg.width}px`);
+                el.style.setProperty('--h', `${cfg.maxHeight}px`);
+                el.style.setProperty('--fs', `${cfg.fontSize}px`);
+                el.style.setProperty('--pd', `${cfg.padding}px`);
+                el.style.setProperty('--av', `${cfg.avatarSize}px`);
+                el.style.setProperty('--ring', `${cfg.ringSize}px`);
+                
+                el.style.width = `${cfg.width}px`;
+                el.style.maxHeight = `${cfg.maxHeight}px`;
+            }
+            
+            /**
+             * 保存位置（拖拽后调用）
+             * 
+             * 存储格式：{ topRatio, anchorX, alignRight }
+             * 直接从 inline style 读取位置，避免精度累积误差
+             */
+            _savePosition() {
+                const el = this.el;
+                const rect = el.getBoundingClientRect();
+                const { innerWidth: vw, innerHeight: vh } = window;
+                
+                const centerX = rect.left + rect.width / 2;
+                const alignRight = centerX > vw / 2;
+                
+                // 直接从 inline style 读取锚点位置，取整避免精度问题
+                let anchorX;
+                if (alignRight) {
+                    const styleRight = parseFloat(el.style.right);
+                    anchorX = !isNaN(styleRight) ? Math.round(styleRight) : Math.round(vw - rect.right);
+                } else {
+                    const styleLeft = parseFloat(el.style.left);
+                    anchorX = !isNaN(styleLeft) ? Math.round(styleLeft) : Math.round(rect.left);
+                }
+                
+                this.storage.setGlobalNow('position', { 
+                    topRatio: rect.top / vh,
+                    anchorX,
+                    alignRight 
+                });
+            }
+            
+            /**
+             * 恢复位置
+             * 根据 alignRight 使用不同的定位模式，锚定边缘位置不变
+             */
+            _restorePosition() {
+                const el = this.el;
+                const pos = this.storage.getGlobal('position');
+                const { innerWidth: vw, innerHeight: vh } = window;
+                const margin = 8;
+                const isCollapsed = el.classList.contains('collapsed');
+                const cfg = Screen.getConfig();
+                
+                // 折叠状态尺寸常量
+                const COLLAPSED_SIZE = 48;
+                const panelWidth = isCollapsed ? COLLAPSED_SIZE : (parseInt(el.style.width) || cfg.width);
+                const panelHeight = isCollapsed ? COLLAPSED_SIZE : (parseInt(el.style.maxHeight) || cfg.maxHeight);
+                
+                let alignRight = true;
+                let anchorX = 20;
+                let top;
+                
+                if (pos && typeof pos.alignRight === 'boolean') {
+                    alignRight = pos.alignRight;
+                    anchorX = pos.anchorX ?? 20;
+                    top = pos.topRatio !== undefined ? pos.topRatio * vh : pos.top;
+                } else if (pos && (pos.left !== undefined || pos.leftDist !== undefined)) {
+                    // 兼容旧格式
+                    const leftDist = parseFloat(pos.left || pos.leftDist);
+                    top = parseFloat(pos.top || 0);
+                    alignRight = leftDist + panelWidth / 2 > vw / 2;
+                    anchorX = alignRight ? (vw - leftDist - panelWidth) : leftDist;
+                } else if (pos && pos.rightDist !== undefined) {
+                    // 兼容上一版本格式
+                    alignRight = pos.alignRight;
+                    anchorX = alignRight ? pos.rightDist : pos.leftDist;
+                    top = pos.topRatio !== undefined ? pos.topRatio * vh : 0;
+                } else {
+                    // 默认位置（右下角）
+                    top = vh - panelHeight - 20;
+                }
+                
+                // 确保在视口内
+                top = Math.max(margin, Math.min(top, vh - panelHeight - margin));
+                anchorX = Math.max(margin, Math.min(anchorX, vw - panelWidth - margin));
+                
+                // 取整避免精度问题
+                anchorX = Math.round(anchorX);
+                top = Math.round(top);
+                
+                if (alignRight) {
+                    // 靠右：使用 right 定位
+                    el.style.right = `${anchorX}px`;
+                    el.style.left = 'auto';
+                } else {
+                    // 靠左：使用 left 定位
+                    el.style.left = `${anchorX}px`;
+                    el.style.right = 'auto';
+                }
+                el.style.top = `${top}px`;
+                
+                // 更新展开方向类
+                el.classList.toggle('expand-left', alignRight);
+                el.classList.toggle('expand-right', !alignRight);
+            }
+
+            // 初始化面板手动调整大小功能（仅桌面端）
+            _initResize() {
+                // 检测是否为桌面端（有鼠标悬停能力且是精确指针）
+                if (!window.matchMedia('(hover:hover) and (pointer:fine)').matches) return;
+                
+                const el = this.el;
+                const handles = el.querySelectorAll('.ldsp-resize-handle');
+                if (!handles.length) return;
+                
+                let startX, startY, startW, startH, startLeft, startTop, direction;
+                const minW = 220, maxW = 420, minH = 300;
+                
+                const onMouseMove = (e) => {
+                    if (!direction) return;
+                    e.preventDefault();
+                    
+                    const dx = e.clientX - startX;
+                    const dy = e.clientY - startY;
+                    const { innerWidth: vw, innerHeight: vh } = window;
+                    
+                    // 根据方向调整尺寸
+                    if (direction.includes('e')) {
+                        const newW = Math.max(minW, Math.min(maxW, startW + dx));
+                        // 确保不超出右边界
+                        if (startLeft + newW <= vw - 8) {
+                            el.style.width = `${newW}px`;
+                            el.style.setProperty('--w', `${newW}px`);
+                        }
+                    }
+                    if (direction.includes('s')) {
+                        const newH = Math.max(minH, Math.min(vh - startTop - 20, startH + dy));
+                        el.style.maxHeight = `${newH}px`;
+                        el.style.setProperty('--h', `${newH}px`);
+                    }
+                };
+                
+                const onMouseUp = () => {
+                    if (!direction) return;
+                    direction = null;
+                    el.classList.remove('resizing');
+                    document.removeEventListener('mousemove', onMouseMove);
+                    document.removeEventListener('mouseup', onMouseUp);
+                    
+                    // 保存用户自定义的尺寸
+                    this.storage.setGlobalNow('customSize', {
+                        width: parseInt(el.style.width),
+                        height: parseInt(el.style.maxHeight)
+                    });
+                };
+                
+                handles.forEach(handle => {
+                    handle.addEventListener('mousedown', (e) => {
+                        if (el.classList.contains('collapsed')) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        
+                        // 判断调整方向
+                        if (handle.classList.contains('ldsp-resize-e')) direction = 'e';
+                        else if (handle.classList.contains('ldsp-resize-s')) direction = 's';
+                        else if (handle.classList.contains('ldsp-resize-se')) direction = 'se';
+                        
+                        const rect = el.getBoundingClientRect();
+                        startX = e.clientX;
+                        startY = e.clientY;
+                        startW = rect.width;
+                        startH = rect.height;
+                        startLeft = rect.left;
+                        startTop = rect.top;
+                        
+                        el.classList.add('resizing');
+                        document.addEventListener('mousemove', onMouseMove);
+                        document.addEventListener('mouseup', onMouseUp);
+                    });
+                });
+                
+                // 恢复用户自定义的尺寸
+                const customSize = this.storage.getGlobal('customSize');
+                if (customSize) {
+                    if (customSize.width >= minW && customSize.width <= maxW) {
+                        el.style.width = `${customSize.width}px`;
+                        el.style.setProperty('--w', `${customSize.width}px`);
+                    }
+                    if (customSize.height >= minH) {
+                        const maxH = window.innerHeight - 50;
+                        const h = Math.min(customSize.height, maxH);
+                        el.style.maxHeight = `${h}px`;
+                        el.style.setProperty('--h', `${h}px`);
+                    }
+                }
+            }
+
+            /**
+             * 面板展开/折叠切换
+             * 
+             * 设计原则：
+             * - 左侧面板（靠左对齐）：折叠/展开时保持左边缘位置不变
+             * - 右侧面板（靠右对齐）：折叠/展开时保持右边缘位置不变
+             * 
+             * 实现方式：
+             * - 读取已保存的 alignRight 来确定对齐方向（避免因尺寸变化导致判断不一致）
+             * - 根据当前定位模式读取正确的锚点位置
+             * - left 定位的面板取 left 值，right 定位的面板取 right 值
+             */
+            _toggle() {
+                const el = this.el;
+                const isCurrentlyCollapsed = el.classList.contains('collapsed');
+                const willCollapse = !isCurrentlyCollapsed;
+                const { innerWidth: vw } = window;
+                
+                // 从已保存的位置获取对齐方向，避免因面板尺寸变化导致判断不一致
+                const savedPos = this.storage.getGlobal('position');
+                const alignRight = savedPos?.alignRight ?? el.classList.contains('expand-left');
+                
+                // 1. 立即禁用过渡和清除 transform（避免 hover 缩放效果影响位置计算）
+                el.classList.add('no-trans');
+                el.classList.remove('anim');
+                el.style.transform = 'none';
+                
+                // 强制应用样式
+                void el.offsetWidth;
+                
+                // 2. 获取当前锚点位置（直接使用保存的值最可靠）
+                let anchorX = savedPos?.anchorX;
+                
+                // 如果没有保存的值，从 style 或 rect 计算
+                if (anchorX === undefined || anchorX === null) {
+                    if (alignRight) {
+                        const styleRight = parseFloat(el.style.right);
+                        if (!isNaN(styleRight)) {
+                            anchorX = styleRight;
+                        } else {
+                            const rect = el.getBoundingClientRect();
+                            anchorX = vw - rect.right;
+                        }
+                    } else {
+                        const styleLeft = parseFloat(el.style.left);
+                        if (!isNaN(styleLeft)) {
+                            anchorX = styleLeft;
+                        } else {
+                            const rect = el.getBoundingClientRect();
+                            anchorX = rect.left;
+                        }
+                    }
+                }
+                
+                // 3. 设置定位模式（取整避免精度问题）
+                anchorX = Math.round(anchorX);
+                if (alignRight) {
+                    el.style.right = anchorX + 'px';
+                    el.style.left = 'auto';
+                } else {
+                    el.style.left = anchorX + 'px';
+                    el.style.right = 'auto';
+                }
+                
+                // 清除内联 transform（让 CSS 类控制）
+                el.style.transform = '';
+                
+                // 更新展开方向类
+                el.classList.toggle('expand-left', alignRight);
+                el.classList.toggle('expand-right', !alignRight);
+                
+                // 4. 强制浏览器应用定位模式
+                void el.offsetWidth;
+                
+                // 5. 启用过渡动画
+                el.classList.remove('no-trans');
+                el.classList.add('anim');
+                
+                // 6. 切换折叠状态（使用 rAF 确保过渡生效）
+                requestAnimationFrame(() => {
+                    el.classList.toggle('collapsed');
+                    
+                    // 更新箭头方向
+                    this._updateArrow();
+                    
+                    // 保存折叠状态
+                    this.storage.setGlobalNow('collapsed', willCollapse);
+                    
+                    // 展开时的额外处理
+                    if (!willCollapse) {
+                        this.animRing = true;
+                        this.cachedReqs.length && setTimeout(() => this.renderer.renderReqs(this.cachedReqs), 100);
+                    }
+
+                    // 7. 动画结束后清理状态
+                    setTimeout(() => {
+                        el.classList.remove('anim');
+                        // 保存位置（保持当前的 alignRight，只更新 anchorX 和 top）
+                        this._savePositionKeepAlign(alignRight);
+                    }, 400);
+                });
+            }
+            
+            /**
+             * 保存位置，但保持指定的对齐方向
+             * 完全从 inline style 读取位置值，避免 getBoundingClientRect 在动画期间的不稳定值
+             */
+            _savePositionKeepAlign(alignRight) {
+                const el = this.el;
+                const { innerWidth: vw, innerHeight: vh } = window;
+                
+                // 直接从 inline style 读取锚点位置
+                let anchorX;
+                if (alignRight) {
+                    const styleRight = parseFloat(el.style.right);
+                    // 如果 style.right 是 'auto' 或无效值，从 rect 计算
+                    if (!isNaN(styleRight)) {
+                        anchorX = Math.round(styleRight);
+                    } else {
+                        const rect = el.getBoundingClientRect();
+                        anchorX = Math.round(vw - rect.right);
+                    }
+                } else {
+                    const styleLeft = parseFloat(el.style.left);
+                    // 如果 style.left 是 'auto' 或无效值，从 rect 计算
+                    if (!isNaN(styleLeft)) {
+                        anchorX = Math.round(styleLeft);
+                    } else {
+                        const rect = el.getBoundingClientRect();
+                        anchorX = Math.round(rect.left);
+                    }
+                }
+                
+                // 确保 anchorX 在合理范围内（防止保存无效值）
+                anchorX = Math.max(8, anchorX);
+                
+                // top 也从 style 读取，避免动画期间 getBoundingClientRect 的不稳定
+                const styleTop = parseFloat(el.style.top);
+                const topRatio = !isNaN(styleTop) ? styleTop / vh : undefined;
+                
+                // 如果有有效的 topRatio，则保存；否则保留之前的值
+                if (topRatio !== undefined) {
+                    this.storage.setGlobalNow('position', { 
+                        topRatio,
+                        anchorX,
+                        alignRight 
+                    });
+                } else {
+                    // 只更新 anchorX，保留之前的 topRatio
+                    const oldPos = this.storage.getGlobal('position') || {};
+                    this.storage.setGlobalNow('position', { 
+                        ...oldPos,
+                        anchorX,
+                        alignRight 
+                    });
+                }
+            }
+
+            _switchTheme() {
+                const light = this.el.classList.toggle('light');
+                this.$.btnTheme.textContent = light ? '☀️' : '🌓';
+                this.storage.setGlobalNow('theme', light ? 'light' : 'dark');
+            }
+
+            // 从缓存加载头像（优先动态头像）
+            _loadAvatarFromCache() {
+                // 1. 优先使用缓存的动态头像
+                if (this.followManager?.animatedAvatar) {
+                    this.renderer.renderAvatar(this.followManager.animatedAvatar);
+                    return;
+                }
+                // 2. 其次使用缓存的普通头像
+                if (this.avatar) {
+                    this.renderer.renderAvatar(this.avatar);
+                    return;
+                }
+                // 3. 都没有则尝试从页面获取
+                const el = document.querySelector('.current-user img.avatar');
+                if (el) {
+                    this._updateAvatar(el.src);
+                }
+            }
+
+            // 更新普通头像（从页面获取时调用）
+            _updateAvatar(url) {
+                if (!url) return;
+                if (url.startsWith('/')) url = `https://${CURRENT_SITE.domain}${url}`;
+                url = url.replace(PATTERNS.AVATAR_SIZE, '/128/');
+                // 只有头像变化时才更新
+                if (this.avatar === url) return;
+                this.avatar = url;
+                this.storage.set('userAvatar', url);
+                // 只有在没有动态头像时才渲染普通头像
+                if (!this.followManager?.animatedAvatar) {
+                    this.renderer.renderAvatar(url);
+                }
+            }
+
+            _startReadingUpdate() {
+                if (this._readingTimer) return;
+                this._readingTimer = setInterval(() => {
+                    this.readingTime = this.tracker.getTodayTime();
+                }, CONFIG.INTERVALS.READING_UPDATE);
+            }
+            _setLoading(v) {
+                this.loading = v;
+                this.$.btnRefresh.disabled = v;
+                this.$.btnRefresh.style.animation = v ? 'spin 1s linear infinite' : '';
+            }
+
+            async fetch() {
+                if (this.loading) return;
+                this._setLoading(true);
+                this.$.reqs.innerHTML = `<div class="ldsp-loading"><div class="ldsp-spinner"></div><div>加载中...</div></div>`;
+
+                try {
+                    const url = CURRENT_SITE.apiUrl;
+                    
+                    // 使用 network.fetch（包含 GM_xmlhttpRequest 绕过跨域，以及 fallback）
+                    const html = await this.network.fetch(url);
+                    
+                    if (!html) {
+                        throw new Error('无法获取数据');
+                    }
+                    
+                    await this._parse(html);
+                } catch (e) {
+                    this._showError(e.message || '网络错误');
+                } finally {
+                    this._setLoading(false);
+                }
+            }
+
+            _showError(msg) {
+                this.$.reqs.innerHTML = `<div class="ldsp-empty"><div class="ldsp-empty-icon">❌</div><div class="ldsp-empty-txt">${msg}</div></div>`;
+            }
+
+            // 更新信任等级到服务端和本地缓存
+            async _updateTrustLevel(connectLevel) {
+                // 同时检查 oauth 和 cloudSync.oauth 的登录状态
+                if (!this.oauth?.isLoggedIn() || !this.cloudSync?.oauth?.isLoggedIn()) return;
+                
+                const userInfo = this.oauth.getUserInfo();
+                // v3.4.7: 兼容 trust_level 和 trustLevel 两种命名格式
+                const currentLevel = userInfo?.trust_level ?? userInfo?.trustLevel;
+                
+                // 只有当等级变化时才更新
+                if (currentLevel === connectLevel) return;
+                
+                try {
+                    // 更新服务端（使用统一的 oauth 实例）
+                    const result = await this.oauth.api('/api/user/trust-level', {
+                        method: 'POST',
+                        body: { trust_level: connectLevel }
+                    });
+                    
+                    if (result?.success) {
+                        // 更新本地缓存
+                        const updatedUserInfo = { ...userInfo, trust_level: connectLevel };
+                        this.oauth.setUserInfo(updatedUserInfo);
+                    }
+                } catch (e) { /* 同步失败，忽略 */ }
+            }
+
+            // 当没有升级要求表格时显示备选内容
+            // 优先级：1. 服务端同步的数据 2. summary API 数据
+            async _showFallbackStats(username, level) {
+                const $ = this.$;
+                
+                // 优先从 OAuth 获取用户信息（更可靠，尤其在移动端）
+                let effectiveUsername = username;
+                let numLevel = parseInt(level) || 0;
+                
+                if (this.oauth?.isLoggedIn()) {
+                    const oauthUser = this.oauth.getUserInfo();
+                    // 优先使用 OAuth 中的用户名
+                    if (oauthUser?.username) {
+                        effectiveUsername = oauthUser.username;
+                    }
+                    // 优先使用 OAuth 中的信任等级
+                    const oauthTrustLevel = oauthUser?.trust_level ?? oauthUser?.trustLevel;
+                    if (typeof oauthTrustLevel === 'number') {
+                        numLevel = oauthTrustLevel;
+                    }
+                }
+                
+                // 显示用户信息
+                if (effectiveUsername && effectiveUsername !== '未知') {
+                    $.userDisplayName.textContent = effectiveUsername;
+                    $.userHandle.textContent = '';
+                    $.userHandle.style.display = 'none';
+                }
+                
+                // === 方案1：优先从服务端获取已同步的升级要求数据 ===
+                // 这些数据是桌面端解析 connect 页面后上传的，最完整准确
+                if (this.oauth?.isLoggedIn() && this.cloudSync) {
+                    this.$.reqs.innerHTML = `<div class="ldsp-loading"><div class="ldsp-spinner"></div><div>正在获取云端数据...</div></div>`;
+                    try {
+                        const cloudData = await this._fetchCloudRequirements();
+                        if (cloudData && cloudData.length > 0) {
+                            return this._renderCloudRequirements(cloudData, effectiveUsername, numLevel);
+                        }
+                    } catch (e) { /* 云端获取失败，继续尝试 summary */ }
+                }
+                
+                // === 方案2：从 summary API 获取统计数据 ===
+                if (effectiveUsername && effectiveUsername !== '未知') {
+                    this.$.reqs.innerHTML = `<div class="ldsp-loading"><div class="ldsp-spinner"></div><div>正在获取统计数据...</div></div>`;
+                    const summaryData = await this._fetchSummaryData(effectiveUsername);
+                    if (summaryData && Object.keys(summaryData).length > 0) {
+                        return this._renderSummaryData(summaryData, effectiveUsername, numLevel);
+                    }
+                }
+                
+                // 如果无法获取 summary 数据，显示简要信息
+                this.$.reqs.innerHTML = `
+                    <div class="ldsp-empty">
+                        <div class="ldsp-empty-icon">📊</div>
+                        <div class="ldsp-empty-txt">
+                            <div style="margin-bottom:8px;">当前信任等级：<b style="color:#5a7de0;">${numLevel}</b></div>
+                            <div style="font-size:12px;color:#6b7280;">暂无升级进度数据</div>
+                            <div style="margin-top:10px;font-size:11px;color:#9ca3af;">
+                                <a href="https://linux.do/t/topic/2460" target="_blank" style="color:#5a7de0;text-decoration:none;">📖 查看完整信任等级说明</a>
+                            </div>
+                        </div>
+                    </div>`;
+                
+                // 初始化 todayData（用于今日趋势显示）
+                const todayData = this._getTodayData();
+                if (!todayData) {
+                    this._setTodayData({}, true);
+                }
+                
+                // 低信任等级用户也可以查看阅读时间趋势
+                const history = this.historyMgr.getHistory();
+                this.cachedHistory = history;
+                this.cachedReqs = []; // 空的升级要求数组
+                this._renderTrends(history, []);
+            }
+
+            /**
+             * 从服务端获取最近同步的升级要求数据
+             * @returns {Array|null} - 升级要求数组或 null
+             */
+            async _fetchCloudRequirements() {
+                // 前置登录检查，避免无效请求
+                if (!this.cloudSync?.oauth?.isLoggedIn()) return null;
+                
+                try {
+                    // 获取最近一天的历史数据
+                    const result = await this.cloudSync.oauth.api('/api/requirements/history?days=1');
+                    if (!result?.success || !result.data?.history?.length) {
+                        return null;
+                    }
+                    
+                    // 取最新的一条记录
+                    const latestRecord = result.data.history[result.data.history.length - 1];
+                    if (!latestRecord?.data) return null;
+                    
+                    // 转换为升级要求数组格式
+                    const reqs = [];
+                    for (const [name, value] of Object.entries(latestRecord.data)) {
+                        if (name === '阅读时间(分钟)') continue; // 跳过阅读时间
+                        reqs.push({
+                            name,
+                            currentValue: value,
+                            requiredValue: 0, // 从配置获取
+                            isSuccess: false,
+                            change: 0,
+                            isReverse: /举报|禁言|封禁/.test(name)
+                        });
+                    }
+                    
+                    return reqs.length > 0 ? reqs : null;
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            /**
+             * 渲染从云端获取的升级要求数据
+             * @param {Array} cloudReqs - 云端数据数组
+             * @param {string} username - 用户名
+             * @param {number} level - 信任等级
+             */
+            _renderCloudRequirements(cloudReqs, username, level) {
+                // 2-4级用户的升级/保持要求配置（基于 connect 页面的 14 项要求）
+                const LEVEL_2_PLUS_REQUIREMENTS = {
+                    '访问次数': 50,           // 50%
+                    '回复的话题': 10,
+                    '浏览的话题': 500,
+                    '浏览的话题（所有时间）': 200,
+                    '已读帖子': 20000,
+                    '已读帖子（所有时间）': 500,
+                    '被举报的帖子': 5,         // 最多5个（反向）
+                    '发起举报的用户': 5,       // 最多5个（反向）
+                    '点赞': 30,
+                    '获赞': 20,
+                    '获赞：单日最高数量': 7,
+                    '获赞：点赞用户数量': 5,
+                    '被禁言（过去 6 个月）': 0, // 必须为0（反向）
+                    '被封禁（过去 6 个月）': 0  // 必须为0（反向）
+                };
+                
+                // 为云端数据填充要求值
+                const reqs = cloudReqs.map(req => {
+                    const requiredValue = LEVEL_2_PLUS_REQUIREMENTS[req.name] ?? 0;
+                    const isReverse = /举报|禁言|封禁/.test(req.name);
+                    const isSuccess = isReverse 
+                        ? req.currentValue <= requiredValue 
+                        : req.currentValue >= requiredValue;
+                    
+                    return {
+                        ...req,
+                        requiredValue,
+                        isSuccess,
+                        isReverse
+                    };
+                });
+                
+                // 按照配置顺序排序
+                const orderedNames = Object.keys(LEVEL_2_PLUS_REQUIREMENTS);
+                const orderedReqs = reqs.sort((a, b) => {
+                    const idxA = orderedNames.indexOf(a.name);
+                    const idxB = orderedNames.indexOf(b.name);
+                    if (idxA === -1 && idxB === -1) return 0;
+                    if (idxA === -1) return 1;
+                    if (idxB === -1) return -1;
+                    return idxA - idxB;
+                });
+                
+                // 检查是否达标
+                const isOK = orderedReqs.every(r => r.isSuccess);
+                
+                // 保存历史数据
+                const histData = {};
+                orderedReqs.forEach(r => histData[r.name] = r.currentValue);
+                const history = this.historyMgr.addHistory(histData, this.readingTime);
+                
+                // 保存今日数据
+                const todayData = this._getTodayData();
+                this._setTodayData(histData, !todayData);
+                
+                // 获取显示名称
+                let displayName = null;
+                if (this.hasLeaderboard && this.oauth?.isLoggedIn()) {
+                    const oauthUser = this.oauth.getUserInfo();
+                    if (oauthUser?.name && oauthUser.name !== oauthUser.username) {
+                        displayName = oauthUser.name;
+                    }
+                }
+                
+                // 渲染
+                this.renderer.renderUser(username, level.toString(), isOK, orderedReqs, displayName);
+                this.renderer.renderReqs(orderedReqs, level);
+                
+                this.cachedHistory = history;
+                this.cachedReqs = orderedReqs;
+                
+                this._renderTrends(history, orderedReqs);
+                this._setLastVisit(histData);
+                this.prevReqs = orderedReqs;
+                
+                return true;
+            }
+            
+            /**
+             * 从 summary.json API 获取用户统计数据 (使用 user_summary 字段)
+             * @param {string} username - 用户名
+             * @returns {Object|null} - 统计数据对象或null
+             */
+            async _fetchSummaryData(username) {
+                try {
+                    const baseUrl = `https://${CURRENT_SITE.domain}`;
+                    const data = {};
+                    
+                    // 优先使用 summary.json API（Discourse 标准 API）的 user_summary 字段
+                    const jsonUrl = `${baseUrl}/u/${encodeURIComponent(username)}/summary.json`;
+                    
+                    // 尝试多种方式获取数据，兼容不同的用户脚本管理器
+                    let jsonText = null;
+                    
+                    // 方法1: 使用 GM_xmlhttpRequest
+                    try {
+                        jsonText = await this.network.fetch(jsonUrl, { maxRetries: 2, timeout: 10000 });
+                    } catch (e) { /* GM fetch 失败 */ }
+                    
+                    // 方法2: 如果 GM 方式失败，尝试原生 fetch（同源请求更可靠）
+                    if (!jsonText) {
+                        try {
+                            const response = await fetch(jsonUrl, { 
+                                credentials: 'include',
+                                headers: { 'Accept': 'application/json' }
+                            });
+                            if (response.ok) {
+                                jsonText = await response.text();
+                            }
+                        } catch (e) { /* native fetch 失败 */ }
+                    }
+                    
+                    if (jsonText) {
+                        try {
+                            const json = JSON.parse(jsonText);
+                            
+                            // 从 user_summary 字段提取统计数据
+                            const stats = json?.user_summary;
+                            if (stats) {
+                                // 映射 Discourse API 字段到显示名称
+                                if (stats.days_visited !== undefined) data['访问天数'] = stats.days_visited;
+                                if (stats.topics_entered !== undefined) data['浏览话题'] = stats.topics_entered;
+                                if (stats.posts_read_count !== undefined) data['已读帖子'] = stats.posts_read_count;
+                                if (stats.likes_given !== undefined) data['送出赞'] = stats.likes_given;
+                                if (stats.likes_received !== undefined) data['获赞'] = stats.likes_received;
+                                if (stats.post_count !== undefined) data['回复'] = stats.post_count;
+                                if (stats.topic_count !== undefined) data['创建话题'] = stats.topic_count;
+                                // 额外有用的字段
+                                if (stats.time_read !== undefined) data['阅读时间'] = Math.round(stats.time_read / 60); // 秒转分钟
+                                
+                                if (Object.keys(data).length > 0) {
+                                    return data;
+                                }
+                            }
+                        } catch (e) { /* JSON 解析失败 */ }
+                    }
+                    
+                    // 方法B：回退到 HTML 解析
+                    const url = `${baseUrl}/u/${encodeURIComponent(username)}/summary`;
+                    let html = null;
+                    
+                    // 先尝试 GM_xmlhttpRequest
+                    try {
+                        html = await this.network.fetch(url, { maxRetries: 2 });
+                    } catch (e) { /* GM fetch 失败 */ }
+                    
+                    // 备用：原生 fetch
+                    if (!html) {
+                        try {
+                            const resp = await fetch(url, { credentials: 'include' });
+                            if (resp.ok) {
+                                html = await resp.text();
+                            }
+                        } catch (e) { /* native fetch 失败 */ }
+                    }
+                    
+                    if (!html) {
+                        return null;
+                    }
+                    
+                    const doc = new DOMParser().parseFromString(html, 'text/html');
+                    
+                    // 辅助函数：解析数值（支持 k、m 等缩写和逗号分隔）
+                    const parseValue = (text) => {
+                        if (!text) return 0;
+                        const cleaned = text.replace(/,/g, '').trim();
+                        const match = cleaned.match(/([\d.]+)\s*([km万亿])?/i);
+                        if (!match) return 0;
+                        let value = parseFloat(match[1]);
+                        const suffix = match[2]?.toLowerCase();
+                        if (suffix === 'k' || suffix === '万') value *= 1000;
+                        if (suffix === 'm' || suffix === '亿') value *= 1000000;
+                        return Math.round(value);
+                    };
+                    
+                    // 方法1：通过 class 名称查找统计项（Discourse 标准结构）
+                    const statItems = doc.querySelectorAll('li[class*="stats-"], .stat-item, .user-stat');
+                    statItems.forEach(item => {
+                        const className = item.className || '';
+                        const valueEl = item.querySelector('.value .number, .value, .stat-value');
+                        if (!valueEl) return;
+                        
+                        // 优先从 title 获取完整数值
+                        let value = 0;
+                        const titleAttr = valueEl.getAttribute('title') || item.getAttribute('title');
+                        if (titleAttr) {
+                            value = parseValue(titleAttr);
+                        } else {
+                            value = parseValue(valueEl.textContent);
+                        }
+                        
+                        // 根据 class 名称映射
+                        if (className.includes('days-visited')) data['访问天数'] = value;
+                        else if (className.includes('topics-entered')) data['浏览话题'] = value;
+                        else if (className.includes('posts-read')) data['已读帖子'] = value;
+                        else if (className.includes('likes-given')) data['送出赞'] = value;
+                        else if (className.includes('likes-received')) data['获赞'] = value;
+                        else if (className.includes('post-count')) data['回复'] = value;
+                        else if (className.includes('topic-count')) data['创建话题'] = value;
+                        else if (className.includes('solved-count')) data['解决方案'] = value;
+                    });
+                    
+                    // 方法2：如果方法1没找到数据，尝试通过标签文本匹配
+                    if (Object.keys(data).length === 0) {
+                        // 查找所有可能包含统计数据的元素
+                        const allStats = doc.querySelectorAll('.stats-section li, .top-section li, .user-summary-stat');
+                        allStats.forEach(item => {
+                            const text = item.textContent.trim();
+                            const labelEl = item.querySelector('.label, .stat-label');
+                            const valueEl = item.querySelector('.value, .number, .stat-value');
+                            
+                            if (!labelEl && !valueEl) return;
+                            
+                            const label = (labelEl?.textContent || '').toLowerCase().trim();
+                            let value = 0;
+                            
+                            if (valueEl) {
+                                const titleAttr = valueEl.getAttribute('title') || item.getAttribute('title');
+                                value = parseValue(titleAttr || valueEl.textContent);
+                            }
+                            
+                            // 根据标签文本匹配
+                            if (label.includes('访问') || label.includes('visited') || text.includes('访问天数')) {
+                                data['访问天数'] = value;
+                            } else if (label.includes('浏览') && label.includes('话题') || label.includes('topics') || text.includes('浏览的话题')) {
+                                data['浏览话题'] = value;
+                            } else if (label.includes('已读') || label.includes('阅读') || label.includes('posts read') || text.includes('已读帖子')) {
+                                data['已读帖子'] = value;
+                            } else if (label.includes('送出') || label.includes('given') || text.includes('已送出')) {
+                                data['送出赞'] = value;
+                            } else if (label.includes('收到') || label.includes('received') || text.includes('已收到')) {
+                                data['获赞'] = value;
+                            } else if (label.includes('帖子') && !label.includes('已读') || label.includes('创建的帖子') || text.includes('创建的帖子')) {
+                                data['回复'] = value;
+                            } else if (label.includes('创建') && label.includes('话题') || text.includes('创建的话题')) {
+                                data['创建话题'] = value;
+                            }
+                        });
+                    }
+                    
+                    // 方法3：通用文本解析（作为最后手段）
+                    if (Object.keys(data).length === 0) {
+                        const statsText = doc.body?.textContent || '';
+                        // 尝试匹配 "数字+标签" 的模式
+                        const patterns = [
+                            { regex: /([\d,.]+[km]?)\s*访问天数/i, key: '访问天数' },
+                            { regex: /([\d,.]+[km]?)\s*浏览的?话题/i, key: '浏览话题' },
+                            { regex: /([\d,.]+[km]?)\s*已读帖子/i, key: '已读帖子' },
+                            { regex: /([\d,.]+[km]?)\s*已?送出/i, key: '送出赞' },
+                            { regex: /([\d,.]+[km]?)\s*已?收到/i, key: '获赞' },
+                            { regex: /([\d,.]+[km]?)\s*创建的帖子/i, key: '回复' }
+                        ];
+                        patterns.forEach(p => {
+                            const match = statsText.match(p.regex);
+                            if (match) data[p.key] = parseValue(match[1]);
+                        });
+                    }
+                    
+                    return Object.keys(data).length > 0 ? data : null;
+                } catch (e) {
+                    return null;
+                }
+            }
+            
+            /**
+             * 渲染 summary 统计数据（低信任等级用户）
+             * 使用与 2 级用户相同的 renderReqs 方法显示进度
+             */
+            _renderSummaryData(data, username, level) {
+                // 构建要求数据结构（用于显示和趋势）
+                const reqs = [];
+                
+                // 这是 connect 页面获取失败时的 fallback 方案
+                // summary API 只能提供有限的累计统计数据（约8项）
+                // 注意：summary API 返回的是累计总数，而 2→3 级升级要求是"过去100天"的数据
+                // 因此这里的数据仅供参考，不能完全代表升级进度
+                // 升级要求参考: https://linux.do/t/topic/2460
+                let statsConfig;
+                
+                if (level === 0) {
+                    // 0级升1级要求：
+                    // - 进入5个话题、阅读30篇帖子、阅读10分钟
+                    statsConfig = [
+                        { key: '浏览话题', required: 5 },
+                        { key: '已读帖子', required: 30 },
+                        { key: '阅读时间', required: 10 }  // 10分钟
+                    ];
+                } else if (level === 1) {
+                    // 1级升2级要求：
+                    // - 访问15天、浏览20话题、阅读100帖子、阅读60分钟
+                    // - 送出和收到各1个赞、回复3个不同话题
+                    statsConfig = [
+                        { key: '访问天数', required: 15 },
+                        { key: '浏览话题', required: 20 },
+                        { key: '已读帖子', required: 100 },
+                        { key: '阅读时间', required: 60 },  // 60分钟
+                        { key: '送出赞', required: 1 },
+                        { key: '获赞', required: 1 },
+                        { key: '回复', required: 3 }  // 3个不同话题
+                    ];
+                } else {
+                    // 2级及以上用户：仅显示统计数据，不显示升级要求
+                    // 重要：2级用户的升级进度应从 connect 页面获取（有详细的100天内数据）
+                    // 这里只是 connect 页面完全无法获取时的兜底方案
+                    // summary API 返回的是累计数据，无法反映真实的升级进度
+                    statsConfig = [
+                        { key: '访问天数', required: 0, isStats: true },
+                        { key: '浏览话题', required: 0, isStats: true },
+                        { key: '已读帖子', required: 0, isStats: true },
+                        { key: '送出赞', required: 0, isStats: true },
+                        { key: '获赞', required: 0, isStats: true },
+                        { key: '回复', required: 0, isStats: true },
+                        { key: '创建话题', required: 0, isStats: true },
+                        { key: '阅读时间', required: 0, isStats: true }
+                    ];
+                }
+                
+                statsConfig.forEach(config => {
+                    // 获取当前值（如果没有数据则默认为 0）
+                    const currentValue = data[config.key] !== undefined ? data[config.key] : 0;
+                    const requiredValue = config.required;
+                    const isSuccess = currentValue >= requiredValue;
+                    const prev = this.prevReqs.find(p => p.name === config.key);
+                    
+                    reqs.push({
+                        name: config.key,
+                        currentValue,
+                        requiredValue,
+                        isSuccess,
+                        change: prev ? currentValue - prev.currentValue : 0,
+                        isReverse: false
+                    });
+                });
+                
+                // 如果没有任何配置项，返回 false
+                if (reqs.length === 0) return false;
+                
+                // 检查升级条件
+                const requiredItems = reqs.filter(r => r.requiredValue > 0);
+                const metItems = requiredItems.filter(r => r.isSuccess);
+                const isOK = requiredItems.length > 0 && metItems.length === requiredItems.length;
+                
+                // 通知检查
+                this.notifier.check(reqs);
+                
+                // 保存历史数据
+                const histData = {};
+                reqs.forEach(r => histData[r.name] = r.currentValue);
+                const history = this.historyMgr.addHistory(histData, this.readingTime);
+                
+                // 保存今日数据
+                const todayData = this._getTodayData();
+                this._setTodayData(histData, !todayData);
+                
+                // 获取 OAuth 用户信息中的显示名称
+                let displayName = null;
+                if (this.hasLeaderboard && this.oauth?.isLoggedIn()) {
+                    const oauthUser = this.oauth.getUserInfo();
+                    if (oauthUser?.name && oauthUser.name !== oauthUser.username) {
+                        displayName = oauthUser.name;
+                    }
+                }
+                
+                // 渲染用户信息和统计数据（与 2 级用户使用相同的 renderReqs 方法）
+                this.renderer.renderUser(username, level.toString(), isOK, reqs, displayName);
+                this.renderer.renderReqs(reqs, level);
+                
+                // 保存缓存
+                this.cachedHistory = history;
+                this.cachedReqs = reqs;
+                this.prevReqs = reqs;
+                
+                // 0-1级用户也触发数据同步（阅读时间等）
+                if (this.hasLeaderboard && this.cloudSync && this.oauth?.isLoggedIn()) {
+                    // 同步阅读时间数据
+                    this.cloudSync.upload().catch(() => {});
+                }
+                
+                // 渲染趋势
+                this._renderTrends(history, reqs);
+                
+                return true;
+            }
+            
+            async _parse(html) {
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                
+                // 尝试获取用户名（即使没有升级要求数据也可能有用户信息）
+                const avatarEl = doc.querySelector('img[src*="avatar"]');
+                
+                // 尝试从页面提取用户名和信任等级
+                let username = null;
+                let level = '?';
+                let connectLevel = null;  // 从 connect 页面获取的等级（最新）
+                
+                // 1. 优先从 h1 标签获取等级信息: "你好，昵称 (username) X级用户"
+                const h1El = doc.querySelector('h1');
+                if (h1El) {
+                    const h1Text = h1El.textContent;
+                    const h1Match = h1Text.match(PATTERNS.TRUST_LEVEL_H1);
+                    if (h1Match) {
+                        username = h1Match[1];  // 括号内的 username
+                        connectLevel = parseInt(h1Match[2]) || 0;
+                        level = connectLevel.toString();
+                    }
+                }
+                
+                // 2. 从头像 alt 获取用户名（备用）
+                if (!username && avatarEl?.alt) {
+                    username = avatarEl.alt;
+                }
+                
+                // 3. 查找包含信任级别的区块获取更多信息
+                const section = [...doc.querySelectorAll('.bg-white.p-6.rounded-lg')].find(d => d.querySelector('h2')?.textContent.includes('信任级别'));
+                
+
+                
+                // 如果没找到 section，检查原因
+                if (!section) {
+                    // 检查是否返回了错误的页面（主站而非 connect）
+                    const isMainSite = html?.includes('欢迎来到 LINUX DO') || doc.querySelector('title')?.textContent?.includes('LINUX DO -');
+                    const isConnectPage = html?.includes('信任级别') || html?.includes('trust level');
+                    
+                    if (isMainSite && !isConnectPage) {
+                        // 返回了主站页面，说明 connect 认证失败（常见于 iOS Safari + Stay）
+                        // 使用 OAuth 缓存的用户信息
+                        let oauthUsername = username;
+                        let oauthLevel = level;
+                        
+                        if (this.oauth?.isLoggedIn()) {
+                            const oauthUser = this.oauth.getUserInfo();
+                            if (oauthUser?.username) oauthUsername = oauthUser.username;
+                            const trustLevel = oauthUser?.trust_level ?? oauthUser?.trustLevel;
+                            if (typeof trustLevel === 'number') oauthLevel = trustLevel.toString();
+                        }
+                        
+                        // 直接使用 fallback 显示，不弹窗打扰用户
+                        console.warn('[LDStatus Mini] Connect 页面认证失败，使用 summary 数据');
+                        return await this._showFallbackStats(oauthUsername, oauthLevel);
+                    }
+                    
+                    return await this._showFallbackStats(username, level);
+                }
+                
+                if (section) {
+                    const heading = section.querySelector('h2').textContent;
+                    const match = heading.match(PATTERNS.TRUST_LEVEL);
+                    if (match) {
+                        if (!username) username = match[1];
+                        if (connectLevel === null) {
+                            connectLevel = parseInt(match[2]) || 0;
+                            level = match[2];
+                        }
+                    }
+                }
+                
+                // 无论是否有升级要求，只要能识别用户就初始化阅读追踪
+                if (username && username !== '未知') {
+                    this.storage.setUser(username);
+                    this.username = username;
+                    this.tracker.init(username);
+                    this._startReadingUpdate();
+                } else {
+                    // 即使没有用户名，也尝试使用匿名模式初始化阅读追踪
+                    this.tracker.init('anonymous');
+                    this._startReadingUpdate();
+                }
+
+                if (avatarEl) this._updateAvatar(avatarEl.src);
+
+                this.readingTime = this.tracker.getTodayTime();
+                
+                // 如果用户已登录，且从 connect 获取到了等级信息，更新本地缓存和服务端
+                if (connectLevel !== null && this.oauth?.isLoggedIn()) {
+                    this._updateTrustLevel(connectLevel);
+                }
+                
+                // 如果没有找到升级要求区块，fallback 到 summary 数据
+                if (!section) {
+                    return await this._showFallbackStats(username, level);
+                }
+
+                const rows = section.querySelectorAll('table tr');
+                const reqs = [];
+
+                for (let i = 1; i < rows.length; i++) {
+                    const cells = rows[i].querySelectorAll('td');
+                    if (cells.length < 3) continue;
+
+                    const name = cells[0].textContent.trim();
+                    const curMatch = cells[1].textContent.match(PATTERNS.NUMBER);
+                    const reqMatch = cells[2].textContent.match(PATTERNS.NUMBER);
+                    const currentValue = curMatch ? +curMatch[1] : 0;
+                    const requiredValue = reqMatch ? +reqMatch[1] : 0;
+                    const isSuccess = cells[1].classList.contains('text-green-500');
+                    const prev = this.prevReqs.find(p => p.name === name);
+
+                    reqs.push({
+                        name, currentValue, requiredValue, isSuccess,
+                        change: prev ? currentValue - prev.currentValue : 0,
+                        isReverse: PATTERNS.REVERSE.test(name)
+                    });
+                }
+
+                const orderedReqs = Utils.reorderRequirements(reqs);
+                const isOK = !section.querySelector('p.text-red-500');
+
+                this.notifier.check(orderedReqs);
+
+                const histData = {};
+                orderedReqs.forEach(r => histData[r.name] = r.currentValue);
+                const history = this.historyMgr.addHistory(histData, this.readingTime);
+
+                // 触发升级要求数据上传（trust_level >= 2 时异步上传）
+                if (this.hasLeaderboard && this.cloudSync && this.oauth?.isLoggedIn()) {
+                    this.cloudSync.uploadRequirements().catch(() => {});
+                }
+
+                const todayData = this._getTodayData();
+                this._setTodayData(histData, !todayData);
+
+                // 如果已登录，优先使用 OAuth 用户信息中的 name
+                let displayName = null;
+                if (this.hasLeaderboard && this.oauth?.isLoggedIn()) {
+                    const oauthUser = this.oauth.getUserInfo();
+                    if (oauthUser?.name && oauthUser.name !== oauthUser.username) {
+                        displayName = oauthUser.name;
+                    }
+                }
+                this.renderer.renderUser(username, level, isOK, orderedReqs, displayName);
+                this.renderer.renderReqs(orderedReqs, level);
+
+                this.cachedHistory = history;
+                this.cachedReqs = orderedReqs;
+
+                this._renderTrends(history, orderedReqs);
+                this._setLastVisit(histData);
+                this.prevReqs = orderedReqs;
+            }
+
+            _getTodayData() {
+                const stored = this.storage.get('todayData', null);
+                return stored?.date === Utils.getTodayKey() ? stored : null;
+            }
+
+            _setTodayData(data, isStart = false) {
+                const today = Utils.getTodayKey();
+                const existing = this._getTodayData();
+                const now = Date.now();
+
+                this.storage.set('todayData', isStart || !existing
+                    ? { date: today, startData: data, startTs: now, currentData: data, currentTs: now }
+                    : { ...existing, currentData: data, currentTs: now }
+                );
+            }
+
+            _setLastVisit(data) {
+                this.storage.set('lastVisit', { ts: Date.now(), data });
+            }
+
+            _renderTrends(history, reqs) {
+                this.renderer.renderTrends(this.trendTab);
+
+                this.$.trends.querySelectorAll('.ldsp-subtab').forEach(tab => {
+                    tab.addEventListener('click', () => {
+                        this.trendTab = tab.dataset.tab;
+                        this.storage.setGlobal('trendTab', this.trendTab);
+                        this.$.trends.querySelectorAll('.ldsp-subtab').forEach(t => t.classList.remove('active'));
+                        tab.classList.add('active');
+                        this._renderTrendContent(history, reqs);
+                    });
+                });
+
+                this._renderTrendContent(history, reqs);
+            }
+
+            _renderTrendContent(history, reqs) {
+                const container = this.$.trends.querySelector('.ldsp-trend-content');
+
+                if (this.trendTab === 'year') {
+                    container.innerHTML = `<div class="ldsp-mini-loader"><div class="ldsp-mini-spin"></div><div class="ldsp-mini-txt">加载数据中...</div></div>`;
+                    requestAnimationFrame(() => {
+                        setTimeout(() => {
+                            container.innerHTML = this.renderer.renderYearTrend(history, reqs, this.historyMgr, this.tracker);
+                            // 自动滚动热力图到today位置（底部），使用程序性滚动避免显示滚动条
+                            const heatmap = container.querySelector('.ldsp-year-heatmap');
+                            if (heatmap) {
+                                requestAnimationFrame(() => this._scrollTo(heatmap, heatmap.scrollHeight));
+                            }
+                        }, 50);
+                    });
+                    return;
+                }
+
+                const fns = {
+                    // 使用 tracker.getTodayTime() 获取实时阅读时间，而不是缓存的 this.readingTime
+                    today: () => this.renderer.renderTodayTrend(reqs, this.tracker.getTodayTime(), this._getTodayData()),
+                    week: () => this.renderer.renderWeekTrend(history, reqs, this.historyMgr, this.tracker),
+                    month: () => this.renderer.renderMonthTrend(history, reqs, this.historyMgr, this.tracker),
+                    all: () => this.renderer.renderAllTrend(history, reqs, this.tracker)
+                };
+
+                container.innerHTML = fns[this.trendTab]?.() || '';
+            }
+
+            // ========== 登录相关 ==========
+
+            _updateLoginUI() {
+                // 无排行榜站点隐藏登录相关按钮
+                if (!this.hasLeaderboard) {
+                    if (this.$.btnCloudSync) this.$.btnCloudSync.style.display = 'none';
+                    if (this.$.logoutBtn) this.$.logoutBtn.style.display = 'none';
+                    if (this.$.ticketBtn) this.$.ticketBtn.style.display = 'none';
+                    if (this.$.loginBtn) this.$.loginBtn.style.display = 'none';
+                    return;
+                }
+                const logged = this.oauth.isLoggedIn();
+                const forumLogged = !!this.storage.getUser();  // 论坛登录状态
+                this.$.user.classList.toggle('not-logged', !logged);
+
+                // 显示/隐藏云同步按钮
+                if (this.$.btnCloudSync) {
+                    this.$.btnCloudSync.style.display = logged ? '' : 'none';
+                }
+
+                // 显示/隐藏注销按钮和工单按钮（未登录时都隐藏）
+                if (this.$.logoutBtn) {
+                    this.$.logoutBtn.style.display = logged ? '' : 'none';
+                }
+                if (this.$.ticketBtn) {
+                    this.$.ticketBtn.style.display = logged ? '' : 'none';
+                }
+                // 显示/隐藏登录按钮（已登录时隐藏）
+                if (this.$.loginBtn) {
+                    this.$.loginBtn.style.display = logged ? 'none' : '';
+                }
+                
+                // 显示/隐藏关注粉丝和天数（论坛未登录时隐藏整个容器）
+                const userMeta = this.el.querySelector('.ldsp-user-meta');
+                if (userMeta) {
+                    userMeta.style.display = forumLogged ? '' : 'none';
+                }
+
+                if (!logged) {
+                    this._bindUserLogin();
+                }
+            }
+
+            _bindLoginButton() {
+                if (this._loginBtnBound || !this.$.loginBtn) return;
+                this._loginBtnBound = true;
+                this.$.loginBtn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    if (!this.oauth?.isLoggedIn()) {
+                        await this._doLogin();
+                    }
+                });
+            }
+
+            _bindUserLogin() {
+                if (this._userLoginBound) return;
+                this._userLoginBound = true;
+
+                const handle = async e => {
+                    if (!this.oauth.isLoggedIn() && this.$.user.classList.contains('not-logged')) {
+                        e.stopPropagation();
+                        await this._doLogin();
+                    }
+                };
+
+                this.$.user.querySelector('.ldsp-avatar-wrap')?.addEventListener('click', handle);
+                this.$.userDisplayName.addEventListener('click', handle);
+                
+                // 绑定登录按钮
+                this._bindLoginButton();
+            }
+
+            /**
+             * 检查并处理待处理的 OAuth 登录结果
+             * 统一同窗口登录模式：用户授权后会跳转回原页面，登录结果通过 URL hash 传递
+             * 数据在脚本最开始就被捕获到 _pendingOAuthData 全局变量
+             */
+            _checkPendingOAuthLogin() {
+                console.log('[OAuth] _checkPendingOAuthLogin called, _pendingOAuthData:', _pendingOAuthData ? 'present' : 'null');
+                // 优先使用脚本启动时捕获的数据（避免 Discourse 路由处理掉 hash）
+                let pendingResult = _pendingOAuthData;
+                _pendingOAuthData = null; // 清除已使用的数据
+                
+                // 备用：再次尝试从 URL hash 读取
+                if (!pendingResult) {
+                    console.log('[OAuth] No early captured data, trying URL hash fallback...');
+                    pendingResult = this.oauth._checkUrlHashLogin();
+                }
+                
+                console.log('[OAuth] pendingResult:', pendingResult ? { success: pendingResult.success, hasToken: !!pendingResult.token, hasUser: !!pendingResult.user } : 'null');
+                
+                if (pendingResult?.success && pendingResult.token && pendingResult.user) {
+                    console.log('[OAuth] ✅ Processing login result for user:', pendingResult.user?.username);
+                    // 【关键】先同步保存登录信息，确保后续的 isLoggedIn() 检查能返回 true
+                    this.oauth.setToken(pendingResult.token);
+                    this.oauth.setUserInfo(pendingResult.user);
+                    this.oauth.setJoined(pendingResult.isJoined || false);
+                    // 处理登录结果（异步操作如同步、UI更新等）
+                    this._handlePendingLoginResult(pendingResult);
+                    return true; // 返回 true 表示有登录结果被处理
+                } else {
+                    console.log('[OAuth] No valid pending login result');
+                    return false;
+                }
+            }
+
+            // 处理待处理的登录结果（登录信息已在 _checkPendingOAuthLogin 中同步保存）
+            async _handlePendingLoginResult(result) {
+                try {
+                    this.renderer.showToast('✅ 登录成功');
+                    
+                    // 同步用户名到 storage
+                    if (result.user?.username) {
+                        this.storage.setUser(result.user.username);
+                        this.storage.invalidateCache();
+                        this.storage.migrate(result.user.username);
+                        this._updateUserInfoFromOAuth(result.user);
+                    }
+                    
+                    this._updateLoginUI();
+                    await this._syncPrefs();
+                    
+                    // 登录成功后重新获取 connect 页面数据（此时 OAuth 用户信息已设置，可以正确显示信任等级）
+                    this.fetch();
+                    
+                    // 首次登录后的完整同步：阅读数据 + 要求数据
+                    this.cloudSync.fullSync().then(() => {
+                        // 阅读数据同步完成后，同步要求数据（信任等级进度）
+                        return this.cloudSync.syncRequirementsOnLoad();
+                    }).catch(e => console.warn('[CloudSync]', e));
+                } catch (e) {
+                    console.error('[OAuth] Handle pending login error:', e);
+                }
+            }
+
+            async _doLogin() {
+                try {
+                    this.renderer.showToast('⏳ 正在跳转到授权页面...');
+                    // 统一同窗口登录：login() 会跳转页面，不会返回
+                    // 登录成功后页面会跳转回来，由 _checkPendingOAuthLogin 处理结果
+                    await this.oauth.login();
+                    // 如果 login() 返回了用户（从 localStorage 读取的待处理结果），处理它
+                    // 注意：正常情况下不会执行到这里，因为页面会跳转
+                } catch (e) {
+                    this.renderer.showToast(`❌ ${e.message}`);
+                }
+            }
+
+            // 使用 OAuth 用户信息更新界面
+            _updateUserInfoFromOAuth(user) {
+                if (!user) return;
+                const $ = this.$;
+                // 显示用户名和昵称
+                if (user.name && user.name !== user.username) {
+                    $.userDisplayName.textContent = user.name;
+                    $.userHandle.textContent = `@${user.username}`;
+                    $.userHandle.style.display = '';
+                } else {
+                    $.userDisplayName.textContent = user.username;
+                    $.userHandle.textContent = '';
+                    $.userHandle.style.display = 'none';
+                }
+                // 更新头像（如果有）
+                if (user.avatar_url) {
+                    this._updateAvatar(user.avatar_url.startsWith('http') ? user.avatar_url : `https://linux.do${user.avatar_url}`);
+                }
+            }
+
+            _checkLoginPrompt() {
+                const KEY = 'ldsp_login_prompt_version';
+                const VER = '3.0';
+                if (this.storage.getGlobal(KEY, null) === VER) {
+                    this._updateLoginUI();
+                    return;
+                }
+
+                const hasData = this.storage.get('readingTime', null);
+                const isUpgrade = hasData && Object.keys(hasData.dailyData || {}).length > 0;
+
+                setTimeout(() => {
+                    const overlay = this.renderer.showLoginPrompt(isUpgrade);
+                    this._bindLoginPrompt(overlay, KEY, VER);
+                }, 1500);
+            }
+
+            _bindLoginPrompt(overlay, key, ver) {
+                const close = (skipped = false) => {
+                    overlay.classList.remove('show');
+                    setTimeout(() => overlay.remove(), 300);
+                    this.storage.setGlobalNow(key, ver);
+                    skipped && this._updateLoginUI();
+                };
+
+                const loginBtn = overlay.querySelector('#ldsp-modal-login');
+                loginBtn?.addEventListener('click', async () => {
+                    loginBtn.disabled = true;
+                    loginBtn.textContent = '⏳ 跳转中...';
+                    try {
+                        // 统一同窗口登录：会跳转到授权页面
+                        // 登录成功后返回此页面，由 _checkPendingOAuthLogin 处理
+                        await this.oauth.login();
+                        // 正常情况下不会执行到这里，因为页面会跳转
+                    } catch (e) {
+                        this.renderer.showToast(`❌ ${e.message}`);
+                        loginBtn.disabled = false;
+                        loginBtn.textContent = '🚀 立即登录';
+                    }
+                });
+
+                overlay.querySelector('#ldsp-modal-skip')?.addEventListener('click', () => close(true));
+                overlay.addEventListener('click', e => e.target === overlay && close(true));
+            }
+
+            async _syncPrefs() {
+                if (!this.hasLeaderboard || !this.oauth.isLoggedIn()) return;
+                try {
+                    const result = await this.oauth.api('/api/user/status');
+                    if (result.success && result.data) {
+                        this.oauth.setJoined(result.data.isJoined || false);
+                        if (this.oauth.isJoined()) this.leaderboard.startSync();
+                    }
+                } catch (e) {
+                    console.warn('[Prefs]', e);
+                }
+            }
+
+            // ========== 我的活动 ==========
+
+            async _renderActivity() {
+                if (!this.$.activity) return;
+
+                // 检查论坛登录状态：未登录时显示登录提示
+                const username = this.storage.getUser();
+                if (!username) {
+                    this.$.activity.innerHTML = `
+                        <div class="ldsp-lb-login">
+                            <div class="ldsp-lb-login-icon">🔐</div>
+                            <div class="ldsp-lb-login-title">需要登录</div>
+                            <div class="ldsp-lb-login-desc">请先登录论坛后再查看您的活动数据</div>
+                        </div>`;
+                    return;
+                }
+
+                this.renderer.renderActivity(this.activitySubTab);
+
+                // 绑定子tab点击事件
+                this.$.activity.querySelectorAll('.ldsp-subtab').forEach(tab => {
+                    tab.addEventListener('click', () => {
+                        const tabId = tab.dataset.activity;
+                        this.activitySubTab = tabId;
+                        this.$.activity.querySelectorAll('.ldsp-subtab').forEach(t => t.classList.remove('active'));
+                        tab.classList.add('active');
+                        // 清除缓存强制重新加载
+                        this.activityMgr.clearCache(tabId);
+                        this._renderActivityContent();
+                    });
+                });
+
+                await this._renderActivityContent();
+            }
+
+            async _renderActivityContent() {
+                const container = this.$.activity.querySelector('.ldsp-activity-content');
+                if (!container) return;
+
+                // 清理之前的滚动事件
+                this._cleanupActivityScroll();
+
+                container.innerHTML = this.renderer.renderActivityLoading();
+
+                try {
+                    switch (this.activitySubTab) {
+                        case 'read':
+                            await this._loadReadTopics(container);
+                            break;
+                        case 'bookmarks':
+                            await this._loadBookmarks(container);
+                            break;
+                        case 'replies':
+                            await this._loadReplies(container);
+                            break;
+                        case 'likes':
+                            await this._loadLikes(container);
+                            break;
+                        case 'reactions':
+                            await this._loadReactions(container);
+                            break;
+                        case 'topics':
+                            await this._loadMyTopics(container);
+                            break;
+                        default:
+                            container.innerHTML = this.renderer.renderActivityEmpty('📭', '请选择一个分类');
+                    }
+                } catch (e) {
+                    container.innerHTML = this.renderer.renderActivityError(e.message || '加载失败');
+                    container.querySelector('.ldsp-activity-retry')?.addEventListener('click', () => {
+                        this.activityMgr.clearCache(this.activitySubTab);
+                        this._renderActivityContent();
+                    });
+                }
+            }
+
+            async _loadReadTopics(container) {
+                // 检查登录状态
+                const username = this.storage.getUser();
+                if (!username) {
+                    container.innerHTML = this.renderer.renderActivityEmpty('🔒', '请先登录论坛');
+                    return;
+                }
+                
+                // 获取当前分页状态
+                let state = this.activityMgr.getPageState('read');
+                
+                // 如果是首次加载，重置状态
+                if (state.allTopics.length === 0) {
+                    state = { page: 0, allTopics: [], hasMore: true };
+                }
+
+                try {
+                    const result = await this.activityMgr.getReadTopics(state.page);
+                    
+                    // 合并话题（避免重复）
+                    const existingIds = new Set(state.allTopics.map(t => t.id));
+                    const newTopics = result.topics.filter(t => !existingIds.has(t.id));
+                    state.allTopics = [...state.allTopics, ...newTopics];
+                    state.hasMore = result.hasMore;
+                    
+                    this.activityMgr.setPageState('read', state);
+
+                    container.innerHTML = this.renderer.renderTopicList(state.allTopics, state.hasMore);
+
+                    // 绑定瀑布流滚动加载
+                    if (state.hasMore) {
+                        this._bindActivityScroll(container);
+                    }
+                } catch (e) {
+                    if (state.allTopics.length > 0) {
+                        // 如果已有数据，显示已有数据并提示加载更多失败
+                        container.innerHTML = this.renderer.renderTopicList(state.allTopics, false);
+                        this.renderer.showToast(`⚠️ ${e.message}`);
+                    } else {
+                        throw e;
+                    }
+                }
+            }
+
+            async _loadBookmarks(container) {
+                // 获取当前用户名
+                const username = this.storage.getUser();
+                if (!username) {
+                    container.innerHTML = this.renderer.renderActivityEmpty('🔒', '请先登录论坛');
+                    return;
+                }
+
+                // 获取当前分页状态
+                let state = this.activityMgr.getPageState('bookmarks');
+                
+                // 如果是首次加载，重置状态
+                if (!state.allItems || state.allItems.length === 0) {
+                    state = { page: 0, allItems: [], hasMore: true };
+                }
+
+                try {
+                    const result = await this.activityMgr.getBookmarks(state.page, username);
+                    
+                    // 合并收藏（避免重复）
+                    const existingIds = new Set(state.allItems.map(b => b.id));
+                    const newItems = result.bookmarks.filter(b => !existingIds.has(b.id));
+                    state.allItems = [...state.allItems, ...newItems];
+                    state.hasMore = result.hasMore;
+                    
+                    this.activityMgr.setPageState('bookmarks', state);
+
+                    container.innerHTML = this.renderer.renderBookmarkList(state.allItems, state.hasMore);
+                    this._bindBookmarkClicks(container);
+
+                    // 绑定瀑布流滚动加载
+                    if (state.hasMore) {
+                        this._bindActivityScroll(container, 'bookmarks');
+                    }
+                } catch (e) {
+                    if (state.allItems && state.allItems.length > 0) {
+                        // 如果已有数据，显示已有数据并提示加载更多失败
+                        container.innerHTML = this.renderer.renderBookmarkList(state.allItems, false);
+                        this._bindBookmarkClicks(container);
+                        this.renderer.showToast(`⚠️ ${e.message}`);
+                    } else {
+                        throw e;
+                    }
+                }
+            }
+
+            async _loadReplies(container) {
+                // 获取当前用户名
+                const username = this.storage.getUser();
+                if (!username) {
+                    container.innerHTML = this.renderer.renderActivityEmpty('🔒', '请先登录论坛');
+                    return;
+                }
+
+                // 获取当前分页状态
+                let state = this.activityMgr.getPageState('replies');
+                
+                // 如果是首次加载，重置状态
+                if (!state.allItems || state.allItems.length === 0) {
+                    state = { offset: 0, allItems: [], hasMore: true };
+                }
+
+                try {
+                    const result = await this.activityMgr.getReplies(state.offset, username);
+                    
+                    // 合并回复（避免重复，使用 post_id 作为唯一标识）
+                    const existingIds = new Set(state.allItems.map(r => r.post_id));
+                    const newItems = result.replies.filter(r => !existingIds.has(r.post_id));
+                    state.allItems = [...state.allItems, ...newItems];
+                    state.hasMore = result.hasMore;
+                    
+                    this.activityMgr.setPageState('replies', state);
+
+                    container.innerHTML = this.renderer.renderReplyList(state.allItems, state.hasMore);
+                    this._bindReplyClicks(container);
+
+                    // 绑定瀑布流滚动加载
+                    if (state.hasMore) {
+                        this._bindActivityScroll(container, 'replies');
+                    }
+                } catch (e) {
+                    if (state.allItems && state.allItems.length > 0) {
+                        // 如果已有数据，显示已有数据并提示加载更多失败
+                        container.innerHTML = this.renderer.renderReplyList(state.allItems, false);
+                        this._bindReplyClicks(container);
+                        this.renderer.showToast(`⚠️ ${e.message}`);
+                    } else {
+                        throw e;
+                    }
+                }
+            }
+
+            _bindReplyClicks(container) {
+                container.querySelectorAll('.ldsp-reply-item[data-url]').forEach(item => {
+                    item.addEventListener('click', (e) => {
+                        // 如果点击的是excerpt内的链接，不阻止默认行为
+                        if (e.target.closest('.ldsp-reply-excerpt a')) {
+                            return;
+                        }
+                        e.preventDefault();
+                        const url = item.dataset.url;
+                        if (url && url !== '#') {
+                            window.open(url, '_blank');
+                        }
+                    });
+                });
+            }
+
+            async _loadLikes(container) {
+                // 获取当前用户名
+                const username = this.storage.getUser();
+                if (!username) {
+                    container.innerHTML = this.renderer.renderActivityEmpty('🔒', '请先登录论坛');
+                    return;
+                }
+
+                // 获取当前分页状态
+                let state = this.activityMgr.getPageState('likes');
+                
+                // 如果是首次加载，重置状态
+                if (!state.allItems || state.allItems.length === 0) {
+                    state = { offset: 0, allItems: [], hasMore: true };
+                }
+
+                try {
+                    const result = await this.activityMgr.getLikes(state.offset, username);
+                    
+                    // 合并赞过（避免重复，使用 post_id 作为唯一标识）
+                    const existingIds = new Set(state.allItems.map(l => l.post_id));
+                    const newItems = result.likes.filter(l => !existingIds.has(l.post_id));
+                    state.allItems = [...state.allItems, ...newItems];
+                    state.hasMore = result.hasMore;
+                    
+                    this.activityMgr.setPageState('likes', state);
+
+                    container.innerHTML = this.renderer.renderLikeList(state.allItems, state.hasMore);
+                    this._bindLikeClicks(container);
+
+                    // 绑定瀑布流滚动加载
+                    if (state.hasMore) {
+                        this._bindActivityScroll(container, 'likes');
+                    }
+                } catch (e) {
+                    if (state.allItems && state.allItems.length > 0) {
+                        // 如果已有数据，显示已有数据并提示加载更多失败
+                        container.innerHTML = this.renderer.renderLikeList(state.allItems, false);
+                        this._bindLikeClicks(container);
+                        this.renderer.showToast(`⚠️ ${e.message}`);
+                    } else {
+                        throw e;
+                    }
+                }
+            }
+
+            _bindLikeClicks(container) {
+                container.querySelectorAll('.ldsp-like-item[data-url]').forEach(item => {
+                    item.addEventListener('click', (e) => {
+                        // 如果点击的是excerpt内的链接，不阻止默认行为
+                        if (e.target.closest('.ldsp-like-excerpt a')) {
+                            return;
+                        }
+                        e.preventDefault();
+                        const url = item.dataset.url;
+                        if (url && url !== '#') {
+                            window.open(url, '_blank');
+                        }
+                    });
+                });
+            }
+
+            async _loadMyTopics(container) {
+                // 获取当前用户名
+                const username = this.storage.getUser();
+                if (!username) {
+                    container.innerHTML = this.renderer.renderActivityEmpty('🔒', '请先登录论坛');
+                    return;
+                }
+
+                // 获取当前分页状态
+                let state = this.activityMgr.getPageState('topics');
+                
+                // 如果是首次加载，重置状态
+                if (!state.allItems || state.allItems.length === 0) {
+                    state = { page: 0, allItems: [], hasMore: true };
+                }
+
+                try {
+                    const result = await this.activityMgr.getMyTopics(state.page, username);
+                    
+                    // 合并话题（避免重复，使用 id 作为唯一标识）
+                    const existingIds = new Set(state.allItems.map(t => t.id));
+                    const newItems = result.topics.filter(t => !existingIds.has(t.id));
+                    state.allItems = [...state.allItems, ...newItems];
+                    state.hasMore = result.hasMore;
+                    
+                    this.activityMgr.setPageState('topics', state);
+
+                    container.innerHTML = this.renderer.renderMyTopicList(state.allItems, state.hasMore);
+
+                    // 绑定瀑布流滚动加载
+                    if (state.hasMore) {
+                        this._bindActivityScroll(container, 'topics');
+                    }
+                } catch (e) {
+                    if (state.allItems && state.allItems.length > 0) {
+                        // 如果已有数据，显示已有数据并提示加载更多失败
+                        container.innerHTML = this.renderer.renderMyTopicList(state.allItems, false);
+                        this.renderer.showToast(`⚠️ ${e.message}`);
+                    } else {
+                        throw e;
+                    }
+                }
+            }
+
+            async _loadReactions(container) {
+                // 获取当前用户名
+                const username = this.storage.getUser();
+                if (!username) {
+                    container.innerHTML = this.renderer.renderActivityEmpty('🔒', '请先登录论坛');
+                    return;
+                }
+
+                // 获取当前分页状态
+                let state = this.activityMgr.getPageState('reactions');
+                
+                // 如果是首次加载，重置状态
+                if (!state.allItems || state.allItems.length === 0) {
+                    state = { lastId: null, allItems: [], hasMore: true };
+                }
+
+                try {
+                    const result = await this.activityMgr.getReactions(state.lastId, username);
+                    
+                    // 合并互动记录（避免重复，使用 id 作为唯一标识）
+                    const existingIds = new Set(state.allItems.map(r => r.id));
+                    const newItems = result.reactions.filter(r => !existingIds.has(r.id));
+                    state.allItems = [...state.allItems, ...newItems];
+                    state.hasMore = result.hasMore;
+                    state.lastId = result.lastId;
+                    
+                    this.activityMgr.setPageState('reactions', state);
+
+                    container.innerHTML = this.renderer.renderReactionList(state.allItems, state.hasMore);
+                    this._bindReactionClicks(container);
+
+                    // 绑定瀑布流滚动加载
+                    if (state.hasMore) {
+                        this._bindActivityScroll(container, 'reactions');
+                    }
+                } catch (e) {
+                    if (state.allItems && state.allItems.length > 0) {
+                        // 如果已有数据，显示已有数据并提示加载更多失败
+                        container.innerHTML = this.renderer.renderReactionList(state.allItems, false);
+                        this._bindReactionClicks(container);
+                        this.renderer.showToast(`⚠️ ${e.message}`);
+                    } else {
+                        throw e;
+                    }
+                }
+            }
+
+            _bindReactionClicks(container) {
+                container.querySelectorAll('.ldsp-reaction-item[data-url]').forEach(item => {
+                    item.addEventListener('click', (e) => {
+                        // 如果点击的是excerpt内的链接，不阻止默认行为
+                        if (e.target.closest('.ldsp-reaction-excerpt a')) {
+                            return;
+                        }
+                        e.preventDefault();
+                        const url = item.dataset.url;
+                        if (url && url !== '#') {
+                            window.open(url, '_blank');
+                        }
+                    });
+                });
+            }
+
+            _bindActivityScroll(container, type = 'read') {
+                const content = this.el.querySelector('.ldsp-content');
+                if (!content) return;
+
+                let isLoading = false;
+                const threshold = 100; // 距离底部100px时触发加载
+
+                this._activityScrollHandler = async () => {
+                    if (isLoading) return;
+                    
+                    const scrollTop = content.scrollTop;
+                    const scrollHeight = content.scrollHeight;
+                    const clientHeight = content.clientHeight;
+
+                    if (scrollHeight - scrollTop - clientHeight < threshold) {
+                        const state = this.activityMgr.getPageState(type);
+                        if (!state.hasMore) return;
+
+                        isLoading = true;
+                        const loadMoreEl = container.querySelector('.ldsp-load-more');
+                        if (loadMoreEl) {
+                            loadMoreEl.classList.add('loading');
+                        }
+
+                        try {
+                            // 加载下一页
+                            let result, newItems;
+                            const username = this.storage.getUser();
+                            
+                            if (type === 'bookmarks') {
+                                state.page++;
+                                result = await this.activityMgr.getBookmarks(state.page, username);
+                                const existingIds = new Set(state.allItems.map(b => b.id));
+                                newItems = result.bookmarks.filter(b => !existingIds.has(b.id));
+                                state.allItems = [...state.allItems, ...newItems];
+                                state.hasMore = result.hasMore;
+                                this.activityMgr.setPageState(type, state);
+                                container.innerHTML = this.renderer.renderBookmarkList(state.allItems, state.hasMore);
+                                this._bindBookmarkClicks(container);
+                            } else if (type === 'replies') {
+                                state.offset += 30;
+                                result = await this.activityMgr.getReplies(state.offset, username);
+                                const existingIds = new Set(state.allItems.map(r => r.post_id));
+                                newItems = result.replies.filter(r => !existingIds.has(r.post_id));
+                                state.allItems = [...state.allItems, ...newItems];
+                                state.hasMore = result.hasMore;
+                                this.activityMgr.setPageState(type, state);
+                                container.innerHTML = this.renderer.renderReplyList(state.allItems, state.hasMore);
+                                this._bindReplyClicks(container);
+                            } else if (type === 'likes') {
+                                state.offset += 30;
+                                result = await this.activityMgr.getLikes(state.offset, username);
+                                const existingIds = new Set(state.allItems.map(l => l.post_id));
+                                newItems = result.likes.filter(l => !existingIds.has(l.post_id));
+                                state.allItems = [...state.allItems, ...newItems];
+                                state.hasMore = result.hasMore;
+                                this.activityMgr.setPageState(type, state);
+                                container.innerHTML = this.renderer.renderLikeList(state.allItems, state.hasMore);
+                                this._bindLikeClicks(container);
+                            } else if (type === 'topics') {
+                                state.page++;
+                                result = await this.activityMgr.getMyTopics(state.page, username);
+                                const existingIds = new Set(state.allItems.map(t => t.id));
+                                newItems = result.topics.filter(t => !existingIds.has(t.id));
+                                state.allItems = [...state.allItems, ...newItems];
+                                state.hasMore = result.hasMore;
+                                this.activityMgr.setPageState(type, state);
+                                container.innerHTML = this.renderer.renderMyTopicList(state.allItems, state.hasMore);
+                            } else if (type === 'reactions') {
+                                result = await this.activityMgr.getReactions(state.lastId, username);
+                                const existingIds = new Set(state.allItems.map(r => r.id));
+                                newItems = result.reactions.filter(r => !existingIds.has(r.id));
+                                state.allItems = [...state.allItems, ...newItems];
+                                state.hasMore = result.hasMore;
+                                state.lastId = result.lastId;
+                                this.activityMgr.setPageState(type, state);
+                                container.innerHTML = this.renderer.renderReactionList(state.allItems, state.hasMore);
+                                this._bindReactionClicks(container);
+                            } else {
+                                state.page++;
+                                result = await this.activityMgr.getReadTopics(state.page);
+                                const existingIds = new Set(state.allTopics.map(t => t.id));
+                                newItems = result.topics.filter(t => !existingIds.has(t.id));
+                                state.allTopics = [...state.allTopics, ...newItems];
+                                state.hasMore = result.hasMore;
+                                this.activityMgr.setPageState(type, state);
+                                container.innerHTML = this.renderer.renderTopicList(state.allTopics, state.hasMore);
+                            }
+                            
+                            if (state.hasMore) {
+                                // 继续监听
+                                isLoading = false;
+                            } else {
+                                this._cleanupActivityScroll();
+                            }
+                        } catch (e) {
+                            this.renderer.showToast(`⚠️ 加载更多失败: ${e.message}`);
+                            // 回退页码/偏移（reactions 使用 lastId，不需要回退）
+                            if (type === 'replies' || type === 'likes') {
+                                state.offset -= 30;
+                            } else if (type !== 'reactions') {
+                                state.page--;
+                            }
+                            this.activityMgr.setPageState(type, state);
+                            isLoading = false;
+                            
+                            if (loadMoreEl) {
+                                loadMoreEl.classList.remove('loading');
+                                loadMoreEl.innerHTML = '<span>加载失败，向下滚动重试</span>';
+                            }
+                        }
+                    }
+                };
+
+                content.addEventListener('scroll', this._activityScrollHandler, { passive: true });
+            }
+
+            _bindBookmarkClicks(container) {
+                container.querySelectorAll('.ldsp-bookmark-item[data-url]').forEach(item => {
+                    item.addEventListener('click', (e) => {
+                        // 如果点击的是excerpt内的链接，不阻止默认行为
+                        if (e.target.closest('.ldsp-bookmark-excerpt a')) {
+                            return;
+                        }
+                        e.preventDefault();
+                        const url = item.dataset.url;
+                        if (url && url !== '#') {
+                            window.open(url, '_blank');
+                        }
+                    });
+                });
+            }
+
+            _cleanupActivityScroll() {
+                if (this._activityScrollHandler) {
+                    const content = this.el.querySelector('.ldsp-content');
+                    if (content) {
+                        content.removeEventListener('scroll', this._activityScrollHandler);
+                    }
+                    this._activityScrollHandler = null;
+                }
+                // 重置分页状态
+                this.activityMgr.setPageState('read', { page: 0, allTopics: [], hasMore: true });
+                this.activityMgr.setPageState('bookmarks', { page: 0, allItems: [], hasMore: true });
+                this.activityMgr.setPageState('replies', { offset: 0, allItems: [], hasMore: true });
+                this.activityMgr.setPageState('likes', { offset: 0, allItems: [], hasMore: true });
+                this.activityMgr.setPageState('reactions', { lastId: null, allItems: [], hasMore: true });
+                this.activityMgr.setPageState('topics', { page: 0, allItems: [], hasMore: true });
+            }
+
+
+            destroy() {
+                if (this._destroyed) return;
+                this._destroyed = true;
+                
+                // 清理定时器
+                if (this._refreshTimer) {
+                    clearInterval(this._refreshTimer);
+                    this._refreshTimer = null;
+                }
+                if (this._readingTimer) {
+                    clearInterval(this._readingTimer);
+                    this._readingTimer = null;
+                }
+                
+                // 清理事件监听器
+                if (this._resizeHandler) {
+                    window.removeEventListener('resize', this._resizeHandler);
+                }
+                
+                // 清理阅读追踪器
+                this.tracker?.destroy();
+                
+                // 清理云同步
+                this.cloudSync?.destroy();
+                
+                // 清理工单管理器
+                this.ticketManager?.destroy();
+
+                // 清理吃瓜助手
+                this.melonHelper?.destroy();
+
+                // 清理 LDC 管理器
+                this.ldcManager?.destroy();
+                
+                // 清理关注/粉丝管理器
+                this.followManager?.destroy();
+                
+                // 保存数据
+                this.storage?.flush();
+                
+                // 清理事件总线
+                EventBus.clear();
+                
+                // 移除面板
+                this.el?.remove();
+                
+                Logger.log('Panel destroyed');
+            }
+        }
+
+        // ==================== 启动 ====================
+        async function startup() {
+            // 初始化全局领导者管理器（必须在其他组件之前）
+            TabLeader.init();
+            
+            // 性能优化：使用 requestIdleCallback 在空闲时加载非关键配置
+            requestIdleCallback(() => {
+                Network.loadReadingLevels().catch(() => {});
+            }, { timeout: 3000 });
+            
+            // 创建面板
+            try {
+                new Panel();
+            } catch (e) {
+                Logger.error('Panel initialization failed:', e);
+            }
+        }
+
+        // 确保 DOM 就绪后启动
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', startup, { once: true });
+        } else {
+            // 使用 requestAnimationFrame 确保在下一帧渲染
+            requestAnimationFrame(startup);
+        }
+
+    })();
+
