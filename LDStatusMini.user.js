@@ -7,6 +7,7 @@
     // @license      MIT
     // @match        https://linux.do/*
     // @match        https://idcflare.com/*
+    // @match        https://cdk.linux.do/*
     // @run-at       document-start
     // @grant        GM_xmlhttpRequest
     // @grant        GM_setValue    
@@ -16,6 +17,7 @@
     // @connect      connect.linux.do
     // @connect      linux.do
     // @connect      credit.linux.do
+    // @connect      cdk.linux.do
     // @connect      connect.idcflare.com
     // @connect      idcflare.com
     // @connect      github.com
@@ -63,6 +65,40 @@
             }
         } catch (e) {
             console.warn('[OAuth] Failed to capture OAuth data:', e);
+        }
+
+        // ==================== CDK Bridge 页面初始化 ====================
+        // 如果运行在 cdk.linux.do，作为 bridge 页面响应父页面请求
+        if (window.location.hostname === 'cdk.linux.do') {
+            window.addEventListener('message', async (event) => {
+                // 只接受来自 linux.do 或 idcflare.com 的请求
+                const allowedOrigins = ['linux.do', 'idcflare.com'];
+                if (!allowedOrigins.some(origin => event.origin.includes(origin))) {
+                    return;
+                }
+                
+                if (event.data?.type === 'ldsp-cdk-request') {
+                    try {
+                        // 在 CDK 网站上直接获取用户信息（携带 first-party cookie）
+                        const response = await fetch('https://cdk.linux.do/api/v1/oauth/user-info', {
+                            credentials: 'include'
+                        });
+                        
+                        if (response.ok) {
+                            const result = await response.json();
+                            // 返回数据给父页面
+                            event.source.postMessage({
+                                type: 'ldsp-cdk-response',
+                                payload: result
+                            }, event.origin);
+                        }
+                    } catch (e) {
+                        console.error('[LDSP CDK Bridge] Failed to fetch data:', e);
+                    }
+                }
+            });
+            // Bridge 页面不继续执行主脚本
+            return;
         }
 
         // ==================== 浏览器兼容性检查 ====================
@@ -388,7 +424,8 @@
                 lastUploadHash: 'last_upload_hash', leaderboardToken: 'leaderboard_token',
                 leaderboardUser: 'leaderboard_user', leaderboardJoined: 'leaderboard_joined',
                 readingLevels: 'reading_levels', readingLevelsTime: 'reading_levels_time',
-                websiteUrl: 'website_url', websiteUrlDate: 'website_url_date'
+                websiteUrl: 'website_url', websiteUrlDate: 'website_url_date',
+                cdkCache: 'cdk_cache', cdkCacheTime: 'cdk_cache_time'
             },
             // 用户特定的存储键
             USER_KEYS: new Set(['history', 'milestones', 'lastVisit', 'todayData', 'userAvatar', 'readingTime']),
@@ -396,7 +433,10 @@
             WEEKDAYS: ['周日', '周一', '周二', '周三', '周四', '周五', '周六'],
             MONTHS: ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'],
             // API地址
-            LEADERBOARD_API: 'https://ldstatus-pro-api.jackcai711.workers.dev'
+            LEADERBOARD_API: 'https://ldstatus-pro-api.jackcai711.workers.dev',
+            CDK_API: 'https://cdk.linux.do/api/v1/oauth/user-info',
+            CDK_URL: 'https://cdk.linux.do/dashboard',
+            CDK_CACHE_TTL: 5 * 60 * 1000  // CDK 缓存时间：5分钟
         };
 
         // 预编译正则
@@ -4120,7 +4160,51 @@
     .ldsp-tooltip.left::before{bottom:-4px;right:12px}
     .ldsp-tooltip.right::before{bottom:-4px;left:12px}
     #ldsp-panel.light .ldsp-tooltip{background:linear-gradient(135deg,rgba(255,255,255,.98),rgba(248,250,254,.98));color:#2d3148;box-shadow:0 4px 16px rgba(0,0,0,.12),0 0 0 1px rgba(0,0,0,.06)}
-    #ldsp-panel.light .ldsp-tooltip::before{box-shadow:-1px -1px 0 rgba(0,0,0,.04)}`;
+    #ldsp-panel.light .ldsp-tooltip::before{box-shadow:-1px -1px 0 rgba(0,0,0,.04)}
+    /* ==================== CDK Overlay (LDC 风格复刻) ==================== */
+    .ldsp-cdk-overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--bg);border-radius:0 0 var(--r-lg) var(--r-lg);z-index:10;display:none;flex-direction:column;overflow:hidden}
+    .ldsp-cdk-overlay.show{display:flex}
+    .ldsp-cdk-header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg-card);border-bottom:1px solid var(--border);flex-shrink:0}
+    .ldsp-cdk-title{font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px;color:var(--txt)}
+    .ldsp-cdk-header-actions{display:flex;align-items:center;gap:8px}
+    .ldsp-cdk-link{color:var(--accent)!important;text-decoration:none!important;font-size:10px!important;font-weight:600!important;opacity:.9;transition:opacity .15s}
+    .ldsp-cdk-link:hover{opacity:1}
+    .ldsp-cdk-refresh{width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:var(--bg-el);border:1px solid var(--border);border-radius:6px;color:var(--txt-sec);cursor:pointer;transition:background .15s,border-color .15s,color .15s;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+    .ldsp-cdk-refresh:hover{background:var(--bg-hover);border-color:var(--accent);color:var(--accent)}
+    .ldsp-cdk-refresh svg{width:12px;height:12px;fill:currentColor}
+    .ldsp-cdk-close{width:24px;height:24px;display:flex;align-items:center;justify-content:center;background:var(--bg-el);border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--txt-sec);cursor:pointer;transition:background .15s,color .15s;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+    .ldsp-cdk-close:hover{background:var(--err-bg);color:var(--err);border-color:var(--err)}
+
+    .ldsp-cdk-body{flex:1;overflow-y:auto;padding:12px;background:var(--bg);display:flex;flex-direction:column;gap:10px}
+    .ldsp-cdk-loading,.ldsp-cdk-auth{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;color:var(--txt-mut);flex:1;text-align:center}
+    .ldsp-cdk-content{padding:0;display:flex;flex-direction:column;gap:10px}
+    
+    /* 内容卡片样式适配 */
+    .ldsp-cdk-score-card{text-align:center;padding:20px;background:linear-gradient(135deg,rgba(107,140,239,.08),rgba(91,181,166,.08));border-radius:var(--r-md);border:1px solid var(--border)}
+    .ldsp-cdk-score-value{font-size:36px;font-weight:800;color:var(--accent);line-height:1;margin-bottom:6px;font-family:var(--font-num)}
+    .ldsp-cdk-score-label{font-size:11px;font-weight:600;color:var(--txt-sec);margin-bottom:2px}
+    .ldsp-cdk-score-desc{font-size:10px;color:var(--txt-mut);opacity:.8}
+    
+    .ldsp-cdk-info-card{background:var(--bg-card);border-radius:var(--r-md);padding:10px;border:1px solid var(--border)}
+    .ldsp-cdk-info-title{font-size:10px;font-weight:700;color:var(--txt-sec);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;opacity:.8}
+    .ldsp-cdk-info-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)}
+    .ldsp-cdk-info-row:last-child{border-bottom:none}
+    .ldsp-cdk-info-label{font-size:11px;color:var(--txt-sec);font-weight:500}
+    .ldsp-cdk-info-value{font-size:11px;color:var(--txt);font-weight:600}
+    
+    .ldsp-cdk-auth-icon{color:var(--accent);margin-bottom:12px;opacity:.9}
+    .ldsp-cdk-auth-icon svg{width:40px;height:40px;fill:currentColor}
+    .ldsp-cdk-auth-title{font-size:14px;font-weight:700;color:var(--txt);margin-bottom:6px}
+    .ldsp-cdk-auth-tip{font-size:11px;color:var(--txt-mut);margin-bottom:16px;text-align:center;max-width:240px;line-height:1.5}
+    .ldsp-cdk-auth-btns{display:flex;gap:10px;align-items:center;width:100%;justify-content:center}
+    .ldsp-cdk-auth-btn{padding:6px 16px;background:var(--accent);color:#fff;border:none;border-radius:var(--r-sm);font-size:11px;font-weight:600;cursor:pointer;text-decoration:none;transition:all .2s;box-shadow:0 2px 8px rgba(107,140,239,.3)}
+    .ldsp-cdk-auth-btn:hover{background:var(--accent-light);transform:translateY(-1px)}
+    .ldsp-cdk-auth-btn-secondary{padding:6px 12px;background:var(--bg-el);color:var(--txt-sec);border:1px solid var(--border);border-radius:var(--r-sm);font-size:11px;font-weight:600;cursor:pointer;transition:all .2s}
+    .ldsp-cdk-auth-btn-secondary:hover{background:var(--bg-hover);color:var(--txt)}
+
+    .ldsp-cdk-body::-webkit-scrollbar{width:4px}
+    .ldsp-cdk-body::-webkit-scrollbar-thumb{background:var(--scrollbar);border-radius:2px}
+    .ldsp-cdk-body::-webkit-scrollbar-thumb:hover{background:var(--scrollbar-hover)}`;
             }
         };
         
@@ -5100,6 +5184,325 @@
             }
         }
 
+        // ==================== CDK 社区分数管理器 ====================
+        // 仅在 linux.do 站点可用，用于显示 cdk.linux.do 的社区分数
+        class CDKManager {
+            static CACHE_KEY = CONFIG.STORAGE_KEYS.cdkCache;
+            static CACHE_TIME_KEY = CONFIG.STORAGE_KEYS.cdkCacheTime;
+            static CACHE_TTL = CONFIG.CDK_CACHE_TTL; // 缓存 5 分钟
+            
+            constructor(panelBody, renderer) {
+                this.container = panelBody;
+                this.renderer = renderer;
+                this.overlay = null;
+                this._isLoading = false;
+            }
+            
+            init() {
+                this._createOverlay();
+            }
+
+            _createOverlay() {
+                this.overlay = document.createElement('div');
+                this.overlay.className = 'ldsp-cdk-overlay';
+                this.overlay.innerHTML = `
+                    <div class="ldsp-cdk-header">
+                        <div class="ldsp-cdk-title">🍔 CDK 社区分数</div>
+                        <div class="ldsp-cdk-header-actions">
+                            <a href="${CONFIG.CDK_URL}" target="_blank" class="ldsp-cdk-link">CDK 官网</a>
+                            <button class="ldsp-cdk-refresh" title="刷新">
+                                <svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                            </button>
+                            <div class="ldsp-cdk-close">×</div>
+                        </div>
+                    </div>
+                    <div class="ldsp-cdk-body">
+                        <div class="ldsp-cdk-loading">
+                            <div class="ldsp-spinner"></div>
+                            <div>加载中...</div>
+                        </div>
+                    </div>
+                `;
+                
+                if (this.container) {
+                    this.container.appendChild(this.overlay);
+                } else {
+                    document.body.appendChild(this.overlay);
+                }
+                this._bindEvents();
+            }
+
+            _bindEvents() {
+                const closeBtn = this.overlay.querySelector('.ldsp-cdk-close');
+                const refreshBtn = this.overlay.querySelector('.ldsp-cdk-refresh');
+                
+                closeBtn.addEventListener('click', () => this.hide());
+                refreshBtn.addEventListener('click', () => this._fetchData(true));
+                
+                // 点击遮罩关闭
+                this.overlay.addEventListener('click', (e) => {
+                    if (e.target === this.overlay) this.hide();
+                });
+                
+                // ESC 键关闭
+                this._escHandler = (e) => {
+                    if (e.key === 'Escape' && this.overlay && this.overlay.classList.contains('show')) {
+                        this.hide();
+                    }
+                };
+                document.addEventListener('keydown', this._escHandler);
+            }
+
+            show() {
+                if (!this.overlay) return;
+                this.overlay.classList.add('show');
+                // document.body.style.overflow = 'hidden'; // Removed: 面板内覆盖不需要锁定Body滚动
+                this._fetchData();
+            }
+
+            hide() {
+                if (!this.overlay) return;
+                this.overlay.classList.remove('show');
+                // document.body.style.overflow = ''; // Removed
+            }
+
+            _loadCache() {
+                try {
+                    const cached = GM_getValue(CDKManager.CACHE_KEY);
+                    const cacheTime = GM_getValue(CDKManager.CACHE_TIME_KEY);
+                    
+                    if (cached && cacheTime && (Date.now() - cacheTime < CDKManager.CACHE_TTL)) {
+                        return JSON.parse(cached);
+                    }
+                } catch (e) {
+                    Logger.warn('[CDKManager] Cache load error:', e);
+                }
+                return null;
+            }
+
+            _saveCache(data) {
+                try {
+                    GM_setValue(CDKManager.CACHE_KEY, JSON.stringify(data));
+                    GM_setValue(CDKManager.CACHE_TIME_KEY, Date.now());
+                } catch (e) {
+                    Logger.warn('[CDKManager] Cache save error:', e);
+                }
+            }
+
+            async _fetchData(forceRefresh = false) {
+                if (this._isLoading) return;
+                
+                const body = this.overlay.querySelector('.ldsp-cdk-body');
+                if (!body) return;
+
+                // 如果不是强制刷新，先尝试加载缓存
+                if (!forceRefresh) {
+                    const cached = this._loadCache();
+                    if (cached) {
+                        this._renderContent(cached);
+                        return;
+                    }
+                }
+                
+                this._isLoading = true;
+                body.innerHTML = `
+                    <div class="ldsp-cdk-loading">
+                        <div class="ldsp-spinner"></div>
+                        <div>${forceRefresh ? '刷新中...' : '加载中...'}</div>
+                    </div>
+                `;
+
+                // 先尝试直接 API 请求
+                try {
+                    const data = await this._fetchUserInfo();
+                    this._saveCache(data);
+                    this._renderContent(data);
+                    this._isLoading = false;
+                    return;
+                } catch (e) {
+                    Logger.log('[CDKManager] Direct fetch failed, trying bridge:', e.message);
+                }
+
+                // 兜底：通过 iframe bridge 获取数据
+                try {
+                    const data = await this._fetchViaBridge();
+                    this._saveCache(data);
+                    this._renderContent(data);
+                } catch (e) {
+                    Logger.error('[CDKManager] Bridge fetch also failed:', e);
+                    this._renderError();
+                } finally {
+                    this._isLoading = false;
+                }
+            }
+
+            _fetchUserInfo() {
+                return new Promise((resolve, reject) => {
+                    GM_xmlhttpRequest({
+                        method: 'GET',
+                        url: CONFIG.CDK_API,
+                        timeout: 15000,
+                        onload: (response) => {
+                            try {
+                                if (response.status === 200) {
+                                    const result = JSON.parse(response.responseText);
+                                    if (result && result.data) {
+                                        resolve(result.data);
+                                    } else {
+                                        reject(new Error('Invalid data format'));
+                                    }
+                                } else if (response.status === 401 || response.status === 403) {
+                                    reject(new Error('NOT_AUTHORIZED'));
+                                } else {
+                                    reject(new Error(`HTTP ${response.status}`));
+                                }
+                            } catch (e) {
+                                reject(e);
+                            }
+                        },
+                        onerror: () => reject(new Error('Network error')),
+                        ontimeout: () => reject(new Error('Request timeout'))
+                    });
+                });
+            }
+
+            // Iframe bridge 兜底方案（解决跨域 Cookie 问题）
+            _fetchViaBridge() {
+                return new Promise((resolve, reject) => {
+                    this._ensureBridge();
+                    
+                    const timeout = setTimeout(() => {
+                        this._bridgeWaiters = this._bridgeWaiters.filter(fn => fn !== done);
+                        reject(new Error('Bridge timeout'));
+                    }, 8000);
+                    
+                    const done = (data) => {
+                        clearTimeout(timeout);
+                        resolve(data);
+                    };
+                    
+                    if (!this._bridgeWaiters) {
+                        this._bridgeWaiters = [];
+                    }
+                    this._bridgeWaiters.push(done);
+                    
+                    // 向 iframe 发送请求
+                    try {
+                        this._bridgeFrame?.contentWindow?.postMessage(
+                            { type: 'ldsp-cdk-request' },
+                            'https://cdk.linux.do'
+                        );
+                    } catch (e) {
+                        reject(new Error('Failed to send message to bridge'));
+                    }
+                });
+            }
+
+            _ensureBridge() {
+                if (this._bridgeInited) return;
+                this._bridgeInited = true;
+                this._bridgeWaiters = [];
+                
+                // 监听来自 iframe 的消息
+                this._onBridgeMessage = this._onBridgeMessage.bind(this);
+                window.addEventListener('message', this._onBridgeMessage);
+                
+                // 创建隐藏的 iframe
+                const iframe = document.createElement('iframe');
+                iframe.style.cssText = 'width:0;height:0;opacity:0;position:absolute;border:0;pointer-events:none;';
+                iframe.src = CONFIG.CDK_URL;
+                document.body.appendChild(iframe);
+                this._bridgeFrame = iframe;
+            }
+
+            _onBridgeMessage(event) {
+                if (event.origin !== 'https://cdk.linux.do') return;
+                
+                const payload = event.data?.payload || event.data;
+                if (!payload?.data) return;
+                
+                // 触发所有等待的 Promise
+                const waiters = [...(this._bridgeWaiters || [])];
+                this._bridgeWaiters = [];
+                waiters.forEach(fn => fn(payload.data));
+            }
+
+            _renderContent(data) {
+                const body = this.overlay.querySelector('.ldsp-cdk-body');
+                if (!body) return;
+
+                // 信任等级名称映射
+                const trustLevelNames = {
+                    0: '新用户',
+                    1: '基本用户',
+                    2: '成员',
+                    3: '活跃用户',
+                    4: '领导者'
+                };
+                const trustName = trustLevelNames[data.trust_level] || `Lv.${data.trust_level}`;
+
+                body.innerHTML = `
+                    <div class="ldsp-cdk-content">
+                        <div class="ldsp-cdk-score-card">
+                            <div class="ldsp-cdk-score-value">${data.score || 0}</div>
+                            <div class="ldsp-cdk-score-label">CDK 分数</div>
+                            <div class="ldsp-cdk-score-desc">基于徽章计算的社区信誉分</div>
+                        </div>
+                        <div class="ldsp-cdk-info-card">
+                            <div class="ldsp-cdk-info-title">用户信息</div>
+                            <div class="ldsp-cdk-info-row">
+                                <span class="ldsp-cdk-info-label">用户名</span>
+                                <span class="ldsp-cdk-info-value">${Utils.escapeHtml(data.username || '-')}</span>
+                            </div>
+                            <div class="ldsp-cdk-info-row">
+                                <span class="ldsp-cdk-info-label">信任等级</span>
+                                <span class="ldsp-cdk-info-value">${trustName}</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            _renderError() {
+                const body = this.overlay.querySelector('.ldsp-cdk-body');
+                if (!body) return;
+
+                body.innerHTML = `
+                    <div class="ldsp-cdk-auth">
+                        <div class="ldsp-cdk-auth-icon">
+                            <svg viewBox="0 0 24 24" width="48" height="48">
+                                <path fill="currentColor" d="M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M12,5A3,3 0 0,1 15,8A3,3 0 0,1 12,11A3,3 0 0,1 9,8A3,3 0 0,1 12,5M17.13,17C15.92,18.85 14.11,20.24 12,20.92C9.89,20.24 8.08,18.85 6.87,17C6.53,16.5 6.24,16 6,15.47C6,13.82 8.71,12.47 12,12.47C15.29,12.47 18,13.79 18,15.47C17.76,16 17.47,16.5 17.13,17Z"/>
+                            </svg>
+                        </div>
+                        <div class="ldsp-cdk-auth-title">尚未登录 CDK</div>
+                        <div class="ldsp-cdk-auth-tip">需先完成授权才能查看社区分数</div>
+                        <div class="ldsp-cdk-auth-btns">
+                            <a href="${CONFIG.CDK_URL}" target="_blank" class="ldsp-cdk-auth-btn">前往登录 →</a>
+                            <button class="ldsp-cdk-auth-btn-secondary">刷新</button>
+                        </div>
+                    </div>
+                `;
+                
+                // 绑定刷新按钮
+                const refreshBtn = body.querySelector('.ldsp-cdk-auth-btn-secondary');
+                if (refreshBtn) {
+                    refreshBtn.addEventListener('click', () => this._fetchData(true));
+                }
+            }
+
+            destroy() {
+                if (this._escHandler) {
+                    document.removeEventListener('keydown', this._escHandler);
+                    this._escHandler = null;
+                }
+                if (this.overlay) {
+                    this.overlay.remove();
+                    this.overlay = null;
+                }
+            }
+        }
+
+
         // ==================== 关注/粉丝管理器 ====================
         class FollowManager {
             static CACHE_KEY = 'ldsp_follow_cache';
@@ -6072,108 +6475,6 @@
                 return overlay;
             }
 
-            // 渲染排行榜
-            renderLeaderboard(tab, isLoggedIn, isJoined) {
-                const tabs = [
-                    { id: 'daily', label: '📅 日榜' },
-                    { id: 'weekly', label: '📊 周榜' },
-                    { id: 'monthly', label: '📈 月榜' }
-                ];
-                this.panel.$.leaderboard.innerHTML = `
-                    <div class="ldsp-subtabs">${tabs.map(t => 
-                        `<div class="ldsp-subtab${tab === t.id ? ' active' : ''}" data-lb="${t.id}">${t.label}</div>`
-                    ).join('')}</div>
-                    <div class="ldsp-lb-content"></div>`;
-            }
-
-            renderLeaderboardLogin() {
-                return `<div class="ldsp-lb-login">
-                    <div class="ldsp-lb-login-icon">🔐</div>
-                    <div class="ldsp-lb-login-title">需要登录</div>
-                    <div class="ldsp-lb-login-desc">登录后可以：<br>☁️ 阅读数据云端同步<br>🏆 查看/加入排行榜</div>
-                    <button class="ldsp-lb-btn primary" id="ldsp-lb-login">🚀 立即登录</button>
-                    <div class="ldsp-privacy-note"><span>🔒</span><span>仅获取基本信息，用于数据同步</span></div>
-                </div>`;
-            }
-
-            renderLeaderboardJoin() {
-                return `<div class="ldsp-join-prompt">
-                    <div class="ldsp-join-prompt-icon">🏆</div>
-                    <div class="ldsp-join-prompt-title">加入阅读排行榜</div>
-                    <div class="ldsp-join-prompt-desc">加入后可以查看排行榜，你的阅读时间将与其他用户一起展示<br>这是完全可选的，随时可以退出</div>
-                    <button class="ldsp-lb-btn primary" id="ldsp-lb-join">✨ 加入排行榜</button>
-                    <div class="ldsp-privacy-note"><span>🔒</span><span>仅展示用户名和阅读时间</span></div>
-                </div>`;
-            }
-
-            renderLeaderboardData(data, userId, isJoined, type = 'daily') {
-                // 从 CONFIG.CACHE 动态读取更新频率并格式化
-                const formatInterval = (ms) => {
-                    const mins = Math.round(ms / 60000);
-                    if (mins < 60) return `每 ${mins} 分钟更新`;
-                    const hours = Math.round(mins / 60);
-                    return `每 ${hours} 小时更新`;
-                };
-                const rules = {
-                    daily: formatInterval(CONFIG.CACHE.LEADERBOARD_DAILY_TTL),
-                    weekly: formatInterval(CONFIG.CACHE.LEADERBOARD_WEEKLY_TTL),
-                    monthly: formatInterval(CONFIG.CACHE.LEADERBOARD_MONTHLY_TTL)
-                };
-
-                if (!data?.rankings?.length) {
-                    return `<div class="ldsp-lb-empty"><div class="ldsp-lb-empty-icon">📭</div><div class="ldsp-lb-empty-txt">暂无排行数据<br>成为第一个上榜的人吧！</div></div>`;
-                }
-
-                let html = `<div class="ldsp-lb-period"><button class="ldsp-lb-refresh" data-type="${type}" title="手动刷新">🔄</button>${data.period ? `📅 统计周期: <span>${data.period}</span>` : ''}<span class="ldsp-update-rule">🔄 ${rules[type]}</span></div>`;
-
-                if (data.myRank && isJoined) {
-                    // 显示用户排名（无论是否在榜内都显示真实排名）
-                    const rankDisplay = data.myRank.rank ? `#${data.myRank.rank}` : (data.myRank.rank_display || '--');
-                    const inTopClass = data.myRank.in_top ? '' : ' not-in-top';
-                    const topLabel = data.myRank.in_top ? '' : '<span class="ldsp-not-in-top-hint">（未入榜）</span>';
-                    html += `<div class="ldsp-my-rank${inTopClass}"><div><div class="ldsp-my-rank-lbl">我的排名${topLabel}</div><div class="ldsp-my-rank-val">${rankDisplay}</div></div><div class="ldsp-my-rank-time">${Utils.formatReadingTime(data.myRank.minutes)}</div></div>`;
-                }
-
-                html += '<div class="ldsp-rank-list">';
-                const siteBaseUrl = `https://${CURRENT_SITE.domain}`;
-                data.rankings.forEach((user, i) => {
-                    const rank = i + 1;
-                    const isMe = userId && user.user_id === userId;
-                    const cls = [rank <= 3 ? `t${rank}` : '', isMe ? 'me' : ''].filter(Boolean).join(' ');
-                    const icon = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : rank;
-                    const avatar = user.avatar_url ? (user.avatar_url.startsWith('http') ? user.avatar_url : `${siteBaseUrl}${user.avatar_url}`) : '';
-                    // XSS 防护：转义用户名和显示名称
-                    const safeUsername = Utils.escapeHtml(Utils.sanitize(user.username, 30));
-                    const safeName = Utils.escapeHtml(Utils.sanitize(user.name, 100));
-                    const hasName = safeName && safeName.trim();
-                    const nameHtml = hasName 
-                        ? `<span class="ldsp-rank-display-name">${safeName}</span><span class="ldsp-rank-username">@${safeUsername}</span>`
-                        : `<span class="ldsp-rank-name-only">${safeUsername}</span>`;
-
-                    html += `<div class="ldsp-rank-item ${cls}" style="animation-delay:${i * 30}ms">
-                        <div class="ldsp-rank-num">${rank <= 3 ? icon : rank}</div>
-                        ${avatar ? `<img class="ldsp-rank-avatar" src="${avatar}" alt="${safeUsername}" onerror="this.outerHTML='<div class=\\'ldsp-rank-avatar\\' style=\\'display:flex;align-items:center;justify-content:center;font-size:12px\\'>👤</div>'">` : '<div class="ldsp-rank-avatar" style="display:flex;align-items:center;justify-content:center;font-size:12px">👤</div>'}
-                        <div class="ldsp-rank-info">${nameHtml}${isMe ? '<span class="ldsp-rank-me-tag">(我)</span>' : ''}</div>
-                        <div class="ldsp-rank-time">${Utils.formatReadingTime(user.minutes)}</div>
-                    </div>`;
-                });
-                html += '</div>';
-
-                if (isJoined) {
-                    html += `<div style="margin-top:12px;text-align:center"><button class="ldsp-lb-btn danger" id="ldsp-lb-quit" style="font-size:9px;padding:4px 8px">退出排行榜</button></div>`;
-                }
-
-                return html;
-            }
-
-            renderLeaderboardLoading() {
-                return `<div class="ldsp-mini-loader"><div class="ldsp-mini-spin"></div><div class="ldsp-mini-txt">加载排行榜...</div></div>`;
-            }
-
-            renderLeaderboardError(msg) {
-                return `<div class="ldsp-lb-empty"><div class="ldsp-lb-empty-icon">❌</div><div class="ldsp-lb-empty-txt">${msg}</div><button class="ldsp-lb-btn secondary" id="ldsp-lb-retry" style="margin-top:12px">🔄 重试</button></div>`;
-            }
-
             // ========== 我的活动渲染 ==========
             renderActivity(activeSubTab) {
                 const tabs = [
@@ -7116,6 +7417,9 @@
                 if (CURRENT_SITE.domain === 'linux.do') {
                     this.ldcManager = new LDCManager(this.$.panelBody, this.renderer);
                     this.ldcManager.init();
+                    
+                    this.cdkManager = new CDKManager(this.$.panelBody, this.renderer);
+                    this.cdkManager.init();
                 }
                 
                 // 关注/粉丝管理器初始化（包含头像缓存）
@@ -7255,7 +7559,7 @@
                                     <div class="ldsp-user-actions collapsed">
                                         <div class="ldsp-action-btn ldsp-login-btn" data-clickable title="点击登录"><span class="ldsp-action-icon">🔑</span><span class="ldsp-action-text">点击登录</span></div>
                                         <div class="ldsp-action-btn ldsp-logout-btn" data-clickable title="注销登录"><span class="ldsp-action-icon">⏻</span><span class="ldsp-action-text">注销</span></div>
-                                        ${CURRENT_SITE.domain === 'linux.do' ? '<div class="ldsp-action-btn ldsp-ldc-btn" data-clickable title="Linux Do Credit"><span class="ldsp-action-icon">🍟</span><span class="ldsp-action-text">LDC</span></div>' : ''}
+                                        ${CURRENT_SITE.domain === 'linux.do' ? '<div class="ldsp-action-btn ldsp-ldc-btn" data-clickable title="Linux Do Credit"><span class="ldsp-action-icon">🍟</span><span class="ldsp-action-text">LDC</span></div><div class="ldsp-action-btn ldsp-cdk-btn" data-clickable title="CDK 社区分数"><span class="ldsp-action-icon">🍔</span><span class="ldsp-action-text">CDK</span></div>' : ''}
                                     </div>
                                     <div class="ldsp-user-actions-toggle" data-clickable title="展开更多按钮"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg><span class="ldsp-toggle-text">展开更多</span></div>
                                 </div>
@@ -7305,6 +7609,7 @@
                     userDisplayName: this.el.querySelector('.ldsp-user-display-name'),
                     userHandle: this.el.querySelector('.ldsp-user-handle'),
                     ldcBtn: this.el.querySelector('.ldsp-ldc-btn'),
+                    cdkBtn: this.el.querySelector('.ldsp-cdk-btn'),
                     logoutBtn: this.el.querySelector('.ldsp-logout-btn'),
                     loginBtn: this.el.querySelector('.ldsp-login-btn'),
                     actionsArea: this.el.querySelector('.ldsp-user-actions'),
@@ -7477,7 +7782,6 @@
                     this.leaderboard?.stopSync();
                     this.renderer.showToast('✅ 已退出登录');
                     this._updateLoginUI();
-                    this._renderLeaderboard();
                 };
                 // 注销按钮点击
                 this.$.logoutBtn?.addEventListener('click', (e) => {
@@ -7523,6 +7827,14 @@
                     e.stopPropagation();
                     if (this.ldcManager) {
                         this.ldcManager.show();
+                    }
+                });
+                
+                // CDK 社区分数按钮（仅 linux.do）
+                this.$.cdkBtn?.addEventListener('click', e => {
+                    e.stopPropagation();
+                    if (this.cdkManager) {
+                        this.cdkManager.show();
                     }
                 });
                 
@@ -7602,9 +7914,7 @@
                         if (tab.dataset.tab === 'reqs') {
                             this.animRing = true;
                             this.cachedReqs.length && this.renderer.renderReqs(this.cachedReqs);
-                        } else if (tab.dataset.tab === 'leaderboard') {
-                            this._renderLeaderboard();
-                        } else if (tab.dataset.tab === 'activity') {
+                        }  else if (tab.dataset.tab === 'activity') {
                             this._renderActivity();
                         }
                     });
@@ -7622,7 +7932,6 @@
                 // 监听 Token 过期事件，刷新 UI
                 window.addEventListener('ldsp_token_expired', () => {
                     this.renderer.showToast('⚠️ 登录已过期，请重新登录');
-                    this._renderLeaderboard();
                 });
                 
                 // 滚动条自动隐藏：滚动时显示，停止后隐藏
